@@ -582,29 +582,31 @@ public final class TransactionalBuffer implements AutoCloseable {
         LogMinerEvent prevEvent = null;
 
         int prevEventSize = transaction.events.size();
-        for (int i = 0; i < transaction.events.size();) {
-
-            final LogMinerEvent event = transaction.events.get(i);
-            LOGGER.trace("Processing event {}", event);
-
-            switch (event.getOperation()) {
-                case RowMapper.SELECT_LOB_LOCATOR:
-                    if (shouldMergeSelectLobLocatorEvent(transaction, i, (SelectLobLocatorEvent) event, prevEvent)) {
-                        continue;
-                    }
-                    break;
-                case RowMapper.INSERT:
-                case RowMapper.UPDATE:
-                    if (shouldMergeDmlEvent(transaction, i, (DmlEvent) event, prevEvent)) {
-                        continue;
-                    }
-                    break;
-            }
-
-            ++i;
-            prevEvent = event;
-            LOGGER.trace("Previous event is now {}", prevEvent);
-        }
+        /*
+         * for (int i = 0; i < transaction.events.size();) {
+         * 
+         * final LogMinerEvent event = transaction.events.get(i);
+         * LOGGER.trace("Processing event {}", event);
+         * 
+         * switch (event.getOperation()) {
+         * case RowMapper.SELECT_LOB_LOCATOR:
+         * if (shouldMergeSelectLobLocatorEvent(transaction, i, (SelectLobLocatorEvent) event, prevEvent)) {
+         * continue;
+         * }
+         * break;
+         * case RowMapper.INSERT:
+         * case RowMapper.UPDATE:
+         * if (shouldMergeDmlEvent(transaction, i, (DmlEvent) event, prevEvent)) {
+         * continue;
+         * }
+         * break;
+         * }
+         * 
+         * ++i;
+         * prevEvent = event;
+         * LOGGER.trace("Previous event is now {}", prevEvent);
+         * }
+         */
 
         if (transaction.events.size() != prevEventSize) {
             LOGGER.trace("Reconciled transaction {} from {} events to {}.", transaction.transactionId, prevEventSize, transaction.events.size());
