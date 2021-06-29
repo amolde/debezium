@@ -514,6 +514,7 @@ public final class TransactionalBuffer implements AutoCloseable {
         LogMinerEvent prevEvent = null;
 
         int prevEventSize = transaction.events.size();
+        /*
         for (int i = 0; i < transaction.events.size();) {
 
             final LogMinerEvent event = transaction.events.get(i);
@@ -537,6 +538,7 @@ public final class TransactionalBuffer implements AutoCloseable {
             prevEvent = event;
             LOGGER.trace("Previous event is now {}", prevEvent);
         }
+        */
 
         if (transaction.events.size() != prevEventSize) {
             LOGGER.trace("Reconciled transaction {} from {} events to {}.", transaction.transactionId, prevEventSize, transaction.events.size());
