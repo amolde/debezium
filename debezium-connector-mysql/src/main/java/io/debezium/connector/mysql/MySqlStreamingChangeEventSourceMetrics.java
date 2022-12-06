@@ -14,14 +14,15 @@ import com.github.shyiko.mysql.binlog.BinaryLogClient;
 import com.github.shyiko.mysql.binlog.jmx.BinaryLogClientStatistics;
 
 import io.debezium.connector.base.ChangeEventQueueMetrics;
-import io.debezium.pipeline.metrics.StreamingChangeEventSourceMetrics;
+import io.debezium.pipeline.metrics.DefaultStreamingChangeEventSourceMetrics;
 import io.debezium.pipeline.source.spi.EventMetadataProvider;
 import io.debezium.util.Collect;
 
 /**
  * @author Randall Hauch
  */
-public class MySqlStreamingChangeEventSourceMetrics extends StreamingChangeEventSourceMetrics implements MySqlStreamingChangeEventSourceMetricsMXBean {
+public class MySqlStreamingChangeEventSourceMetrics extends DefaultStreamingChangeEventSourceMetrics<MySqlPartition>
+        implements MySqlStreamingChangeEventSourceMetricsMXBean {
 
     private final BinaryLogClient client;
     private final BinaryLogClientStatistics stats;
@@ -150,11 +151,6 @@ public class MySqlStreamingChangeEventSourceMetrics extends StreamingChangeEvent
 
     public void setMilliSecondsBehindSource(long value) {
         milliSecondsBehindMaster.set(value);
-    }
-
-    @Override
-    public String[] getMonitoredTables() {
-        return schema.capturedTablesAsStringArray();
     }
 
     @Override

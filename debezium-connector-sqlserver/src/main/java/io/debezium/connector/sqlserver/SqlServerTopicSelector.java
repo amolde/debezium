@@ -12,12 +12,15 @@ import io.debezium.schema.TopicSelector;
  * The topic naming strategy based on connector configuration and table name
  *
  * @author Jiri Pechanec
- *
+ * @deprecated Use {@link io.debezium.schema.SchemaTopicNamingStrategy} instead.
  */
+@Deprecated
 public class SqlServerTopicSelector {
 
     public static TopicSelector<TableId> defaultSelector(SqlServerConnectorConfig connectorConfig) {
-        return TopicSelector.defaultSelector(connectorConfig,
-                (tableId, prefix, delimiter) -> String.join(delimiter, prefix, tableId.schema(), tableId.table()));
+
+        return TopicSelector.defaultSelector(
+                connectorConfig,
+                (tableId, prefix, delimiter) -> String.join(delimiter, prefix, tableId.catalog(), tableId.schema(), tableId.table()));
     }
 }

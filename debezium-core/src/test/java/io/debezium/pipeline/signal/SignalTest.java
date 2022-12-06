@@ -5,8 +5,9 @@
  */
 package io.debezium.pipeline.signal;
 
-import static org.fest.assertions.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
 
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.kafka.connect.data.Schema;
@@ -19,7 +20,7 @@ import io.debezium.config.Configuration;
 import io.debezium.connector.SourceInfoStructMaker;
 import io.debezium.data.Envelope;
 import io.debezium.junit.logging.LogInterceptor;
-import io.debezium.pipeline.signal.Signal.Payload;
+import io.debezium.pipeline.spi.Partition;
 import io.debezium.relational.TableId;
 
 /**
@@ -30,52 +31,48 @@ public class SignalTest {
 
     @Test
     public void shouldDetectSignal() {
-        final Signal signal = new Signal(config());
+        final Signal<TestPartition> signal = new Signal<>(config());
         assertThat(signal.isSignal(new TableId("dbo", null, "mytable"))).isFalse();
         assertThat(signal.isSignal(new TableId("debezium", null, "signal"))).isTrue();
     }
 
     @Test
     public void shouldExecuteLog() throws Exception {
-        final Signal signal = new Signal(config());
+        final Signal<TestPartition> signal = new Signal<>(config());
         final LogInterceptor log = new LogInterceptor(io.debezium.pipeline.signal.Log.class);
-        assertThat(signal.process("log1", "log", "{\"message\": \"signallog {}\"}")).isTrue();
+        assertThat(signal.process(new TestPartition(), "log1", "log", "{\"message\": \"signallog {}\"}")).isTrue();
         assertThat(log.containsMessage("signallog <none>")).isTrue();
     }
 
     @Test
     public void shouldIgnoreInvalidSignalType() throws Exception {
-        final Signal signal = new Signal(config());
-        assertThat(signal.process("log1", "log1", "{\"message\": \"signallog\"}")).isFalse();
+        final Signal<TestPartition> signal = new Signal<>(config());
+        assertThat(signal.process(new TestPartition(), "log1", "log1", "{\"message\": \"signallog\"}")).isFalse();
     }
 
     @Test
     public void shouldIgnoreUnparseableData() throws Exception {
-        final Signal signal = new Signal(config());
-        assertThat(signal.process("log1", "log", "{\"message: \"signallog\"}")).isFalse();
+        final Signal<TestPartition> signal = new Signal<>(config());
+        assertThat(signal.process(new TestPartition(), "log1", "log", "{\"message: \"signallog\"}")).isFalse();
     }
 
     @Test
     public void shouldRegisterAdditionalAction() throws Exception {
-        final Signal signal = new Signal(config());
+        final Signal<TestPartition> signal = new Signal<>(config());
 
         final AtomicInteger called = new AtomicInteger();
-        final Signal.Action testAction = new Signal.Action() {
-
-            @Override
-            public boolean arrived(Payload signalPayload) {
-                called.set(signalPayload.data.getInteger("v"));
-                return true;
-            }
+        final Signal.Action<TestPartition> testAction = signalPayload -> {
+            called.set(signalPayload.data.getInteger("v"));
+            return true;
         };
         signal.registerSignalAction("custom", testAction);
-        assertThat(signal.process("log1", "custom", "{\"v\": 5}")).isTrue();
+        assertThat(signal.process(new TestPartition(), "log1", "custom", "{\"v\": 5}")).isTrue();
         assertThat(called.intValue()).isEqualTo(5);
     }
 
     @Test
     public void shouldExecuteFromEnvelope() throws Exception {
-        final Signal signal = new Signal(config());
+        final Signal<TestPartition> signal = new Signal<>(config());
         final Schema afterSchema = SchemaBuilder.struct().name("signal")
                 .field("col1", Schema.OPTIONAL_STRING_SCHEMA)
                 .field("col2", Schema.OPTIONAL_STRING_SCHEMA)
@@ -91,22 +88,18 @@ public class SignalTest {
         record.put("col2", "custom");
         record.put("col3", "{\"v\": 5}");
         final AtomicInteger called = new AtomicInteger();
-        final Signal.Action testAction = new Signal.Action() {
-
-            @Override
-            public boolean arrived(Payload signalPayload) {
-                called.set(signalPayload.data.getInteger("v"));
-                return true;
-            }
+        final Signal.Action<TestPartition> testAction = signalPayload -> {
+            called.set(signalPayload.data.getInteger("v"));
+            return true;
         };
         signal.registerSignalAction("custom", testAction);
-        assertThat(signal.process(env.create(record, null, null), null)).isTrue();
+        assertThat(signal.process(new TestPartition(), env.create(record, null, null), null)).isTrue();
         assertThat(called.intValue()).isEqualTo(5);
     }
 
     @Test
     public void shouldIgnoreInvalidEnvelope() throws Exception {
-        final Signal signal = new Signal(config());
+        final Signal<TestPartition> signal = new Signal<>(config());
         final Schema afterSchema = SchemaBuilder.struct().name("signal")
                 .field("col1", Schema.OPTIONAL_STRING_SCHEMA)
                 .field("col2", Schema.OPTIONAL_STRING_SCHEMA)
@@ -120,25 +113,22 @@ public class SignalTest {
         record.put("col1", "log1");
         record.put("col2", "custom");
         final AtomicInteger called = new AtomicInteger();
-        final Signal.Action testAction = new Signal.Action() {
-
-            @Override
-            public boolean arrived(Payload signalPayload) {
-                called.set(signalPayload.data.getInteger("v"));
-                return true;
-            }
+        final Signal.Action<TestPartition> testAction = signalPayload -> {
+            called.set(signalPayload.data.getInteger("v"));
+            return true;
         };
         signal.registerSignalAction("custom", testAction);
 
-        assertThat(signal.process(env.create(record, null, null), null)).isFalse();
+        assertThat(signal.process(new TestPartition(), env.create(record, null, null), null)).isFalse();
         assertThat(called.intValue()).isEqualTo(0);
 
-        assertThat(signal.process(record, null)).isFalse();
+        assertThat(signal.process(new TestPartition(), record, null)).isFalse();
         assertThat(called.intValue()).isEqualTo(0);
     }
 
     protected CommonConnectorConfig config() {
-        return new CommonConnectorConfig(Configuration.create().with(CommonConnectorConfig.SIGNAL_DATA_COLLECTION, "debezium.signal").build(), "core", 0) {
+        return new CommonConnectorConfig(Configuration.create().with(CommonConnectorConfig.SIGNAL_DATA_COLLECTION, "debezium.signal")
+                .with(CommonConnectorConfig.TOPIC_PREFIX, "core").build(), 0) {
             @Override
             protected SourceInfoStructMaker<?> getSourceInfoStructMaker(Version version) {
                 return null;
@@ -154,5 +144,13 @@ public class SignalTest {
                 return null;
             }
         };
+    }
+
+    private static class TestPartition implements Partition {
+
+        @Override
+        public Map<String, String> getSourcePartition() {
+            throw new UnsupportedOperationException();
+        }
     }
 }

@@ -9,8 +9,12 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
@@ -28,6 +32,8 @@ import io.debezium.config.Configuration;
 import io.debezium.config.Field;
 import io.debezium.pipeline.ChangeEventSourceCoordinator;
 import io.debezium.pipeline.spi.OffsetContext;
+import io.debezium.pipeline.spi.Offsets;
+import io.debezium.pipeline.spi.Partition;
 import io.debezium.util.Clock;
 import io.debezium.util.ElapsedTimeStrategy;
 import io.debezium.util.Metronome;
@@ -39,11 +45,11 @@ import io.debezium.util.Strings;
  *
  * @author Gunnar Morling
  */
-public abstract class BaseSourceTask<O extends OffsetContext> extends SourceTask {
+public abstract class BaseSourceTask<P extends Partition, O extends OffsetContext> extends SourceTask {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(BaseSourceTask.class);
-    private static final long INITIAL_POLL_PERIOD_IN_MILLIS = TimeUnit.SECONDS.toMillis(5);
-    private static final long MAX_POLL_PERIOD_IN_MILLIS = TimeUnit.HOURS.toMillis(1);
+    private static final Duration INITIAL_POLL_PERIOD_IN_MILLIS = Duration.ofMillis(TimeUnit.SECONDS.toMillis(5));
+    private static final Duration MAX_POLL_PERIOD_IN_MILLIS = Duration.ofMillis(TimeUnit.HOURS.toMillis(1));
 
     protected static enum State {
         RUNNING,
@@ -68,14 +74,14 @@ public abstract class BaseSourceTask<O extends OffsetContext> extends SourceTask
      * The change event source coordinator for those connectors adhering to the new
      * framework structure, {@code null} for legacy-style connectors.
      */
-    private ChangeEventSourceCoordinator<O> coordinator;
+    private ChangeEventSourceCoordinator<P, O> coordinator;
 
     /**
-     * The latest offset that has been acknowledged by the Kafka producer. Will be
+     * The latest offsets that have been acknowledged by the Kafka producer. Will be
      * acknowledged with the source database in {@link BaseSourceTask#commit()}
      * (which may be a no-op depending on the connector).
      */
-    private volatile Map<String, ?> lastOffset;
+    private final Map<Map<String, ?>, Map<String, ?>> lastOffsets = new HashMap<>();
 
     private Duration retriableRestartWait;
 
@@ -83,10 +89,10 @@ public abstract class BaseSourceTask<O extends OffsetContext> extends SourceTask
     private final Clock clock = Clock.system();
 
     @SingleThreadAccess("polling thread")
-    private long recordCounter = 0L;
+    private Instant previousOutputInstant;
 
     @SingleThreadAccess("polling thread")
-    private Instant previousOutputInstant;
+    private int previousOutputBatchSize;
 
     protected BaseSourceTask() {
         // Use exponential delay to log the progress frequently at first, but the quickly tapering off to once an hour...
@@ -141,7 +147,7 @@ public abstract class BaseSourceTask<O extends OffsetContext> extends SourceTask
      *            the task configuration; implementations should wrap it in a dedicated implementation of
      *            {@link CommonConnectorConfig} and work with typed access to configuration properties that way
      */
-    protected abstract ChangeEventSourceCoordinator<O> start(Configuration config);
+    protected abstract ChangeEventSourceCoordinator<P, O> start(Configuration config);
 
     @Override
     public final List<SourceRecord> poll() throws InterruptedException {
@@ -167,24 +173,42 @@ public abstract class BaseSourceTask<O extends OffsetContext> extends SourceTask
         }
     }
 
-    void logStatistics(final List<SourceRecord> records) {
+    protected void logStatistics(final List<SourceRecord> records) {
         if (records == null || !LOGGER.isInfoEnabled()) {
             return;
         }
         int batchSize = records.size();
-        recordCounter += batchSize;
+
         if (batchSize > 0) {
+            // We want to log the number of records per topic...
+            if (LOGGER.isDebugEnabled()) {
+                final Map<String, Integer> topicCounts = new LinkedHashMap<>();
+                records.forEach(r -> topicCounts.merge(r.topic(), 1, Integer::sum));
+                for (Map.Entry<String, Integer> topicCount : topicCounts.entrySet()) {
+                    LOGGER.debug("Sending {} records to topic {}", topicCount.getValue(), topicCount.getKey());
+                }
+            }
+
             SourceRecord lastRecord = records.get(batchSize - 1);
-            lastOffset = lastRecord.sourceOffset();
+            updateLastOffset(lastRecord.sourcePartition(), lastRecord.sourceOffset());
+            previousOutputBatchSize += batchSize;
             if (pollOutputDelay.hasElapsed()) {
                 // We want to record the status ...
                 final Instant currentTime = clock.currentTime();
-                LOGGER.info("{} records sent during previous {}, last recorded offset: {}", recordCounter,
-                        Strings.duration(Duration.between(previousOutputInstant, currentTime).toMillis()), lastOffset);
-                recordCounter = 0;
+                LOGGER.info("{} records sent during previous {}, last recorded offset of {} partition is {}", previousOutputBatchSize,
+                        Strings.duration(Duration.between(previousOutputInstant, currentTime).toMillis()),
+                        lastRecord.sourcePartition(), lastRecord.sourceOffset());
+
                 previousOutputInstant = currentTime;
+                previousOutputBatchSize = 0;
             }
         }
+    }
+
+    private void updateLastOffset(Map<String, ?> partition, Map<String, ?> lastOffset) {
+        stateLock.lock();
+        lastOffsets.put(partition, lastOffset);
+        stateLock.unlock();
     }
 
     /**
@@ -267,7 +291,7 @@ public abstract class BaseSourceTask<O extends OffsetContext> extends SourceTask
     public void commitRecord(SourceRecord record) throws InterruptedException {
         Map<String, ?> currentOffset = record.sourceOffset();
         if (currentOffset != null) {
-            this.lastOffset = currentOffset;
+            updateLastOffset(record.sourcePartition(), currentOffset);
         }
     }
 
@@ -277,8 +301,15 @@ public abstract class BaseSourceTask<O extends OffsetContext> extends SourceTask
 
         if (locked) {
             try {
-                if (coordinator != null && lastOffset != null) {
-                    coordinator.commitOffset(lastOffset);
+                if (coordinator != null) {
+                    Iterator<Map<String, ?>> iterator = lastOffsets.keySet().iterator();
+                    while (iterator.hasNext()) {
+                        Map<String, ?> partition = iterator.next();
+                        Map<String, ?> lastOffset = lastOffsets.get(partition);
+
+                        coordinator.commitOffset(partition, lastOffset);
+                        iterator.remove();
+                    }
                 }
             }
             finally {
@@ -296,28 +327,28 @@ public abstract class BaseSourceTask<O extends OffsetContext> extends SourceTask
     protected abstract Iterable<Field> getAllConfigurationFields();
 
     /**
-     * Loads the connector's persistent offset (if present) via the given loader.
+     * Loads the connector's persistent offsets (if present) via the given loader.
      */
-    protected O getPreviousOffset(OffsetContext.Loader<O> loader) {
-        Map<String, ?> partition = loader.getPartition();
+    protected Offsets<P, O> getPreviousOffsets(Partition.Provider<P> provider, OffsetContext.Loader<O> loader) {
+        Set<P> partitions = provider.getPartitions();
+        OffsetReader<P, O, OffsetContext.Loader<O>> reader = new OffsetReader<>(
+                context.offsetStorageReader(), loader);
+        Map<P, O> offsets = reader.offsets(partitions);
 
-        if (lastOffset != null) {
-            O offsetContext = loader.load(lastOffset);
-            LOGGER.info("Found previous offset after restart {}", offsetContext);
-            return offsetContext;
+        boolean found = false;
+        for (P partition : partitions) {
+            O offset = offsets.get(partition);
+
+            if (offset != null) {
+                found = true;
+                LOGGER.info("Found previous partition offset {}: {}", partition, offset.getOffset());
+            }
         }
 
-        Map<String, Object> previousOffset = context.offsetStorageReader()
-                .offsets(Collections.singleton(partition))
-                .get(partition);
+        if (!found) {
+            LOGGER.info("No previous offsets found");
+        }
 
-        if (previousOffset != null) {
-            O offsetContext = loader.load(previousOffset);
-            LOGGER.info("Found previous offset {}", offsetContext);
-            return offsetContext;
-        }
-        else {
-            return null;
-        }
+        return Offsets.of(offsets);
     }
 }

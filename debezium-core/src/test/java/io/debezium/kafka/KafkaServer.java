@@ -19,7 +19,6 @@ import io.debezium.annotation.ThreadSafe;
 import io.debezium.util.IoUtil;
 
 import kafka.admin.RackAwareMode;
-import kafka.log.Log;
 import kafka.server.KafkaConfig;
 import kafka.zk.AdminZkClient;
 import scala.collection.JavaConverters;
@@ -102,7 +101,7 @@ public class KafkaServer {
     }
 
     /**
-     * Set a configuration property. Several key properties that deal with Zookeeper, the host name, and the broker ID,
+     * Set a configuration property. Several key properties that deal with Zookeeper, and the broker ID,
      * may not be set via this method and are ignored since they are controlled elsewhere in this instance.
      *
      * @param name the property name; may not be null
@@ -115,8 +114,7 @@ public class KafkaServer {
             throw new IllegalStateException("Unable to change the properties when already running");
         }
         if (!KafkaConfig.ZkConnectProp().equalsIgnoreCase(name)
-                && !KafkaConfig.BrokerIdProp().equalsIgnoreCase(name)
-                && !KafkaConfig.HostNameProp().equalsIgnoreCase(name)) {
+                && !KafkaConfig.BrokerIdProp().equalsIgnoreCase(name)) {
             this.config.setProperty(name, value);
         }
         return this;
@@ -162,7 +160,6 @@ public class KafkaServer {
         runningConfig.putAll(config);
         runningConfig.setProperty(KafkaConfig.ZkConnectProp(), zookeeperConnection());
         runningConfig.setProperty(KafkaConfig.BrokerIdProp(), Integer.toString(brokerId));
-        runningConfig.setProperty(KafkaConfig.HostNameProp(), "localhost");
         runningConfig.setProperty(KafkaConfig.AutoCreateTopicsEnableProp(), String.valueOf(config.getOrDefault(KafkaConfig.AutoCreateTopicsEnableProp(), Boolean.TRUE)));
         // 1 partition for the __consumer_offsets_ topic should be enough
         runningConfig.setProperty(KafkaConfig.OffsetsTopicPartitionsProp(), Integer.toString(1));
@@ -209,14 +206,14 @@ public class KafkaServer {
 
         // Determine the port and adjust the configuration ...
         port = desiredPort > 0 ? desiredPort : IoUtil.getAvailablePort();
-        config.setProperty(KafkaConfig.PortProp(), Integer.toString(port));
+        config.setProperty(KafkaConfig.ListenersProp(), "PLAINTEXT://localhost:" + port);
         // config.setProperty("metadata.broker.list", getConnection());
 
         // Start the server ...
         try {
             LOGGER.debug("Starting Kafka broker {} at {} with storage in {}", brokerId, getConnection(), logsDir.getAbsolutePath());
             server = new kafka.server.KafkaServer(new KafkaConfig(config), Time.SYSTEM, scala.Option.apply(null),
-                    new scala.collection.mutable.ArraySeq<>(0));
+                    false);
             server.startup();
             LOGGER.info("Started Kafka server {} at {} with storage in {}", brokerId, getConnection(), logsDir.getAbsolutePath());
             adminZkClient = new AdminZkClient(server.zkClient());
@@ -240,7 +237,8 @@ public class KafkaServer {
                 if (deleteLogs) {
                     // as of 0.10.1.1 if logs are not deleted explicitly, there are open File Handles left on .timeindex files
                     // at least on Windows courtesy of the TimeIndex.scala class
-                    JavaConverters.asJavaIterableConverter(server.logManager().allLogs()).asJava().forEach(Log::delete);
+                    // NOTE: specifically do not use method reference to ensure compatibility between Kafka 3.0.x and 3.1+
+                    JavaConverters.asJavaIterableConverter(server.logManager().allLogs()).asJava().forEach(l -> l.delete());
                 }
                 LOGGER.info("Stopped Kafka server {} at {}", brokerId, getConnection());
             }
@@ -309,7 +307,7 @@ public class KafkaServer {
      */
     public void createTopic(String topic, int numPartitions, int replicationFactor) {
         RackAwareMode rackAwareMode = null;
-        getAdminZkClient().createTopic(topic, numPartitions, replicationFactor, new Properties(), rackAwareMode);
+        getAdminZkClient().createTopic(topic, numPartitions, replicationFactor, new Properties(), rackAwareMode, false);
     }
 
     /**

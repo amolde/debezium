@@ -28,7 +28,6 @@ public class ColumnDefinitionParserListener extends BaseParserListener {
     private final DataTypeResolver dataTypeResolver;
     private final TableEditor tableEditor;
     private final List<ParseTreeListener> listeners;
-
     private ColumnEditor columnEditor;
 
     ColumnDefinitionParserListener(final TableEditor tableEditor, final ColumnEditor columnEditor, OracleDdlParser parser,
@@ -51,6 +50,9 @@ public class ColumnDefinitionParserListener extends BaseParserListener {
     @Override
     public void enterColumn_definition(PlSqlParser.Column_definitionContext ctx) {
         resolveColumnDataType(ctx);
+        if (ctx.DEFAULT() != null) {
+            columnEditor.defaultValueExpression(ctx.column_default_value().getText());
+        }
         super.enterColumn_definition(ctx);
     }
 
@@ -67,6 +69,9 @@ public class ColumnDefinitionParserListener extends BaseParserListener {
     @Override
     public void enterModify_col_properties(PlSqlParser.Modify_col_propertiesContext ctx) {
         resolveColumnDataType(ctx);
+        if (ctx.DEFAULT() != null) {
+            columnEditor.defaultValueExpression(ctx.column_default_value().getText());
+        }
         super.enterModify_col_properties(ctx);
     }
 
@@ -74,24 +79,17 @@ public class ColumnDefinitionParserListener extends BaseParserListener {
     private void resolveColumnDataType(PlSqlParser.Column_definitionContext ctx) {
         columnEditor.name(getColumnName(ctx.column_name()));
 
+        boolean hasNotNullConstraint = ctx.inline_constraint().stream().anyMatch(c -> c.NOT() != null);
+        columnEditor.optional(!hasNotNullConstraint);
+
         if (ctx.datatype() == null) {
-            if (ctx.type_name() != null && "\"MDSYS\".\"SDO_GEOMETRY\"".equalsIgnoreCase(ctx.type_name().getText())) {
+            if (ctx.type_name() != null && "MDSYS.SDO_GEOMETRY".equalsIgnoreCase(ctx.type_name().getText().replace("\"", ""))) {
                 columnEditor.jdbcType(Types.STRUCT).type("MDSYS.SDO_GEOMETRY");
             }
         }
         else {
             resolveColumnDataType(ctx.datatype());
-
-            // todo move to enterExpression and apply type conversion
-            if (ctx.DEFAULT() != null) {
-                String defaultValue = ctx.expression().getText();
-                columnEditor.defaultValue(defaultValue);
-            }
         }
-
-        boolean hasNotNullConstraint = ctx.inline_constraint().stream().anyMatch(c -> c.NOT() != null);
-        // todo move to nonNull
-        columnEditor.optional(!hasNotNullConstraint);
     }
 
     private void resolveColumnDataType(PlSqlParser.Modify_col_propertiesContext ctx) {
@@ -110,12 +108,13 @@ public class ColumnDefinitionParserListener extends BaseParserListener {
     }
 
     private void resolveColumnDataType(PlSqlParser.DatatypeContext ctx) {
-        PlSqlParser.Precision_partContext precisionPart = null;
-        if (ctx != null) {
-            precisionPart = ctx.precision_part();
+        // If the context is null, there is nothing this method can resolve and it is safe to return
+        if (ctx == null) {
+            return;
         }
 
-        if (ctx != null && ctx.native_datatype_element() != null) {
+        if (ctx.native_datatype_element() != null) {
+            PlSqlParser.Precision_partContext precisionPart = ctx.precision_part();
             if (ctx.native_datatype_element().INT() != null
                     || ctx.native_datatype_element().INTEGER() != null
                     || ctx.native_datatype_element().SMALLINT() != null
@@ -200,12 +199,20 @@ public class ColumnDefinitionParserListener extends BaseParserListener {
                         .jdbcType(Types.CHAR)
                         .type("CHAR")
                         .length(1);
+
+                if (precisionPart != null) {
+                    setPrecision(precisionPart, columnEditor);
+                }
             }
             else if (ctx.native_datatype_element().NCHAR() != null) {
                 columnEditor
                         .jdbcType(Types.NCHAR)
                         .type("NCHAR")
                         .length(1);
+
+                if (precisionPart != null) {
+                    setPrecision(precisionPart, columnEditor);
+                }
             }
             else if (ctx.native_datatype_element().BINARY_FLOAT() != null) {
                 columnEditor
@@ -246,7 +253,13 @@ public class ColumnDefinitionParserListener extends BaseParserListener {
                     columnEditor.length(38);
                 }
                 else {
-                    setPrecision(precisionPart, columnEditor);
+                    if (precisionPart.ASTERISK() != null) {
+                        // when asterisk is used, explicitly set precision to 38
+                        columnEditor.length(38);
+                    }
+                    else {
+                        setPrecision(precisionPart, columnEditor);
+                    }
                     setScale(precisionPart, columnEditor);
                 }
             }
@@ -260,8 +273,35 @@ public class ColumnDefinitionParserListener extends BaseParserListener {
                         .jdbcType(Types.CLOB)
                         .type("CLOB");
             }
+            else if (ctx.native_datatype_element().NCLOB() != null) {
+                columnEditor
+                        .jdbcType(Types.NCLOB)
+                        .type("NCLOB");
+            }
+            else if (ctx.native_datatype_element().RAW() != null) {
+                columnEditor
+                        .jdbcType(OracleTypes.RAW)
+                        .type("RAW");
+
+                setPrecision(precisionPart, columnEditor);
+            }
+            else if (ctx.native_datatype_element().SDO_GEOMETRY() != null) {
+                // Allows the registration of new SDO_GEOMETRY columns via an CREATE/ALTER TABLE
+                // This is the same registration of the column that is resolved during JDBC metadata inspection.
+                columnEditor
+                        .jdbcType(OracleTypes.OTHER)
+                        .type("SDO_GEOMETRY")
+                        .length(1);
+            }
+            else if (ctx.native_datatype_element().ROWID() != null) {
+                columnEditor
+                        .jdbcType(Types.VARCHAR)
+                        .type("ROWID");
+            }
             else {
-                throw new IllegalArgumentException("Unsupported column type: " + ctx.native_datatype_element().getText());
+                columnEditor
+                        .jdbcType(OracleTypes.OTHER)
+                        .type(ctx.native_datatype_element().getText());
             }
         }
         else if (ctx.INTERVAL() != null
@@ -298,7 +338,7 @@ public class ColumnDefinitionParserListener extends BaseParserListener {
             }
         }
         else {
-            throw new IllegalArgumentException("Unsupported column type: " + ctx.getText());
+            columnEditor.jdbcType(OracleTypes.OTHER).type(ctx.getText());
         }
     }
 

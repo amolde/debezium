@@ -17,21 +17,23 @@ import io.debezium.pipeline.source.spi.SnapshotChangeEventSource;
 import io.debezium.pipeline.source.spi.SnapshotProgressListener;
 import io.debezium.pipeline.source.spi.StreamingChangeEventSource;
 import io.debezium.relational.TableId;
-import io.debezium.schema.DataCollectionId;
+import io.debezium.spi.schema.DataCollectionId;
 import io.debezium.util.Clock;
+import io.debezium.util.Strings;
 
-public class SqlServerChangeEventSourceFactory implements ChangeEventSourceFactory<SqlServerOffsetContext> {
+public class SqlServerChangeEventSourceFactory implements ChangeEventSourceFactory<SqlServerPartition, SqlServerOffsetContext> {
 
     private final SqlServerConnectorConfig configuration;
     private final SqlServerConnection dataConnection;
     private final SqlServerConnection metadataConnection;
     private final ErrorHandler errorHandler;
-    private final EventDispatcher<TableId> dispatcher;
+    private final EventDispatcher<SqlServerPartition, TableId> dispatcher;
     private final Clock clock;
     private final SqlServerDatabaseSchema schema;
 
     public SqlServerChangeEventSourceFactory(SqlServerConnectorConfig configuration, SqlServerConnection dataConnection, SqlServerConnection metadataConnection,
-                                             ErrorHandler errorHandler, EventDispatcher<TableId> dispatcher, Clock clock, SqlServerDatabaseSchema schema) {
+                                             ErrorHandler errorHandler, EventDispatcher<SqlServerPartition, TableId> dispatcher, Clock clock,
+                                             SqlServerDatabaseSchema schema) {
         this.configuration = configuration;
         this.dataConnection = dataConnection;
         this.metadataConnection = metadataConnection;
@@ -42,13 +44,13 @@ public class SqlServerChangeEventSourceFactory implements ChangeEventSourceFacto
     }
 
     @Override
-    public SnapshotChangeEventSource<SqlServerOffsetContext> getSnapshotChangeEventSource(SnapshotProgressListener snapshotProgressListener) {
+    public SnapshotChangeEventSource<SqlServerPartition, SqlServerOffsetContext> getSnapshotChangeEventSource(SnapshotProgressListener<SqlServerPartition> snapshotProgressListener) {
         return new SqlServerSnapshotChangeEventSource(configuration, dataConnection, schema, dispatcher, clock,
                 snapshotProgressListener);
     }
 
     @Override
-    public StreamingChangeEventSource<SqlServerOffsetContext> getStreamingChangeEventSource() {
+    public StreamingChangeEventSource<SqlServerPartition, SqlServerOffsetContext> getStreamingChangeEventSource() {
         return new SqlServerStreamingChangeEventSource(
                 configuration,
                 dataConnection,
@@ -60,13 +62,19 @@ public class SqlServerChangeEventSourceFactory implements ChangeEventSourceFacto
     }
 
     @Override
-    public Optional<IncrementalSnapshotChangeEventSource<? extends DataCollectionId>> getIncrementalSnapshotChangeEventSource(
-                                                                                                                              SqlServerOffsetContext offsetContext,
-                                                                                                                              SnapshotProgressListener snapshotProgressListener,
-                                                                                                                              DataChangeEventListener dataChangeEventListener) {
-        final SignalBasedIncrementalSnapshotChangeEventSource<TableId> incrementalSnapshotChangeEventSource = new SignalBasedIncrementalSnapshotChangeEventSource<TableId>(
+    public Optional<IncrementalSnapshotChangeEventSource<SqlServerPartition, ? extends DataCollectionId>> getIncrementalSnapshotChangeEventSource(
+                                                                                                                                                  SqlServerOffsetContext offsetContext,
+                                                                                                                                                  SnapshotProgressListener<SqlServerPartition> snapshotProgressListener,
+                                                                                                                                                  DataChangeEventListener<SqlServerPartition> dataChangeEventListener) {
+        // If no data collection id is provided, don't return an instance as the implementation requires
+        // that a signal data collection id be provided to work.
+        if (Strings.isNullOrEmpty(configuration.getSignalingDataCollectionId())) {
+            return Optional.empty();
+        }
+        final SignalBasedIncrementalSnapshotChangeEventSource<SqlServerPartition, TableId> incrementalSnapshotChangeEventSource = new SignalBasedIncrementalSnapshotChangeEventSource<>(
                 configuration,
                 dataConnection,
+                dispatcher,
                 schema,
                 clock,
                 snapshotProgressListener,

@@ -26,10 +26,19 @@ public class KafkaTestConfigSource extends TestConfigSource {
         kafkaConfig.put("debezium.source." + StandaloneConfig.OFFSET_STORAGE_FILE_FILENAME_CONFIG, OFFSET_STORE_PATH.toAbsolutePath().toString());
 
         kafkaConfig.put("debezium.source.offset.flush.interval.ms", "0");
-        kafkaConfig.put("debezium.source.database.server.name", "testc");
+        kafkaConfig.put("debezium.source.topic.prefix", "testc");
         kafkaConfig.put("debezium.source.schema.include.list", "inventory");
         kafkaConfig.put("debezium.source.table.include.list", "inventory.customers");
+        // DBZ-5105
+        kafkaConfig.put("debezium.sink.kafka.producer.ssl.endpoint.identification.algorithm", "");
 
         config = kafkaConfig;
+    }
+
+    @Override
+    public int getOrdinal() {
+        // Configuration property precedence is based on ordinal values and since we override the
+        // properties in TestConfigSource, we should give this a higher priority.
+        return super.getOrdinal() + 1;
     }
 }

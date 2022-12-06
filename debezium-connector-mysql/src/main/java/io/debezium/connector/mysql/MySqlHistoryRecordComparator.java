@@ -20,8 +20,8 @@ final class MySqlHistoryRecordComparator extends HistoryRecordComparator {
     }
 
     /**
-     * Determine whether the first {@link #offset() offset} is at or before the point in time of the second
-     * offset, where the offsets are given in JSON representation of the maps returned by {@link #offset()}.
+     * Determine whether the first offset is at or before the point in time of the second
+     * offset, where the offsets are given in JSON representation of the maps returned by {@link MySqlOffsetContext#getOffset()}.
      * <p>
      * This logic makes a significant assumption: once a MySQL server/cluster has GTIDs enabled, they will
      * never be disabled. This is the only way to compare a position with a GTID to a position without a GTID,
@@ -33,8 +33,6 @@ final class MySqlHistoryRecordComparator extends HistoryRecordComparator {
      * @param recorded the position obtained from recorded history; never null
      * @param desired the desired position that we want to obtain, which should be after some recorded positions,
      *            at some recorded positions, and before other recorded positions; never null
-     * @param gtidFilter the predicate function that will return {@code true} if a GTID source is to be included, or
-     *            {@code false} if a GTID source is to be excluded; may be null if no filtering is to be done
      * @return {@code true} if the recorded position is at or before the desired position; or {@code false} otherwise
      */
     @Override
@@ -99,12 +97,10 @@ final class MySqlHistoryRecordComparator extends HistoryRecordComparator {
             return recordedTimestamp <= desiredTimestamp;
         }
 
-        // First compare the MySQL binlog filenames that include the numeric suffix and therefore are lexicographically
-        // comparable ...
-        String recordedFilename = recorded.getString(SourceInfo.BINLOG_FILENAME_OFFSET_KEY);
-        String desiredFilename = desired.getString(SourceInfo.BINLOG_FILENAME_OFFSET_KEY);
-        assert recordedFilename != null;
-        int diff = recordedFilename.compareToIgnoreCase(desiredFilename);
+        // First compare the MySQL binlog filenames
+        BinlogFilename recordedFilename = BinlogFilename.of(recorded.getString(SourceInfo.BINLOG_FILENAME_OFFSET_KEY));
+        BinlogFilename desiredFilename = BinlogFilename.of(desired.getString(SourceInfo.BINLOG_FILENAME_OFFSET_KEY));
+        int diff = recordedFilename.compareTo(desiredFilename);
         if (diff > 0) {
             return false;
         }
@@ -144,5 +140,48 @@ final class MySqlHistoryRecordComparator extends HistoryRecordComparator {
 
         // The binlog coordinates are the same ...
         return true;
+    }
+
+    private static class BinlogFilename implements Comparable<BinlogFilename> {
+        final private String baseName;
+        final private long extension;
+
+        private BinlogFilename(String baseName, long extension) {
+            this.baseName = baseName;
+            this.extension = extension;
+        }
+
+        public static BinlogFilename of(String filename) {
+            int index = filename.lastIndexOf(".");
+            if (index == -1) {
+                throw new IllegalArgumentException("Filename does not have an extension: " + filename);
+            }
+
+            String baseFilename = filename.substring(0, index);
+            String stringExtension = filename.substring(index + 1);
+
+            long extension;
+            try {
+                extension = Long.parseLong(stringExtension);
+            }
+            catch (NumberFormatException e) {
+                throw new IllegalArgumentException("Can't parse binlog filename extension: " + filename, e);
+            }
+
+            return new BinlogFilename(baseFilename, extension);
+        }
+
+        @Override
+        public String toString() {
+            return "BinlogFilename [baseName=" + baseName + ", extension=" + extension + "]";
+        }
+
+        @Override
+        public int compareTo(BinlogFilename other) {
+            if (!baseName.equals(other.baseName)) {
+                throw new IllegalArgumentException("Can't compare binlog filenames with different base names");
+            }
+            return Long.compare(extension, other.extension);
+        }
     }
 }

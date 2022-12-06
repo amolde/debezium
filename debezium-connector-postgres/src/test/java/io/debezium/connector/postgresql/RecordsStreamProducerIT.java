@@ -12,18 +12,16 @@ import static io.debezium.connector.postgresql.TestHelper.TYPE_NAME_PARAMETER_KE
 import static io.debezium.connector.postgresql.TestHelper.TYPE_SCALE_PARAMETER_KEY;
 import static io.debezium.connector.postgresql.TestHelper.topicName;
 import static io.debezium.connector.postgresql.junit.SkipWhenDecoderPluginNameIs.DecoderPluginName.PGOUTPUT;
-import static io.debezium.connector.postgresql.junit.SkipWhenDecoderPluginNameIsNot.DecoderPluginName.WAL2JSON;
 import static junit.framework.TestCase.assertEquals;
 import static junit.framework.TestCase.assertTrue;
-import static org.fest.assertions.Assertions.assertThat;
-import static org.fest.assertions.Fail.fail;
-import static org.fest.assertions.MapAssert.entry;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.entry;
+import static org.assertj.core.api.Assertions.fail;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 
 import java.math.BigDecimal;
 import java.time.Instant;
-import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -31,7 +29,6 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -51,17 +48,19 @@ import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.header.Header;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.apache.kafka.connect.storage.MemoryOffsetBackingStore;
+import org.assertj.core.api.Assertions;
 import org.awaitility.Awaitility;
 import org.awaitility.core.ConditionTimeoutException;
-import org.fest.assertions.Assertions;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TestRule;
+import org.postgresql.util.PSQLException;
 
 import io.debezium.config.CommonConnectorConfig;
 import io.debezium.config.CommonConnectorConfig.BinaryHandlingMode;
 import io.debezium.config.Configuration;
+import io.debezium.connector.SnapshotRecord;
 import io.debezium.connector.postgresql.PostgresConnectorConfig.IntervalHandlingMode;
 import io.debezium.connector.postgresql.PostgresConnectorConfig.SchemaRefreshMode;
 import io.debezium.connector.postgresql.PostgresConnectorConfig.SnapshotMode;
@@ -85,13 +84,14 @@ import io.debezium.jdbc.JdbcValueConverters.DecimalMode;
 import io.debezium.jdbc.TemporalPrecisionMode;
 import io.debezium.junit.ConditionalFail;
 import io.debezium.junit.EqualityCheck;
-import io.debezium.junit.ShouldFailWhen;
 import io.debezium.junit.SkipWhenDatabaseVersion;
 import io.debezium.junit.logging.LogInterceptor;
 import io.debezium.relational.RelationalChangeRecordEmitter;
 import io.debezium.relational.RelationalDatabaseConnectorConfig.DecimalHandlingMode;
 import io.debezium.relational.Table;
 import io.debezium.relational.TableId;
+import io.debezium.relational.Tables;
+import io.debezium.relational.Tables.TableFilter;
 import io.debezium.time.MicroTime;
 import io.debezium.time.MicroTimestamp;
 import io.debezium.time.ZonedTime;
@@ -220,6 +220,21 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
     }
 
     @Test
+    @FixFor("DBZ-5014")
+    public void shouldReceiveDeletesWithInfinityDate() throws Exception {
+        Testing.Print.enable();
+        TestHelper.executeDDL("postgres_create_tables.ddl");
+        TestHelper.execute("ALTER TABLE time_table REPLICA IDENTITY FULL");
+        startConnector();
+
+        executeAndWait(INSERT_DATE_TIME_TYPES_STMT);
+
+        consumer = testConsumer(1);
+
+        assertDelete(DELETE_DATE_TIME_TYPES_STMT, 1, schemaAndValuesForDateTimeTypes());
+    }
+
+    @Test
     @FixFor("DBZ-1498")
     public void shouldReceiveChangesForIntervalAsString() throws Exception {
         TestHelper.executeDDL("postgres_create_tables.ddl");
@@ -241,6 +256,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
 
         startConnector(config -> config
                 .with(PostgresConnectorConfig.INCLUDE_UNKNOWN_DATATYPES, true)
+                .with(PostgresConnectorConfig.DROP_SLOT_ON_STOP, Boolean.FALSE)
                 .with(PostgresConnectorConfig.SCHEMA_EXCLUDE_LIST, "postgis"));
 
         TestHelper.execute("CREATE TABLE t0 (pk SERIAL, d INTEGER, PRIMARY KEY(pk));");
@@ -495,8 +511,6 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
     }
 
     @Test
-    @ShouldFailWhen(DecoderDifferences.AreQuotedIdentifiersUnsupported.class)
-    // TODO DBZ-493
     public void shouldReceiveChangesForInsertsWithQuotedNames() throws Exception {
         TestHelper.executeDDL("postgres_create_tables.ddl");
 
@@ -1034,6 +1048,82 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
     }
 
     @Test
+    @FixFor("DBZ-4137")
+    public void shouldReceiveNumericTypeAsDoubleWithNullDefaults() throws Exception {
+        TestHelper.execute(
+                "DROP TABLE IF EXISTS numeric_table_with_n_defaults;",
+                "CREATE TABLE numeric_table_with_n_defaults (\n" +
+                        "    r int4 NOT NULL,\n" +
+                        "    r_numeric numeric(19, 4) NULL DEFAULT NULL,\n" +
+                        "    r_int int4 NULL DEFAULT NULL);",
+                "ALTER TABLE numeric_table_with_n_defaults REPLICA IDENTITY FULL");
+
+        startConnector(config -> config.with(PostgresConnectorConfig.DECIMAL_HANDLING_MODE, DecimalHandlingMode.DOUBLE),
+                false);
+        consumer = testConsumer(1);
+
+        // INSERT
+        String statement = "INSERT INTO numeric_table_with_n_defaults (r) VALUES (1);";
+        assertInsert(
+                statement,
+                Arrays.asList(
+                        new SchemaAndValueField("r", Schema.INT32_SCHEMA, 1),
+                        new SchemaAndValueField("r_numeric",
+                                new SchemaBuilder(Schema.Type.FLOAT64)
+                                        .name(Schema.FLOAT64_SCHEMA.name())
+                                        .version(Schema.FLOAT64_SCHEMA.version())
+                                        .optional()
+                                        .defaultValue(null)
+                                        .build(),
+                                null),
+                        new SchemaAndValueField("r_int",
+                                new SchemaBuilder(Schema.Type.INT32)
+                                        .name(Schema.INT32_SCHEMA.name())
+                                        .version(Schema.INT32_SCHEMA.version())
+                                        .optional()
+                                        .defaultValue(null)
+                                        .build(),
+                                null)));
+    }
+
+    @Test
+    @FixFor("DBZ-4137")
+    public void shouldReceiveNumericTypeAsDoubleWithDefaults() throws Exception {
+        TestHelper.execute(
+                "DROP TABLE IF EXISTS numeric_table_with_defaults;",
+                "CREATE TABLE numeric_table_with_defaults (\n" +
+                        "    r int4 NOT NULL,\n" +
+                        "    r_numeric numeric(19, 4) NOT NULL DEFAULT 1,\n" +
+                        "    r_int int4 NOT NULL DEFAULT 2);",
+                "ALTER TABLE numeric_table_with_defaults REPLICA IDENTITY FULL");
+
+        startConnector(config -> config.with(PostgresConnectorConfig.DECIMAL_HANDLING_MODE, DecimalHandlingMode.DOUBLE),
+                false);
+        consumer = testConsumer(1);
+
+        // INSERT
+        String statement = "INSERT INTO numeric_table_with_defaults (r) VALUES (1);";
+        assertInsert(
+                statement,
+                Arrays.asList(
+                        new SchemaAndValueField("r", Schema.INT32_SCHEMA, 1),
+                        new SchemaAndValueField("r_numeric",
+                                new SchemaBuilder(Schema.Type.FLOAT64)
+                                        .name(Schema.FLOAT64_SCHEMA.name())
+                                        .version(Schema.FLOAT64_SCHEMA.version())
+                                        .defaultValue(1.0d)
+                                        .build(),
+                                1.0d),
+                        new SchemaAndValueField("r_int",
+                                new SchemaBuilder(Schema.Type.INT32)
+                                        .name(Schema.INT32_SCHEMA.name())
+                                        .version(Schema.INT32_SCHEMA.version())
+                                        .defaultValue(2)
+                                        .build(),
+                                2)));
+    }
+
+    @Test
     public void shouldReceiveNumericTypeAsDouble() throws Exception {
         TestHelper.executeDDL("postgres_create_tables.ddl");
 
@@ -1154,6 +1244,16 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
     }
 
     @Test
+    @FixFor("DBZ-5544")
+    public void shouldReceiveByteaBase64UrlSafeString() throws Exception {
+        TestHelper.executeDDL("postgres_create_tables.ddl");
+
+        startConnector(config -> config.with(PostgresConnectorConfig.BINARY_HANDLING_MODE, PostgresConnectorConfig.BinaryHandlingMode.BASE64_URL_SAFE));
+
+        assertInsert(INSERT_BYTEA_BINMODE_STMT, 1, schemaAndValueForByteaBase64UrlSafe());
+    }
+
+    @Test
     @FixFor("DBZ-1814")
     public void shouldReceiveByteaHexString() throws Exception {
         TestHelper.executeDDL("postgres_create_tables.ddl");
@@ -1182,6 +1282,17 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
                 .with(PostgresConnectorConfig.BINARY_HANDLING_MODE, BinaryHandlingMode.BASE64));
 
         assertInsert(INSERT_CIRCLE_STMT, 1, schemaAndValueForUnknownColumnBase64());
+    }
+
+    @Test
+    @FixFor("DBZ-5544")
+    public void shouldReceiveUnknownTypeAsBase64UrlSafe() throws Exception {
+        TestHelper.executeDDL("postgres_create_tables.ddl");
+
+        startConnector(config -> config.with(PostgresConnectorConfig.INCLUDE_UNKNOWN_DATATYPES, true)
+                .with(PostgresConnectorConfig.BINARY_HANDLING_MODE, BinaryHandlingMode.BASE64_URL_SAFE));
+
+        assertInsert(INSERT_CIRCLE_STMT, 1, schemaAndValueForUnknownColumnBase64UrlSafe());
     }
 
     @Test
@@ -1248,6 +1359,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
     @Test
     @FixFor("DBZ-800")
     public void shouldReceiveHeartbeatAlsoWhenChangingNonWhitelistedTable() throws Exception {
+        Testing.Print.enable();
         startConnector(config -> config
                 .with(Heartbeat.HEARTBEAT_INTERVAL, "100")
                 .with(PostgresConnectorConfig.POLL_INTERVAL_MS, "50")
@@ -1261,6 +1373,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
                 "CREATE TABLE s1.b (pk SERIAL, bb integer, PRIMARY KEY(pk));" +
                 "INSERT INTO s1.b (bb) VALUES (22);";
 
+        Testing.print("Executing test statements");
         TestHelper.execute(statement);
 
         try {
@@ -1268,6 +1381,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
             final AtomicBoolean receivedInsert = new AtomicBoolean();
             Awaitility.await().atMost(TestHelper.waitTimeForRecords() * 5, TimeUnit.SECONDS).until(() -> {
                 final SourceRecord record = consumeRecord();
+                Testing.print("Arrived record " + record);
                 if (record != null) {
                     if (record.topic().endsWith("s1.b")) {
                         assertRecordInserted(record, "s1.b", PK_FIELD, 1);
@@ -1300,12 +1414,13 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         catch (ConditionTimeoutException e) {
             fail("Failed to detect at least 2 LSN changes", e);
         }
+        Testing.print("Done");
     }
 
     @Test
     @FixFor("DBZ-1565")
     public void shouldWarnOnMissingHeartbeatForFilteredEvents() throws Exception {
-        final LogInterceptor logInterceptor = new LogInterceptor();
+        final LogInterceptor logInterceptor = new LogInterceptor(PostgresStreamingChangeEventSource.class);
         startConnector(config -> config
                 .with(PostgresConnectorConfig.POLL_INTERVAL_MS, "50")
                 .with(PostgresConnectorConfig.TABLE_INCLUDE_LIST, "s1\\.b")
@@ -1361,7 +1476,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         consumer.expects(1);
         executeAndWait(statement);
         assertWithTask(task -> {
-            Table tbl = ((PostgresConnectorTask) task).getTaskContext().schema().tableFor(TableId.parse("public.test_table"));
+            Table tbl = ((PostgresConnectorTask) task).getTaskContext().schema().tableFor(TableId.parse("public.test_table", false));
             assertEquals(Arrays.asList("pk", "text", "not_toast"), tbl.retrieveColumnNames());
         });
 
@@ -1397,7 +1512,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         consumer.expects(1);
         executeAndWait(statement);
         assertWithTask(task -> {
-            Table tbl = ((PostgresConnectorTask) task).getTaskContext().schema().tableFor(TableId.parse("public.test_table"));
+            Table tbl = ((PostgresConnectorTask) task).getTaskContext().schema().tableFor(TableId.parse("public.test_table", false));
             assertEquals(Arrays.asList("pk", "not_toast"), tbl.retrieveColumnNames());
         });
     }
@@ -1441,7 +1556,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         executeAndWait(statement);
         consumer.process(record -> {
             assertWithTask(task -> {
-                Table tbl = ((PostgresConnectorTask) task).getTaskContext().schema().tableFor(TableId.parse("public.test_table"));
+                Table tbl = ((PostgresConnectorTask) task).getTaskContext().schema().tableFor(TableId.parse("public.test_table", false));
                 assertEquals(Arrays.asList("pk", "text", "not_toast", "mandatory_text"), tbl.retrieveColumnNames());
             });
         });
@@ -1531,56 +1646,6 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
 
         expectedAfter = null;
         assertRecordSchemaAndValues(expectedAfter, deletedRecord, Envelope.FieldName.AFTER);
-    }
-
-    @Test()
-    @FixFor("DBZ-1130")
-    @SkipWhenDecoderPluginNameIsNot(value = WAL2JSON, reason = "WAL2JSON specific: Pass 'add-tables' stream parameter and verify it acts as an include list")
-    public void testPassingStreamParams() throws Exception {
-        // Verify that passing stream parameters works by using the WAL2JSON add-tables parameter which acts as a
-        // whitelist.
-        startConnector(config -> config
-                .with(PostgresConnectorConfig.STREAM_PARAMS, "add-tables=s1.should_stream"));
-        String statement = "CREATE SCHEMA s1;" +
-                "CREATE TABLE s1.should_stream (pk SERIAL, aa integer, PRIMARY KEY(pk));" +
-                "CREATE TABLE s1.should_not_stream (pk SERIAL, aa integer, PRIMARY KEY(pk));" +
-                "INSERT INTO s1.should_not_stream (aa) VALUES (456);" +
-                "INSERT INTO s1.should_stream (aa) VALUES (123);";
-
-        // Verify only one record made it
-        consumer = testConsumer(1);
-        executeAndWait(statement);
-
-        // Verify the record that made it was from the whitelisted table
-        assertRecordInserted("s1.should_stream", PK_FIELD, 1);
-        assertThat(consumer.isEmpty()).isTrue();
-    }
-
-    @Test()
-    @FixFor("DBZ-1130")
-    @SkipWhenDecoderPluginNameIsNot(value = WAL2JSON, reason = "WAL2JSON specific: Pass multiple stream parameters and values verifying they work")
-    public void testPassingStreamMultipleParams() throws Exception {
-        // Verify that passing multiple stream parameters and multiple parameter values works.
-        startConnector(config -> config
-                .with(PostgresConnectorConfig.STREAM_PARAMS, "add-tables=s1.should_stream,s2.*;filter-tables=s2.should_not_stream"));
-        String statement = "CREATE SCHEMA s1;" + "CREATE SCHEMA s2;" +
-                "CREATE TABLE s1.should_stream (pk SERIAL, aa integer, PRIMARY KEY(pk));" +
-                "CREATE TABLE s2.should_stream (pk SERIAL, aa integer, PRIMARY KEY(pk));" +
-                "CREATE TABLE s1.should_not_stream (pk SERIAL, aa integer, PRIMARY KEY(pk));" +
-                "CREATE TABLE s2.should_not_stream (pk SERIAL, aa integer, PRIMARY KEY(pk));" +
-                "INSERT INTO s1.should_not_stream (aa) VALUES (456);" +
-                "INSERT INTO s2.should_not_stream (aa) VALUES (111);" +
-                "INSERT INTO s1.should_stream (aa) VALUES (123);" +
-                "INSERT INTO s2.should_stream (aa) VALUES (999);";
-
-        // Verify only the whitelisted record from s1 and s2 made it.
-        consumer = testConsumer(2);
-        executeAndWait(statement);
-
-        // Verify the record that made it was from the whitelisted table
-        assertRecordInserted("s1.should_stream", PK_FIELD, 1);
-        assertRecordInserted("s2.should_stream", PK_FIELD, 1);
-        assertThat(consumer.isEmpty()).isTrue();
     }
 
     @Test
@@ -1741,7 +1806,6 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
 
     @Test
     @FixFor("DBZ-1824")
-    @SkipWhenDecoderPluginNameIs(value = SkipWhenDecoderPluginNameIs.DecoderPluginName.WAL2JSON, reason = "wal2json cannot resume transaction in the middle of processing")
     public void stopInTheMiddleOfTxAndResume() throws Exception {
         Testing.Print.enable();
         final int numberOfEvents = 50;
@@ -1792,7 +1856,6 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
 
     @Test
     @FixFor("DBZ-2397")
-    @SkipWhenDecoderPluginNameIs(value = SkipWhenDecoderPluginNameIs.DecoderPluginName.WAL2JSON, reason = "wal2json cannot resume transaction in the middle of processing")
     public void restartConnectorInTheMiddleOfUncommittedTx() throws Exception {
         Testing.Print.enable();
 
@@ -1857,16 +1920,13 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
                 .with(PostgresConnectorConfig.SNAPSHOT_MODE, PostgresConnectorConfig.SnapshotMode.NEVER)
                 .with(EmbeddedEngine.OFFSET_STORAGE, MemoryOffsetBackingStore.class), false);
 
-        final boolean streaming = TestHelper.decoderPlugin().name().toLowerCase().endsWith("streaming");
-        consumer.expects(streaming ? 2 : 3);
+        consumer.expects(3);
         consumer.await(TestHelper.waitTimeForRecords() * 5, TimeUnit.SECONDS);
 
         // After loss of offset and not doing snapshot we always stream the first record available in replication slot
         // even if we have seen it as it is not possible to make a difference from plain snapshot never mode
-        // In case of streaming wal2json the LSN flush is timed differently due to the last non-functional chunk processing
-        if (!streaming) {
-            Assertions.assertThat(((Struct) consumer.remove().value()).getStruct("after").getString("text")).isEqualTo("insert2");
-        }
+        Assertions.assertThat(((Struct) consumer.remove().value()).getStruct("after").getString("text")).isEqualTo("insert2");
+
         Assertions.assertThat(((Struct) consumer.remove().value()).getStruct("after").getString("text")).isEqualTo("insert3");
         Assertions.assertThat(((Struct) consumer.remove().value()).getStruct("after").getString("text")).isEqualTo("insert4");
 
@@ -1874,62 +1934,11 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
     }
 
     @Test
-    @FixFor("DBZ-1824")
-    @SkipWhenDecoderPluginNameIsNot(value = SkipWhenDecoderPluginNameIsNot.DecoderPluginName.WAL2JSON, reason = "wal2json cannot resume transaction in the middle of processing")
-    public void stopInTheMiddleOfTxAndRestart() throws Exception {
-        Testing.Print.enable();
-        final int numberOfEvents = 50;
-        final int STOP_ID = 20;
-
-        startConnector(config -> config.with(PostgresConnectorConfig.DROP_SLOT_ON_STOP, false), true, record -> {
-            if (!"test_server.public.test_table.Envelope".equals(record.valueSchema().name())) {
-                return false;
-            }
-            final Struct envelope = (Struct) record.value();
-            final Struct after = envelope.getStruct("after");
-            final Integer pk = after.getInt32("pk");
-            return pk == STOP_ID;
-        });
-        waitForStreamingToStart();
-
-        final String topicPrefix = "public.test_table";
-        final String topicName = topicName(topicPrefix);
-
-        final int expectFirstRun = STOP_ID - 2;
-        final int expectSecondRun = numberOfEvents;
-        consumer = testConsumer(expectFirstRun);
-        executeAndWait(IntStream.rangeClosed(2, numberOfEvents + 1)
-                .boxed()
-                .map(x -> "INSERT INTO test_table (text) VALUES ('insert" + x + "')")
-                .collect(Collectors.joining(";")));
-
-        // 2..19, 1 is from snapshot
-        for (int i = 0; i < expectFirstRun; i++) {
-            SourceRecord record = consumer.remove();
-            assertEquals(topicName, record.topic());
-            VerifyRecord.isValidInsert(record, PK_FIELD, i + 2);
-        }
-
-        stopConnector();
-
-        startConnector(Function.identity(), false);
-        consumer.expects(expectSecondRun);
-        consumer.await(TestHelper.waitTimeForRecords() * 30, TimeUnit.SECONDS);
-
-        // 2..51
-        for (int i = 0; i < expectSecondRun; i++) {
-            SourceRecord record = consumer.remove();
-            assertEquals(topicName, record.topic());
-            VerifyRecord.isValidInsert(record, PK_FIELD, i + 2);
-        }
-    }
-
-    @Test
     @SkipWhenDatabaseVersion(check = EqualityCheck.LESS_THAN, major = 11, reason = "TRUNCATE events only supported in PG11+ PGOUTPUT Plugin")
     @SkipWhenDecoderPluginNameIsNot(value = SkipWhenDecoderPluginNameIsNot.DecoderPluginName.PGOUTPUT, reason = "Tests specifically that pgoutput handles TRUNCATE messages")
     public void shouldProcessTruncateMessages() throws Exception {
         startConnector(builder -> builder
-                .with(PostgresConnectorConfig.TRUNCATE_HANDLING_MODE, PostgresConnectorConfig.TruncateHandlingMode.INCLUDE));
+                .with(PostgresConnectorConfig.SKIPPED_OPERATIONS, "none"));
         waitForStreamingToStart();
 
         consumer = testConsumer(1);
@@ -1952,11 +1961,58 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
 
     @Test
     @SkipWhenDatabaseVersion(check = EqualityCheck.LESS_THAN, major = 11, reason = "TRUNCATE events only supported in PG11+ PGOUTPUT Plugin")
+    @SkipWhenDecoderPluginNameIsNot(value = SkipWhenDecoderPluginNameIsNot.DecoderPluginName.PGOUTPUT, reason = "Tests specifically that pgoutput handles TRUNCATE messages")
+    public void shouldProcessTruncateMessagesWhenSkippedOperationsIsSuppliedWithoutTruncate() throws Exception {
+        startConnector(builder -> builder
+                .with(PostgresConnectorConfig.SKIPPED_OPERATIONS, "u"));
+        waitForStreamingToStart();
+
+        consumer = testConsumer(1);
+        executeAndWait("INSERT INTO test_table (text) values ('TRUNCATE TEST');");
+
+        SourceRecord record = consumer.remove();
+        assertEquals(TestHelper.topicName("public.test_table"), record.topic());
+        VerifyRecord.isValidInsert(record, PK_FIELD, 2);
+
+        consumer.expects(1);
+        TestHelper.execute("TRUNCATE TABLE public.test_table RESTART IDENTITY CASCADE;");
+        consumer.await(TestHelper.waitTimeForRecords(), TimeUnit.SECONDS);
+
+        assertFalse(consumer.isEmpty());
+        SourceRecord truncateRecord = consumer.remove();
+        assertNotNull(truncateRecord);
+        VerifyRecord.isValidTruncate(truncateRecord);
+        assertTrue(consumer.isEmpty());
+    }
+
+    @Test
+    @SkipWhenDatabaseVersion(check = EqualityCheck.LESS_THAN, major = 11, reason = "TRUNCATE events only supported in PG11+ PGOUTPUT Plugin")
+    @SkipWhenDecoderPluginNameIsNot(value = SkipWhenDecoderPluginNameIsNot.DecoderPluginName.PGOUTPUT, reason = "Tests specifically that pgoutput handles TRUNCATE messages")
+    public void shouldSkipTruncateMessagesWithSkipped() throws Exception {
+        startConnector(builder -> builder.with(PostgresConnectorConfig.SKIPPED_OPERATIONS, "t"));
+        waitForStreamingToStart();
+
+        consumer = testConsumer(1);
+        executeAndWait("INSERT INTO test_table (text) values ('TRUNCATE TEST');");
+
+        SourceRecord record = consumer.remove();
+        assertEquals(TestHelper.topicName("public.test_table"), record.topic());
+        VerifyRecord.isValidInsert(record, PK_FIELD, 2);
+
+        consumer.expects(0);
+        TestHelper.execute("TRUNCATE TABLE public.test_table RESTART IDENTITY CASCADE;");
+        consumer.await(TestHelper.waitTimeForRecords(), TimeUnit.SECONDS);
+
+        assertTrue(consumer.isEmpty());
+    }
+
+    @Test
+    @SkipWhenDatabaseVersion(check = EqualityCheck.LESS_THAN, major = 11, reason = "TRUNCATE events only supported in PG11+ PGOUTPUT Plugin")
     @SkipWhenDecoderPluginNameIsNot(value = SkipWhenDecoderPluginNameIsNot.DecoderPluginName.PGOUTPUT, reason = "Tests specifically that pgoutput handled TRUNCATE these messages")
     public void shouldProcessTruncateMessagesForMultipleTableTruncateStatement() throws Exception {
         TestHelper.execute("CREATE TABLE test_table_2 (pk SERIAL, text TEXT, PRIMARY KEY(pk));");
 
-        startConnector(builder -> builder.with(PostgresConnectorConfig.TRUNCATE_HANDLING_MODE, PostgresConnectorConfig.TruncateHandlingMode.INCLUDE));
+        startConnector(builder -> builder.with(PostgresConnectorConfig.SKIPPED_OPERATIONS, "none"));
         waitForStreamingToStart();
 
         consumer = testConsumer(1);
@@ -2002,7 +2058,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         TestHelper.execute("CREATE TABLE alias_table (pk SERIAL, data VARCHAR(50), salary money, salary2 money2, PRIMARY KEY(pk));");
 
         startConnector(config -> config
-                .with(PostgresConnectorConfig.DECIMAL_HANDLING_MODE, DecimalHandlingMode.DOUBLE)
+                .with(PostgresConnectorConfig.DECIMAL_HANDLING_MODE, DecimalHandlingMode.PRECISE)
                 .with(PostgresConnectorConfig.INCLUDE_UNKNOWN_DATATYPES, true)
                 .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.INITIAL)
                 .with(PostgresConnectorConfig.TABLE_INCLUDE_LIST, "public.alias_table"),
@@ -2055,8 +2111,8 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         List<SchemaAndValueField> expected = Arrays.asList(
                 new SchemaAndValueField("pk", SchemaBuilder.int32().defaultValue(0).build(), 1),
                 new SchemaAndValueField("data", SchemaBuilder.OPTIONAL_STRING_SCHEMA, "hello"),
-                new SchemaAndValueField("salary", Decimal.builder(2).optional().build(), new BigDecimal(7.25)),
-                new SchemaAndValueField("salary2", Decimal.builder(2).build(), new BigDecimal(8.25)),
+                new SchemaAndValueField("salary", SchemaBuilder.OPTIONAL_FLOAT64_SCHEMA, 7.25),
+                new SchemaAndValueField("salary2", SchemaBuilder.FLOAT64_SCHEMA, 8.25),
                 new SchemaAndValueField("salary3", SchemaBuilder.float64()
                         .parameter(TestHelper.TYPE_NAME_PARAMETER_KEY, "MONEY3")
                         .parameter(TestHelper.TYPE_LENGTH_PARAMETER_KEY, "8")
@@ -2325,6 +2381,45 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
     }
 
     @Test
+    @FixFor("DBZ-5038")
+    public void shouldEmitEnumColumnDefaultValuesInSchema() throws Exception {
+        // Specifically enable `column.propagate.source.type` here to validate later that the actual
+        // type, length, and scale values are resolved correctly when paired with Enum types.
+        TestHelper.execute("CREATE TABLE enum_table (pk SERIAL, PRIMARY KEY (pk));");
+        startConnector(config -> config
+                .with(PostgresConnectorConfig.INCLUDE_UNKNOWN_DATATYPES, true)
+                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NEVER)
+                .with("column.propagate.source.type", "public.enum_table.value")
+                .with(PostgresConnectorConfig.TABLE_INCLUDE_LIST, "public.enum_table"), false);
+
+        waitForStreamingToStart();
+
+        // We create the enum type after streaming started to simulate some future schema change
+        TestHelper.execute("CREATE TYPE test_type AS ENUM ('V1','V2');");
+        TestHelper.execute("ALTER TABLE enum_table ADD COLUMN data varchar(50) NOT NULL");
+        TestHelper.execute("ALTER TABLE enum_table ADD COLUMN value test_type NOT NULL DEFAULT 'V2'::test_type");
+
+        consumer = testConsumer(1);
+        executeAndWait("INSERT INTO enum_table (data) VALUES ('V1');");
+
+        SourceRecord rec = assertRecordInserted("public.enum_table", PK_FIELD, 1);
+        assertSourceInfo(rec, "postgres", "public", "enum_table");
+
+        List<SchemaAndValueField> expected = Arrays.asList(
+                new SchemaAndValueField(PK_FIELD, SchemaBuilder.int32().defaultValue(0).build(), 1),
+                new SchemaAndValueField("data", SchemaBuilder.string().build(), "V1"),
+                new SchemaAndValueField("value", Enum.builder("V1,V2")
+                        .parameter(TestHelper.TYPE_NAME_PARAMETER_KEY, "TEST_TYPE")
+                        .parameter(TestHelper.TYPE_LENGTH_PARAMETER_KEY, String.valueOf(Integer.MAX_VALUE))
+                        .parameter(TestHelper.TYPE_SCALE_PARAMETER_KEY, "0")
+                        .defaultValue("V2")
+                        .build(), "V2"));
+
+        assertRecordSchemaAndValues(expected, rec, Envelope.FieldName.AFTER);
+        assertThat(consumer.isEmpty()).isTrue();
+    }
+
+    @Test
     public void shouldStreamEnumArrayAsKnownType() throws Exception {
         // Specifically enable `column.propagate.source.type` here to validate later that the actual
         // type, length, and scale values are resolved correctly when paired with Enum types.
@@ -2449,7 +2544,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
     }
 
     @Test
-    @FixFor("DBZ-1680")
+    @FixFor({ "DBZ-1680", "DBZ-5038" })
     public void shouldStreamEnumsWhenIncludeUnknownDataTypesDisabled() throws Exception {
         // Specifically enable `column.propagate.source.type` here to validate later that the actual
         // type, length, and scale values are resolved correctly when paired with Enum types.
@@ -2476,15 +2571,11 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
                         .parameter(TestHelper.TYPE_NAME_PARAMETER_KEY, "TEST_TYPE")
                         .parameter(TestHelper.TYPE_LENGTH_PARAMETER_KEY, String.valueOf(Integer.MAX_VALUE))
                         .parameter(TestHelper.TYPE_SCALE_PARAMETER_KEY, "0")
+                        .defaultValue("V1")
                         .build(), "V1"));
 
         assertRecordSchemaAndValues(expected, rec, Envelope.FieldName.AFTER);
         assertThat(consumer.isEmpty()).isTrue();
-    }
-
-    private long asEpochMicros(String timestamp) {
-        Instant instant = LocalDateTime.parse(timestamp).atOffset(ZoneOffset.UTC).toInstant();
-        return instant.getEpochSecond() * 1_000_000 + instant.getNano() / 1_000;
     }
 
     private void testReceiveChangesForReplicaIdentityFullTableWithToastedValue(PostgresConnectorConfig.SchemaRefreshMode mode, boolean tablesBeforeStart)
@@ -2494,9 +2585,12 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
                     "DROP TABLE IF EXISTS test_table;",
                     "CREATE TABLE test_table (id SERIAL, not_toast int, text TEXT);",
                     "ALTER TABLE test_table REPLICA IDENTITY FULL");
+
+            awaitTableMetaDataIsQueryable(new TableId(null, "public", "test_table"));
         }
 
         startConnector(config -> config.with(PostgresConnectorConfig.SCHEMA_REFRESH_MODE, mode), false);
+        assertConnectorIsRunning();
         consumer = testConsumer(1);
 
         final String toastedValue = RandomStringUtils.randomAlphanumeric(10000);
@@ -2506,6 +2600,9 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
                     "DROP TABLE IF EXISTS test_table;",
                     "CREATE TABLE test_table (id SERIAL, not_toast int, text TEXT);",
                     "ALTER TABLE test_table REPLICA IDENTITY FULL");
+
+            awaitTableMetaDataIsQueryable(new TableId(null, "public", "test_table"));
+
         }
 
         // INSERT
@@ -2522,24 +2619,14 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         executeAndWait("UPDATE test_table set not_toast = 20");
         SourceRecord updatedRecord = consumer.remove();
 
-        if (DecoderDifferences.areToastedValuesPresentInSchema() || mode == SchemaRefreshMode.COLUMNS_DIFF_EXCLUDE_UNCHANGED_TOAST) {
-            assertRecordSchemaAndValues(Arrays.asList(
-                    new SchemaAndValueField("id", SchemaBuilder.int32().defaultValue(0).build(), 1),
-                    new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 10),
-                    new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, toastedValue)), updatedRecord, Envelope.FieldName.BEFORE);
-            assertRecordSchemaAndValues(Arrays.asList(
-                    new SchemaAndValueField("id", SchemaBuilder.int32().defaultValue(0).build(), 1),
-                    new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 20),
-                    new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, toastedValue)), updatedRecord, Envelope.FieldName.AFTER);
-        }
-        else {
-            assertRecordSchemaAndValues(Arrays.asList(
-                    new SchemaAndValueField("id", SchemaBuilder.int32().defaultValue(0).build(), 1),
-                    new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 10)), updatedRecord, Envelope.FieldName.BEFORE);
-            assertRecordSchemaAndValues(Arrays.asList(
-                    new SchemaAndValueField("id", SchemaBuilder.int32().defaultValue(0).build(), 1),
-                    new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 20)), updatedRecord, Envelope.FieldName.AFTER);
-        }
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("id", SchemaBuilder.int32().defaultValue(0).build(), 1),
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 10),
+                new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, toastedValue)), updatedRecord, Envelope.FieldName.BEFORE);
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("id", SchemaBuilder.int32().defaultValue(0).build(), 1),
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 20),
+                new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, toastedValue)), updatedRecord, Envelope.FieldName.AFTER);
 
         // DELETE
         consumer.expects(2);
@@ -2548,17 +2635,10 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         SourceRecord tombstoneRecord = consumer.remove();
         assertThat(tombstoneRecord.value()).isNull();
         assertThat(tombstoneRecord.valueSchema()).isNull();
-        if (DecoderDifferences.areToastedValuesPresentInSchema() || mode == SchemaRefreshMode.COLUMNS_DIFF_EXCLUDE_UNCHANGED_TOAST) {
-            assertRecordSchemaAndValues(Arrays.asList(
-                    new SchemaAndValueField("id", SchemaBuilder.int32().defaultValue(0).build(), 1),
-                    new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 20),
-                    new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, toastedValue)), deletedRecord, Envelope.FieldName.BEFORE);
-        }
-        else {
-            assertRecordSchemaAndValues(Arrays.asList(
-                    new SchemaAndValueField("id", SchemaBuilder.int32().defaultValue(0).build(), 1),
-                    new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 20)), deletedRecord, Envelope.FieldName.BEFORE);
-        }
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("id", SchemaBuilder.int32().defaultValue(0).build(), 1),
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 20),
+                new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, toastedValue)), deletedRecord, Envelope.FieldName.BEFORE);
 
         // INSERT null
         consumer.expects(1);
@@ -2574,24 +2654,14 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         consumer.expects(1);
         executeAndWait("UPDATE test_table set not_toast = 200 WHERE id=2");
         updatedRecord = consumer.remove();
-        if (DecoderDifferences.areToastedValuesPresentInSchema() || mode == SchemaRefreshMode.COLUMNS_DIFF_EXCLUDE_UNCHANGED_TOAST) {
-            assertRecordSchemaAndValues(Arrays.asList(
-                    new SchemaAndValueField("id", SchemaBuilder.int32().defaultValue(0).build(), 2),
-                    new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 100),
-                    new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, null)), updatedRecord, Envelope.FieldName.BEFORE);
-            assertRecordSchemaAndValues(Arrays.asList(
-                    new SchemaAndValueField("id", SchemaBuilder.int32().defaultValue(0).build(), 2),
-                    new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 200),
-                    new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, null)), updatedRecord, Envelope.FieldName.AFTER);
-        }
-        else {
-            assertRecordSchemaAndValues(Arrays.asList(
-                    new SchemaAndValueField("id", SchemaBuilder.int32().defaultValue(0).build(), 2),
-                    new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 100)), updatedRecord, Envelope.FieldName.BEFORE);
-            assertRecordSchemaAndValues(Arrays.asList(
-                    new SchemaAndValueField("id", SchemaBuilder.int32().defaultValue(0).build(), 2),
-                    new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 200)), updatedRecord, Envelope.FieldName.AFTER);
-        }
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("id", SchemaBuilder.int32().defaultValue(0).build(), 2),
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 100),
+                new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, null)), updatedRecord, Envelope.FieldName.BEFORE);
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("id", SchemaBuilder.int32().defaultValue(0).build(), 2),
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 200),
+                new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, null)), updatedRecord, Envelope.FieldName.AFTER);
 
         // DELETE null
         consumer.expects(2);
@@ -2600,17 +2670,30 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         tombstoneRecord = consumer.remove();
         assertThat(tombstoneRecord.value()).isNull();
         assertThat(tombstoneRecord.valueSchema()).isNull();
-        if (DecoderDifferences.areToastedValuesPresentInSchema() || mode == SchemaRefreshMode.COLUMNS_DIFF_EXCLUDE_UNCHANGED_TOAST) {
-            assertRecordSchemaAndValues(Arrays.asList(
-                    new SchemaAndValueField("id", SchemaBuilder.int32().defaultValue(0).build(), 2),
-                    new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 200),
-                    new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, null)), deletedRecord, Envelope.FieldName.BEFORE);
-        }
-        else {
-            assertRecordSchemaAndValues(Arrays.asList(
-                    new SchemaAndValueField("id", SchemaBuilder.int32().defaultValue(0).build(), 2),
-                    new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 200)), deletedRecord, Envelope.FieldName.BEFORE);
-        }
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("id", SchemaBuilder.int32().defaultValue(0).build(), 2),
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 200),
+                new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, null)), deletedRecord, Envelope.FieldName.BEFORE);
+    }
+
+    /**
+     * It appears in some cases retrieving column metadata "too quickly" raises
+     * a PSQLException: ERROR: could not open relation with OID xyz.
+     * This causes intermittent failures during schema refresh.
+     * This is an attempt to avoid that situation by making sure the metadata can be retrieved
+     * before proceeding.
+     */
+    private void awaitTableMetaDataIsQueryable(TableId tableId) {
+        Awaitility.await()
+                .atMost(TestHelper.waitTimeForRecords() * 10, TimeUnit.SECONDS)
+                .ignoreException(PSQLException.class)
+                .until(() -> {
+                    try (PostgresConnection connection = TestHelper.createWithTypeRegistry()) {
+                        Tables tables = new Tables();
+                        connection.readSchema(tables, null, "public", TableFilter.fromPredicate(t -> t.equals(tableId)), null, false);
+                        return tables.forTable(tableId) != null;
+                    }
+                });
     }
 
     @Test()
@@ -2675,22 +2758,22 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         assertThat(before.schema().field("c1").schema().parameters()).isNull();
         assertThat(before.schema().field("c2").schema().parameters()).isNull();
 
-        assertThat(before.schema().field("c3a").schema().parameters()).includes(
+        assertThat(before.schema().field("c3a").schema().parameters()).contains(
                 entry(TYPE_NAME_PARAMETER_KEY, "NUMERIC"),
                 entry(TYPE_LENGTH_PARAMETER_KEY, "5"),
                 entry(TYPE_SCALE_PARAMETER_KEY, "2"));
 
         // variable width, name and length info
-        assertThat(before.schema().field("c3b").schema().parameters()).includes(
+        assertThat(before.schema().field("c3b").schema().parameters()).contains(
                 entry(TYPE_NAME_PARAMETER_KEY, "VARCHAR"),
                 entry(TYPE_LENGTH_PARAMETER_KEY, "128"));
 
-        assertThat(before.schema().field("f2").schema().parameters()).includes(
+        assertThat(before.schema().field("f2").schema().parameters()).contains(
                 entry(TYPE_NAME_PARAMETER_KEY, "NUMERIC"),
                 entry(TYPE_LENGTH_PARAMETER_KEY, "8"),
                 entry(TYPE_SCALE_PARAMETER_KEY, "4"));
 
-        assertThat(before.schema().field("f1").schema().parameters()).includes(
+        assertThat(before.schema().field("f1").schema().parameters()).contains(
                 entry(TYPE_NAME_PARAMETER_KEY, "FLOAT4"),
                 entry(TYPE_LENGTH_PARAMETER_KEY, "8"),
                 entry(TYPE_SCALE_PARAMETER_KEY, "8"));
@@ -2728,10 +2811,116 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         }
     }
 
-    private void assertHeartBeatRecordInserted() {
-        assertFalse("records not generated", consumer.isEmpty());
+    @Test
+    @FixFor("DBZ-1931")
+    public void testStreamMoneyAsDefaultPrecise() throws Exception {
+        TestHelper.execute("CREATE TABLE salary (pk SERIAL, name VARCHAR(50), salary money, PRIMARY KEY(pk));");
 
-        assertHeartBeatRecord(consumer.remove());
+        startConnector(config -> config
+                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.INITIAL)
+                .with(PostgresConnectorConfig.TABLE_INCLUDE_LIST, "public.salary"),
+                false);
+
+        waitForStreamingToStart();
+
+        consumer = testConsumer(1);
+        executeAndWait("INSERT INTO salary (name, salary) values ('Joe', 123.45);");
+
+        SourceRecord rec = assertRecordInserted("public.salary", PK_FIELD, 1);
+        assertSourceInfo(rec, "postgres", "public", "salary");
+
+        List<SchemaAndValueField> expected = Arrays.asList(
+                new SchemaAndValueField("pk", SchemaBuilder.int32().defaultValue(0).build(), 1),
+                new SchemaAndValueField("name", SchemaBuilder.OPTIONAL_STRING_SCHEMA, "Joe"),
+                new SchemaAndValueField("salary", Decimal.builder(2).optional().build(), BigDecimal.valueOf(123.45)));
+
+        assertRecordSchemaAndValues(expected, rec, Envelope.FieldName.AFTER);
+        assertThat(consumer.isEmpty()).isTrue();
+    }
+
+    @Test
+    @FixFor("DBZ-1931")
+    public void testStreamMoneyAsString() throws Exception {
+        TestHelper.execute("CREATE TABLE salary (pk SERIAL, name VARCHAR(50), salary money, PRIMARY KEY(pk));");
+
+        startConnector(config -> config
+                .with(PostgresConnectorConfig.DECIMAL_HANDLING_MODE, DecimalHandlingMode.STRING)
+                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.INITIAL)
+                .with(PostgresConnectorConfig.TABLE_INCLUDE_LIST, "public.salary"),
+                false);
+
+        waitForStreamingToStart();
+
+        consumer = testConsumer(1);
+        executeAndWait("INSERT INTO salary (name, salary) values ('Joe', 123.45);");
+
+        SourceRecord rec = assertRecordInserted("public.salary", PK_FIELD, 1);
+        assertSourceInfo(rec, "postgres", "public", "salary");
+
+        List<SchemaAndValueField> expected = Arrays.asList(
+                new SchemaAndValueField("pk", SchemaBuilder.int32().defaultValue(0).build(), 1),
+                new SchemaAndValueField("name", SchemaBuilder.OPTIONAL_STRING_SCHEMA, "Joe"),
+                new SchemaAndValueField("salary", SchemaBuilder.OPTIONAL_STRING_SCHEMA, "123.45"));
+
+        assertRecordSchemaAndValues(expected, rec, Envelope.FieldName.AFTER);
+        assertThat(consumer.isEmpty()).isTrue();
+    }
+
+    @Test
+    @FixFor("DBZ-1931")
+    public void testStreamMoneyAsDouble() throws Exception {
+        TestHelper.execute("CREATE TABLE salary (pk SERIAL, name VARCHAR(50), salary money, PRIMARY KEY(pk));");
+
+        startConnector(config -> config
+                .with(PostgresConnectorConfig.DECIMAL_HANDLING_MODE, DecimalHandlingMode.DOUBLE)
+                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.INITIAL)
+                .with(PostgresConnectorConfig.TABLE_INCLUDE_LIST, "public.salary"),
+                false);
+
+        waitForStreamingToStart();
+
+        consumer = testConsumer(1);
+        executeAndWait("INSERT INTO salary (name, salary) values ('Joe', 123.45);");
+
+        SourceRecord rec = assertRecordInserted("public.salary", PK_FIELD, 1);
+        assertSourceInfo(rec, "postgres", "public", "salary");
+
+        List<SchemaAndValueField> expected = Arrays.asList(
+                new SchemaAndValueField("pk", SchemaBuilder.int32().defaultValue(0).build(), 1),
+                new SchemaAndValueField("name", SchemaBuilder.OPTIONAL_STRING_SCHEMA, "Joe"),
+                new SchemaAndValueField("salary", SchemaBuilder.OPTIONAL_FLOAT64_SCHEMA, 123.45));
+
+        assertRecordSchemaAndValues(expected, rec, Envelope.FieldName.AFTER);
+        assertThat(consumer.isEmpty()).isTrue();
+    }
+
+    @Test
+    @FixFor("DBZ-1931")
+    public void testStreamMoneyPreciseDecimalFraction() throws Exception {
+        TestHelper.execute("CREATE TABLE salary (pk SERIAL, name VARCHAR(50), salary money, PRIMARY KEY(pk));");
+
+        startConnector(config -> config
+                .with(PostgresConnectorConfig.DECIMAL_HANDLING_MODE, DecimalHandlingMode.PRECISE)
+                .with(PostgresConnectorConfig.MONEY_FRACTION_DIGITS, 1)
+                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.INITIAL)
+                .with(PostgresConnectorConfig.TABLE_INCLUDE_LIST, "public.salary"),
+                false);
+
+        waitForStreamingToStart();
+
+        consumer = testConsumer(1);
+        executeAndWait("INSERT INTO salary (name, salary) values ('Joe', 123.4567);");
+
+        SourceRecord rec = assertRecordInserted("public.salary", PK_FIELD, 1);
+        assertSourceInfo(rec, "postgres", "public", "salary");
+
+        List<SchemaAndValueField> expected = Arrays.asList(
+                new SchemaAndValueField("pk", SchemaBuilder.int32().defaultValue(0).build(), 1),
+                new SchemaAndValueField("name", SchemaBuilder.OPTIONAL_STRING_SCHEMA, "Joe"),
+                new SchemaAndValueField("salary", Decimal.builder(1).optional().build(), BigDecimal.valueOf(123.5)));
+
+        assertRecordSchemaAndValues(expected, rec, Envelope.FieldName.AFTER);
+        assertThat(consumer.isEmpty()).isTrue();
     }
 
     private void assertHeartBeatRecord(SourceRecord heartbeat) {
@@ -2742,25 +2931,6 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
 
         Struct value = (Struct) heartbeat.value();
         assertThat(value.getInt64("ts_ms")).isLessThanOrEqualTo(Instant.now().toEpochMilli());
-    }
-
-    private Optional<SourceRecord> isHeartBeatRecordInserted() {
-        assertFalse("records not generated", consumer.isEmpty());
-        final String heartbeatTopicName = "__debezium-heartbeat." + TestHelper.TEST_SERVER;
-
-        SourceRecord record = consumer.remove();
-        if (!heartbeatTopicName.equals(record.topic())) {
-            return Optional.of(record);
-        }
-
-        assertEquals(heartbeatTopicName, record.topic());
-
-        Struct key = (Struct) record.key();
-        assertThat(key.get("serverName")).isEqualTo(TestHelper.TEST_SERVER);
-
-        Struct value = (Struct) record.value();
-        assertThat(value.getInt64("ts_ms")).isLessThanOrEqualTo(Instant.now().toEpochMilli());
-        return Optional.empty();
     }
 
     private void assertInsert(String statement, List<SchemaAndValueField> expectedSchemaAndValuesByColumn) {
@@ -2775,13 +2945,33 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         try {
             executeAndWait(statement);
             SourceRecord record = assertRecordInserted(expectedTopicName, pk != null ? PK_FIELD : null, pk);
-            assertRecordOffsetAndSnapshotSource(record, false, false);
+            assertRecordOffsetAndSnapshotSource(record, SnapshotRecord.FALSE);
             assertSourceInfo(record, "postgres", table.schema(), table.table());
             assertRecordSchemaAndValues(expectedSchemaAndValuesByColumn, record, Envelope.FieldName.AFTER);
         }
         catch (Exception e) {
             throw new RuntimeException(e);
         }
+    }
+
+    private void assertDelete(String statement, Integer pk,
+                              List<SchemaAndValueField> expectedSchemaAndValuesByColumn) {
+        TableId table = tableIdFromDeleteStmt(statement);
+        String expectedTopicName = table.schema() + "." + table.table();
+        expectedTopicName = expectedTopicName.replaceAll("[ \"]", "_");
+
+        try {
+            executeAndWait(statement);
+            SourceRecord record = assertRecordDeleted(expectedTopicName, pk != null ? PK_FIELD : null, pk);
+            assertRecordOffsetAndSnapshotSource(record, SnapshotRecord.FALSE);
+            assertSourceInfo(record, "postgres", table.schema(), table.table());
+            assertRecordSchemaAndValues(expectedSchemaAndValuesByColumn, record, Envelope.FieldName.BEFORE);
+            assertRecordSchemaAndValues(null, record, Envelope.FieldName.AFTER);
+        }
+        catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+
     }
 
     private SourceRecord assertRecordInserted(SourceRecord insertedRecord, String expectedTopicName, String pkColumn, Integer pk) throws InterruptedException {
@@ -2795,6 +2985,26 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         }
 
         return insertedRecord;
+    }
+
+    private SourceRecord assertRecordDeleted(String expectedTopicName, String pkColumn, Integer pk) throws InterruptedException {
+        assertFalse("records not generated", consumer.isEmpty());
+        SourceRecord deletedRecord = consumer.remove();
+
+        return assertRecordDeleted(deletedRecord, expectedTopicName, pkColumn, pk);
+    }
+
+    private SourceRecord assertRecordDeleted(SourceRecord deletedRecord, String expectedTopicName, String pkColumn, Integer pk) throws InterruptedException {
+        assertEquals(topicName(expectedTopicName), deletedRecord.topic());
+
+        if (pk != null) {
+            VerifyRecord.isValidDelete(deletedRecord, pkColumn, pk);
+        }
+        else {
+            VerifyRecord.isValidDelete(deletedRecord);
+        }
+
+        return deletedRecord;
     }
 
     private SourceRecord assertRecordInserted(String expectedTopicName, String pkColumn, Integer pk) throws InterruptedException {

@@ -5,7 +5,7 @@
  */
 package io.debezium.converters;
 
-import static org.fest.assertions.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.Assert.fail;
 
 import java.util.Base64;
@@ -26,6 +26,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.confluent.connect.avro.AvroConverter;
 import io.confluent.kafka.schemaregistry.client.MockSchemaRegistryClient;
 import io.debezium.config.Configuration;
+import io.debezium.converters.spi.CloudEventsMaker;
 import io.debezium.data.Envelope;
 import io.debezium.data.SchemaUtil;
 import io.debezium.util.Testing;
@@ -128,6 +129,10 @@ public class CloudEventsConverterTest {
     }
 
     public static void shouldConvertToCloudEventsInJsonWithDataAsAvro(SourceRecord record, boolean hasTransaction) {
+        shouldConvertToCloudEventsInJsonWithDataAsAvro(record, "after", hasTransaction);
+    }
+
+    public static void shouldConvertToCloudEventsInJsonWithDataAsAvro(SourceRecord record, String fieldName, boolean hasTransaction) {
         Map<String, Object> config = new HashMap<>();
         config.put("serializer.type", "json");
         config.put("data.serializer.type", "avro");
@@ -204,7 +209,8 @@ public class CloudEventsConverterTest {
             avroConverter.configure(Collections.singletonMap("schema.registry.url", "http://fake-url"), false);
             SchemaAndValue data = avroConverter.toConnectData(record.topic(), Base64.getDecoder().decode(dataJson.asText()));
             assertThat(data.value()).isInstanceOf(Struct.class);
-            assertThat(((Struct) data.value()).get("after")).isNotNull();
+            assertThat(((Struct) data.value()).get(fieldName)).describedAs("Field must be set: " + fieldName)
+                    .isNotNull();
         }
         catch (Throwable t) {
             Testing.Print.enable();

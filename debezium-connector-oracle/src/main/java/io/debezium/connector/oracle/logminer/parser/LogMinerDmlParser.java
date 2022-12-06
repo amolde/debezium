@@ -7,8 +7,6 @@ package io.debezium.connector.oracle.logminer.parser;
 
 import io.debezium.DebeziumException;
 import io.debezium.connector.oracle.logminer.LogMinerHelper;
-import io.debezium.connector.oracle.logminer.valueholder.LogMinerDmlEntry;
-import io.debezium.connector.oracle.logminer.valueholder.LogMinerDmlEntryImpl;
 import io.debezium.relational.Table;
 
 /**
@@ -65,7 +63,7 @@ public class LogMinerDmlParser implements DmlParser {
     private static final int WHERE_LENGTH = WHERE.length();
 
     @Override
-    public LogMinerDmlEntry parse(String sql, Table table, String txId) {
+    public LogMinerDmlEntry parse(String sql, Table table) {
         if (table == null) {
             throw new DmlParserException("DML parser requires a non-null table");
         }
@@ -139,6 +137,8 @@ public class LogMinerDmlParser implements DmlParser {
             // that wasn't specified and therefore remained null, correctly adapt the after state
             // accordingly, leaving any field's after value alone if it isn't null or a sentinel.
             for (int i = 0; i < oldValues.length; ++i) {
+                // set unavailable value in the old values if applicable
+                oldValues[i] = ParserUtils.getColumnUnavailableValue(oldValues[i], table.columns().get(i));
                 if (newValues[i] == NULL_SENTINEL) {
                     // field is explicitly set to NULL, clear the sentinel and continue
                     newValues[i] = null;
@@ -174,6 +174,9 @@ public class LogMinerDmlParser implements DmlParser {
             // parse where
             Object[] oldValues = new Object[table.columns().size()];
             parseWhereClause(sql, index, oldValues, table);
+
+            // Check and update unavailable column values
+            ParserUtils.setColumnUnavailableValues(oldValues, table);
 
             return LogMinerDmlEntryImpl.forDelete(oldValues);
         }
@@ -266,8 +269,23 @@ public class LogMinerDmlParser implements DmlParser {
         index += VALUES_LENGTH;
 
         int columnIndex = 0;
+        StringBuilder collectedValue = null;
         for (; index < sql.length(); ++index) {
             char c = sql.charAt(index);
+
+            if (inQuote) {
+                if (c != '\'') {
+                    collectedValue.append(c);
+                }
+                else {
+                    if (sql.charAt(index + 1) == '\'') {
+                        collectedValue.append('\'');
+                        index = index + 1;
+                        continue;
+                    }
+                }
+            }
+
             if (c == '(' && !inQuote && !inValues) {
                 inValues = true;
                 start = index + 1;
@@ -281,6 +299,7 @@ public class LogMinerDmlParser implements DmlParser {
                     continue;
                 }
                 inQuote = true;
+                collectedValue = new StringBuilder();
             }
             else if (!inQuote && (c == ',' || c == ')')) {
                 if (c == ')' && nested != 0) {
@@ -294,7 +313,8 @@ public class LogMinerDmlParser implements DmlParser {
                 if (sql.charAt(start) == '\'' && sql.charAt(index - 1) == '\'') {
                     // value is single-quoted at the start/end, substring without the quotes.
                     int position = LogMinerHelper.getColumnIndexByName(columnNames[columnIndex], table);
-                    values[position] = sql.substring(start + 1, index - 1);
+                    values[position] = collectedValue.toString();
+                    collectedValue = null;
                 }
                 else {
                     // use value as-is
@@ -311,6 +331,7 @@ public class LogMinerDmlParser implements DmlParser {
         }
 
         return index;
+
     }
 
     /**
@@ -331,16 +352,36 @@ public class LogMinerDmlParser implements DmlParser {
         int nested = 0;
 
         // verify entering set-clause
-        if (sql.indexOf(SET, start) != start) {
+        int set = sql.indexOf(SET, start);
+        if (set == -1) {
             throw new DebeziumException("Failed to parse DML: " + sql);
+        }
+        else if (set != start) {
+            // find table alias
+            start = set;
         }
         start += SET_LENGTH;
 
         int index = start;
         String currentColumnName = null;
+        StringBuilder collectedValue = null;
         for (; index < sql.length(); ++index) {
             char c = sql.charAt(index);
             char lookAhead = (index + 1 < sql.length()) ? sql.charAt(index + 1) : 0;
+
+            if (inSingleQuote) {
+                if (c != '\'') {
+                    collectedValue.append(c);
+                }
+                else {
+                    if (lookAhead == '\'') {
+                        collectedValue.append('\'');
+                        index = index + 1;
+                        continue;
+                    }
+                }
+            }
+
             if (c == '"' && inColumnName) {
                 // Set clause column names are double-quoted
                 if (inDoubleQuote) {
@@ -359,6 +400,19 @@ public class LogMinerDmlParser implements DmlParser {
                 index += 1;
                 start = index + 1;
             }
+            else if (nested == 0 && c == ' ' && lookAhead == '|') {
+                // Possible concatenation, nothing to do yet
+            }
+            else if (nested == 0 && c == '|' && lookAhead == '|' && !inSingleQuote) {
+                // Concatenation
+                for (int i = index + 2; i < sql.length(); ++i) {
+                    if (sql.charAt(i) != ' ') {
+                        // found next non-whitespace character
+                        index = i - 1;
+                        break;
+                    }
+                }
+            }
             else if (c == '\'' && inColumnValue) {
                 // Skip over double single quote
                 if (inSingleQuote && lookAhead == '\'') {
@@ -370,7 +424,8 @@ public class LogMinerDmlParser implements DmlParser {
                     inSingleQuote = false;
                     if (nested == 0) {
                         int position = LogMinerHelper.getColumnIndexByName(currentColumnName, table);
-                        newValues[position] = sql.substring(start + 1, index);
+                        newValues[position] = collectedValue.toString();
+                        collectedValue = null;
                         start = index + 1;
                         inColumnValue = false;
                         inColumnName = false;
@@ -381,6 +436,7 @@ public class LogMinerDmlParser implements DmlParser {
                     start = index;
                 }
                 inSingleQuote = true;
+                collectedValue = new StringBuilder();
             }
             else if (c == ',' && !inColumnValue && !inColumnName) {
                 // Set clause uses ', ' skip following space
@@ -465,16 +521,34 @@ public class LogMinerDmlParser implements DmlParser {
         }
 
         // verify entering where-clause
-        if (sql.indexOf(WHERE, start) != start) {
+        int where = sql.indexOf(WHERE, start);
+        if (where == -1) {
             throw new DebeziumException("Failed to parse DML: " + sql);
+        }
+        else if (where != start) {
+            // find table alias
+            start = where;
         }
         start += WHERE_LENGTH;
 
         int index = start;
         String currentColumnName = null;
+        StringBuilder collectedValue = null;
         for (; index < sql.length(); ++index) {
             char c = sql.charAt(index);
             char lookAhead = (index + 1 < sql.length()) ? sql.charAt(index + 1) : 0;
+            if (inSingleQuote) {
+                if (c != '\'') {
+                    collectedValue.append(c);
+                }
+                else {
+                    if (lookAhead == '\'') {
+                        collectedValue.append('\'');
+                        index = index + 1;
+                        continue;
+                    }
+                }
+            }
             if (c == '"' && inColumnName) {
                 // Where clause column names are double-quoted
                 if (inDoubleQuote) {
@@ -511,7 +585,8 @@ public class LogMinerDmlParser implements DmlParser {
                     inSingleQuote = false;
                     if (nested == 0) {
                         int position = LogMinerHelper.getColumnIndexByName(currentColumnName, table);
-                        values[position] = sql.substring(start + 1, index);
+                        values[position] = collectedValue.toString();
+                        collectedValue = null;
                         start = index + 1;
                         inColumnValue = false;
                         inColumnName = false;
@@ -522,6 +597,7 @@ public class LogMinerDmlParser implements DmlParser {
                     start = index;
                 }
                 inSingleQuote = true;
+                collectedValue = new StringBuilder();
             }
             else if (inColumnValue && !inSingleQuote) {
                 if (!inSpecial) {
@@ -533,6 +609,19 @@ public class LogMinerDmlParser implements DmlParser {
                 }
                 else if (c == ')' && nested > 0) {
                     nested--;
+                }
+                else if (nested == 0 && c == ' ' && lookAhead == '|') {
+                    // Possible concatenation, nothing to do yet
+                }
+                else if (nested == 0 && c == '|' && lookAhead == '|') {
+                    // Concatenation
+                    for (int i = index + 2; i < sql.length(); ++i) {
+                        if (sql.charAt(i) != ' ') {
+                            // found next non-whitespace character
+                            index = i - 1;
+                            break;
+                        }
+                    }
                 }
                 else if ((c == ';' || c == ' ') && nested == 0) {
                     String value = sql.substring(start, index);
@@ -569,20 +658,5 @@ public class LogMinerDmlParser implements DmlParser {
         }
 
         return index;
-    }
-
-    /**
-     * Returns whether the given array has no elements or all elements are {@code null}, thus empty.
-     *
-     * @param array the array to inspect
-     * @return true if the array is considered empty, false otherwise
-     */
-    private boolean isEmptyArray(Object[] array) {
-        for (int i = 0; i < array.length; ++i) {
-            if (array[i] != null) {
-                return false;
-            }
-        }
-        return true;
     }
 }

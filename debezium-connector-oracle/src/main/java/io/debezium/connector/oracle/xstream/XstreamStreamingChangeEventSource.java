@@ -17,6 +17,7 @@ import io.debezium.connector.oracle.OracleConnectorConfig;
 import io.debezium.connector.oracle.OracleDatabaseSchema;
 import io.debezium.connector.oracle.OracleDatabaseVersion;
 import io.debezium.connector.oracle.OracleOffsetContext;
+import io.debezium.connector.oracle.OraclePartition;
 import io.debezium.connector.oracle.OracleStreamingChangeEventSourceMetrics;
 import io.debezium.connector.oracle.Scn;
 import io.debezium.connector.oracle.SourceInfo;
@@ -26,7 +27,6 @@ import io.debezium.pipeline.EventDispatcher;
 import io.debezium.pipeline.source.spi.StreamingChangeEventSource;
 import io.debezium.relational.TableId;
 import io.debezium.util.Clock;
-import io.debezium.util.Strings;
 
 import oracle.sql.NUMBER;
 import oracle.streams.StreamsException;
@@ -39,13 +39,13 @@ import oracle.streams.XStreamUtility;
  *
  * @author Gunnar Morling
  */
-public class XstreamStreamingChangeEventSource implements StreamingChangeEventSource<OracleOffsetContext> {
+public class XstreamStreamingChangeEventSource implements StreamingChangeEventSource<OraclePartition, OracleOffsetContext> {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(XstreamStreamingChangeEventSource.class);
 
     private final OracleConnectorConfig connectorConfig;
     private final OracleConnection jdbcConnection;
-    private final EventDispatcher<TableId> dispatcher;
+    private final EventDispatcher<OraclePartition, TableId> dispatcher;
     private final ErrorHandler errorHandler;
     private final Clock clock;
     private final OracleDatabaseSchema schema;
@@ -63,7 +63,7 @@ public class XstreamStreamingChangeEventSource implements StreamingChangeEventSo
     private final AtomicReference<PositionAndScn> lcrMessage = new AtomicReference<>();
 
     public XstreamStreamingChangeEventSource(OracleConnectorConfig connectorConfig, OracleConnection jdbcConnection,
-                                             EventDispatcher<TableId> dispatcher, ErrorHandler errorHandler,
+                                             EventDispatcher<OraclePartition, TableId> dispatcher, ErrorHandler errorHandler,
                                              Clock clock, OracleDatabaseSchema schema,
                                              OracleStreamingChangeEventSourceMetrics streamingMetrics) {
         this.connectorConfig = connectorConfig;
@@ -78,13 +78,15 @@ public class XstreamStreamingChangeEventSource implements StreamingChangeEventSo
     }
 
     @Override
-    public void execute(ChangeEventSourceContext context, OracleOffsetContext offsetContext) throws InterruptedException {
+    public void execute(ChangeEventSourceContext context, OraclePartition partition, OracleOffsetContext offsetContext)
+            throws InterruptedException {
 
-        LcrEventHandler eventHandler = new LcrEventHandler(connectorConfig, errorHandler, dispatcher, clock, schema, offsetContext,
-                TableNameCaseSensitivity.INSENSITIVE.equals(connectorConfig.getAdapter().getTableNameCaseSensitivity(jdbcConnection)), this,
-                streamingMetrics);
+        LcrEventHandler eventHandler = new LcrEventHandler(connectorConfig, errorHandler, dispatcher, clock, schema,
+                partition, offsetContext,
+                TableNameCaseSensitivity.INSENSITIVE.equals(connectorConfig.getAdapter().getTableNameCaseSensitivity(jdbcConnection)),
+                this, streamingMetrics);
 
-        try (OracleConnection xsConnection = new OracleConnection(jdbcConnection.config(), () -> getClass().getClassLoader())) {
+        try (OracleConnection xsConnection = new OracleConnection(jdbcConnection.config())) {
             try {
                 // 1. connect
                 final byte[] startPosition;
@@ -103,7 +105,7 @@ public class XstreamStreamingChangeEventSource implements StreamingChangeEventSo
                 while (context.isRunning()) {
                     LOGGER.trace("Receiving LCR");
                     xsOut.receiveLCRCallback(eventHandler, XStreamOut.DEFAULT_MODE);
-                    dispatcher.dispatchHeartbeatEvent(offsetContext);
+                    dispatcher.dispatchHeartbeatEvent(partition, offsetContext);
                 }
             }
             finally {
@@ -126,7 +128,7 @@ public class XstreamStreamingChangeEventSource implements StreamingChangeEventSo
     }
 
     @Override
-    public void commitOffset(Map<String, ?> offset) {
+    public void commitOffset(Map<String, ?> partition, Map<String, ?> offset) {
         if (xsOut != null) {
             LOGGER.debug("Sending message to request recording of offsets to Oracle");
             final LcrPosition lcrPosition = LcrPosition.valueOf((String) offset.get(SourceInfo.LCR_POSITION_KEY));
@@ -169,18 +171,8 @@ public class XstreamStreamingChangeEventSource implements StreamingChangeEventSo
     }
 
     private static int resolvePosVersion(OracleConnection connection, OracleConnectorConfig connectorConfig) {
-        // Option 'internal.database.oracle.version' takes precedence
-        final String oracleVersion = connectorConfig.getOracleVersion();
-        if (!Strings.isNullOrEmpty(oracleVersion)) {
-            if ("11".equals(oracleVersion)) {
-                return XStreamUtility.POS_VERSION_V1;
-            }
-            return XStreamUtility.POS_VERSION_V2;
-        }
-
-        // As fallback, resolve this based on the OracleDatabaseVersion
         final OracleDatabaseVersion databaseVersion = connection.getOracleVersion();
-        if (databaseVersion.getMajor() == 11) {
+        if (databaseVersion.getMajor() == 11 || (databaseVersion.getMajor() == 12 && databaseVersion.getMaintenance() < 2)) {
             return XStreamUtility.POS_VERSION_V1;
         }
         return XStreamUtility.POS_VERSION_V2;

@@ -7,51 +7,51 @@ package io.debezium.connector.oracle.logminer;
 
 import io.debezium.DebeziumException;
 import io.debezium.connector.oracle.BaseChangeRecordEmitter;
-import io.debezium.connector.oracle.logminer.valueholder.LogMinerDmlEntry;
+import io.debezium.connector.oracle.OracleConnectorConfig;
+import io.debezium.connector.oracle.OracleDatabaseSchema;
+import io.debezium.connector.oracle.logminer.events.EventType;
 import io.debezium.data.Envelope.Operation;
 import io.debezium.pipeline.spi.OffsetContext;
+import io.debezium.pipeline.spi.Partition;
 import io.debezium.relational.Table;
 import io.debezium.util.Clock;
 
 /**
- * Emits change record based on a single {@link LogMinerDmlEntry} event.
+ * Emits change records based on an event read from Oracle LogMiner.
  */
 public class LogMinerChangeRecordEmitter extends BaseChangeRecordEmitter<Object> {
 
-    private final int operation;
-    private final Object[] oldValues;
-    private final Object[] newValues;
+    private final Operation operation;
 
-    public LogMinerChangeRecordEmitter(OffsetContext offset, int operation, Object[] oldValues,
-                                       Object[] newValues, Table table, Clock clock) {
-        super(offset, table, clock);
+    public LogMinerChangeRecordEmitter(OracleConnectorConfig connectorConfig, Partition partition, OffsetContext offset,
+                                       Operation operation, Object[] oldValues, Object[] newValues, Table table,
+                                       OracleDatabaseSchema schema, Clock clock) {
+        super(connectorConfig, partition, offset, schema, table, clock, oldValues, newValues);
         this.operation = operation;
-        this.oldValues = oldValues;
-        this.newValues = newValues;
     }
 
-    @Override
-    protected Operation getOperation() {
-        switch (operation) {
-            case RowMapper.INSERT:
+    public LogMinerChangeRecordEmitter(OracleConnectorConfig connectorConfig, Partition partition, OffsetContext offset,
+                                       EventType eventType, Object[] oldValues, Object[] newValues, Table table,
+                                       OracleDatabaseSchema schema, Clock clock) {
+        this(connectorConfig, partition, offset, getOperation(eventType), oldValues, newValues, table, schema, clock);
+    }
+
+    private static Operation getOperation(EventType eventType) {
+        switch (eventType) {
+            case INSERT:
                 return Operation.CREATE;
-            case RowMapper.UPDATE:
-            case RowMapper.SELECT_LOB_LOCATOR:
+            case UPDATE:
+            case SELECT_LOB_LOCATOR:
                 return Operation.UPDATE;
-            case RowMapper.DELETE:
+            case DELETE:
                 return Operation.DELETE;
             default:
-                throw new DebeziumException("Unsupported operation type: " + operation);
+                throw new DebeziumException("Unsupported operation type: " + eventType);
         }
     }
 
     @Override
-    protected Object[] getOldColumnValues() {
-        return oldValues;
-    }
-
-    @Override
-    protected Object[] getNewColumnValues() {
-        return newValues;
+    public Operation getOperation() {
+        return operation;
     }
 }

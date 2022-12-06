@@ -5,12 +5,17 @@
  */
 package io.debezium.connector.oracle.logminer;
 
-import static org.fest.assertions.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
 
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TestRule;
 
+import io.debezium.connector.oracle.junit.SkipTestDependingOnAdapterNameRule;
+import io.debezium.connector.oracle.junit.SkipWhenAdapterNameIsNot;
+import io.debezium.connector.oracle.logminer.events.EventType;
+import io.debezium.connector.oracle.logminer.parser.LogMinerDmlEntry;
 import io.debezium.connector.oracle.logminer.parser.SelectLobParser;
-import io.debezium.connector.oracle.logminer.valueholder.LogMinerDmlEntry;
 import io.debezium.doc.FixFor;
 import io.debezium.relational.Column;
 import io.debezium.relational.Table;
@@ -21,7 +26,11 @@ import io.debezium.relational.TableId;
  *
  * @author Chris Cranford
  */
+@SkipWhenAdapterNameIsNot(value = SkipWhenAdapterNameIsNot.AdapterName.LOGMINER)
 public class SelectLobParserTest {
+
+    @Rule
+    public TestRule skipRule = new SkipTestDependingOnAdapterNameRule();
 
     private static SelectLobParser parser = new SelectLobParser();
 
@@ -52,7 +61,7 @@ public class SelectLobParserTest {
 
         assertThat(entry.getObjectOwner()).isEqualTo("DEBEZIUM");
         assertThat(entry.getObjectName()).isEqualTo("CLOB_TEST");
-        assertThat(entry.getOperation()).isEqualTo(RowMapper.SELECT_LOB_LOCATOR);
+        assertThat(entry.getEventType()).isEqualTo(EventType.SELECT_LOB_LOCATOR);
         assertThat(entry.getOldValues()).hasSize(3);
         assertThat(entry.getOldValues()[0]).isEqualTo("2");
         assertThat(entry.getOldValues()[1]).isEqualTo("Test2");
@@ -88,7 +97,7 @@ public class SelectLobParserTest {
 
         assertThat(entry.getObjectOwner()).isEqualTo("DEBEZIUM");
         assertThat(entry.getObjectName()).isEqualTo("BLOB_TEST");
-        assertThat(entry.getOperation()).isEqualTo(RowMapper.SELECT_LOB_LOCATOR);
+        assertThat(entry.getEventType()).isEqualTo(EventType.SELECT_LOB_LOCATOR);
         assertThat(entry.getOldValues()).hasSize(3);
         assertThat(entry.getOldValues()[0]).isEqualTo("2");
         assertThat(entry.getOldValues()[1]).isEqualTo("Test2");
@@ -130,7 +139,7 @@ public class SelectLobParserTest {
 
         assertThat(entry.getObjectOwner()).isEqualTo("DEBEZIUM");
         assertThat(entry.getObjectName()).isEqualTo("BIG_TABLE");
-        assertThat(entry.getOperation()).isEqualTo(RowMapper.SELECT_LOB_LOCATOR);
+        assertThat(entry.getEventType()).isEqualTo(EventType.SELECT_LOB_LOCATOR);
         assertThat(entry.getOldValues()).hasSize(7);
         assertThat(entry.getOldValues()[0]).isEqualTo("651900002");
         assertThat(entry.getOldValues()[1]).isEqualTo("person number 651900002");
@@ -180,7 +189,7 @@ public class SelectLobParserTest {
 
         assertThat(entry.getObjectOwner()).isEqualTo("DEBEZIUM");
         assertThat(entry.getObjectName()).isEqualTo("BIG_TABLE");
-        assertThat(entry.getOperation()).isEqualTo(RowMapper.SELECT_LOB_LOCATOR);
+        assertThat(entry.getEventType()).isEqualTo(EventType.SELECT_LOB_LOCATOR);
         assertThat(entry.getOldValues()).hasSize(7);
         assertThat(entry.getOldValues()[0]).isEqualTo("651900002");
         assertThat(entry.getOldValues()[1]).isEqualTo("person number 651900002");
@@ -197,4 +206,42 @@ public class SelectLobParserTest {
         assertThat(entry.getNewValues()[5]).isNull();
     }
 
+    @Test
+    @FixFor("DBZ-4994")
+    public void shouldParseColumnWithEscapedSingleQuoteColumnValues() throws Exception {
+        final Table table = Table.editor()
+                .tableId(TableId.parse("DEBEZIUM.QUOTE_TABLE"))
+                .addColumn(Column.editor().name("ID").create())
+                .addColumn(Column.editor().name("NAME").create())
+                .addColumn(Column.editor().name("CLOB_COL").create())
+                .create();
+
+        String redoSql = "DECLARE \n" +
+                " loc_c CLOB; \n" +
+                " buf_c VARCHAR2(6426); \n" +
+                " loc_b BLOB; \n" +
+                " buf_b RAW(6426); \n" +
+                " loc_nc NCLOB; \n" +
+                " buf_nc NVARCHAR2(6426); \n" +
+                "BEGIN\n" +
+                " select \"CLOB_COL\" into loc_c from \"DEBEZIUM\".\"QUOTE_TABLE\" where \"ID\" = '1' and \"NAME\" = " +
+                "'2\"''\" sd f\"\"\" '''''''' ''''' for update;";
+
+        LogMinerDmlEntry entry = parser.parse(redoSql, table);
+
+        assertThat(parser.isBinary()).isFalse();
+        assertThat(parser.getColumnName()).isEqualTo("CLOB_COL");
+
+        assertThat(entry.getObjectOwner()).isEqualTo("DEBEZIUM");
+        assertThat(entry.getObjectName()).isEqualTo("QUOTE_TABLE");
+        assertThat(entry.getEventType()).isEqualTo(EventType.SELECT_LOB_LOCATOR);
+        assertThat(entry.getOldValues()).hasSize(3);
+        assertThat(entry.getOldValues()[0]).isEqualTo("1");
+        assertThat(entry.getOldValues()[1]).isEqualTo("2\"''\" sd f\"\"\" '''''''' ''''");
+        assertThat(entry.getOldValues()[2]).isNull();
+        assertThat(entry.getNewValues()).hasSize(3);
+        assertThat(entry.getNewValues()[0]).isEqualTo("1");
+        assertThat(entry.getNewValues()[1]).isEqualTo("2\"''\" sd f\"\"\" '''''''' ''''");
+        assertThat(entry.getNewValues()[2]).isNull();
+    }
 }

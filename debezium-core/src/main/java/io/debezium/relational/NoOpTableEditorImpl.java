@@ -14,6 +14,7 @@ final class NoOpTableEditorImpl implements TableEditor {
     private TableId id;
     private boolean uniqueValues = false;
     private String defaultCharsetName;
+    private String comment;
 
     protected NoOpTableEditorImpl() {
     }
@@ -96,8 +97,19 @@ final class NoOpTableEditorImpl implements TableEditor {
     }
 
     @Override
+    public TableEditor setComment(String comment) {
+        this.comment = comment;
+        return this;
+    }
+
+    @Override
     public boolean hasDefaultCharsetName() {
         return this.defaultCharsetName != null && !this.defaultCharsetName.trim().isEmpty();
+    }
+
+    @Override
+    public boolean hasComment() {
+        return this.comment != null && !this.comment.trim().isEmpty();
     }
 
     @Override
@@ -121,6 +133,31 @@ final class NoOpTableEditorImpl implements TableEditor {
     }
 
     @Override
+    public List<Attribute> attributes() {
+        return Collections.emptyList();
+    }
+
+    @Override
+    public Attribute attributeWithName(String attributeName) {
+        return null;
+    }
+
+    @Override
+    public TableEditor addAttribute(Attribute attribute) {
+        return this;
+    }
+
+    @Override
+    public TableEditor addAttributes(List<Attribute> attributes) {
+        return this;
+    }
+
+    @Override
+    public TableEditor removeAttribute(String attributeName) {
+        return this;
+    }
+
+    @Override
     public String toString() {
         return create().toString();
     }
@@ -131,6 +168,7 @@ final class NoOpTableEditorImpl implements TableEditor {
             throw new IllegalStateException("Unable to create a table from an editor that has no table ID");
         }
         List<Column> columns = new ArrayList<>();
-        return new TableImpl(id, columns, primaryKeyColumnNames(), defaultCharsetName);
+        List<Attribute> attributes = new ArrayList<>();
+        return new TableImpl(id, columns, primaryKeyColumnNames(), defaultCharsetName, comment, attributes);
     }
 }

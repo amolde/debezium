@@ -20,6 +20,8 @@ class TableEditorImpl implements TableEditor {
     private final List<String> pkColumnNames = new ArrayList<>();
     private boolean uniqueValues = false;
     private String defaultCharsetName;
+    private String comment;
+    private LinkedHashMap<String, Attribute> attributes = new LinkedHashMap<>();
 
     protected TableEditorImpl() {
     }
@@ -141,8 +143,19 @@ class TableEditorImpl implements TableEditor {
     }
 
     @Override
+    public TableEditor setComment(String comment) {
+        this.comment = comment;
+        return this;
+    }
+
+    @Override
     public boolean hasDefaultCharsetName() {
         return this.defaultCharsetName != null && !this.defaultCharsetName.trim().isEmpty();
+    }
+
+    @Override
+    public boolean hasComment() {
+        return this.comment != null && !this.comment.trim().isEmpty();
     }
 
     @Override
@@ -150,6 +163,7 @@ class TableEditorImpl implements TableEditor {
         Column existing = sortedColumns.remove(columnName.toLowerCase());
         if (existing != null) {
             updatePositions();
+            columnName = existing.name();
         }
         assert positionsAreValid();
         pkColumnNames.remove(columnName);
@@ -210,11 +224,50 @@ class TableEditorImpl implements TableEditor {
             newPkNames.replaceAll(name -> existing.name().equals(name) ? newName : name);
         }
         // Add the new column, move it before the existing column, and remove the old column ...
-        addColumn(newColumn);
-        reorderColumn(newColumn.name(), existing.name());
-        removeColumn(existing.name());
+        if (!existingName.equalsIgnoreCase(newName)) {
+            addColumn(newColumn);
+            reorderColumn(newColumn.name(), existing.name());
+            removeColumn(existing.name());
+        }
+        else {
+            sortedColumns.replace(existingName.toLowerCase(), existing, newColumn);
+        }
         if (newPkNames != null) {
             setPrimaryKeyNames(newPkNames);
+        }
+        return this;
+    }
+
+    @Override
+    public List<Attribute> attributes() {
+        return Collections.unmodifiableList(new ArrayList<>(attributes.values()));
+    }
+
+    @Override
+    public Attribute attributeWithName(String attributeName) {
+        return attributes.get(attributeName.toLowerCase());
+    }
+
+    @Override
+    public TableEditor addAttribute(Attribute attribute) {
+        if (attribute != null) {
+            attributes.put(attribute.name().toLowerCase(), attribute);
+        }
+        return this;
+    }
+
+    @Override
+    public TableEditor addAttributes(List<Attribute> attributes) {
+        for (Attribute attribute : attributes) {
+            addAttribute(attribute);
+        }
+        return this;
+    }
+
+    @Override
+    public TableEditor removeAttribute(String attributeName) {
+        if (attributeName != null) {
+            attributes.remove(attributeName.toLowerCase());
         }
         return this;
     }
@@ -252,6 +305,7 @@ class TableEditorImpl implements TableEditor {
             columns.add(column);
         });
         updatePrimaryKeys();
-        return new TableImpl(id, columns, primaryKeyColumnNames(), defaultCharsetName);
+        List<Attribute> attributes = new ArrayList<>(this.attributes.values());
+        return new TableImpl(id, columns, primaryKeyColumnNames(), defaultCharsetName, comment, attributes);
     }
 }

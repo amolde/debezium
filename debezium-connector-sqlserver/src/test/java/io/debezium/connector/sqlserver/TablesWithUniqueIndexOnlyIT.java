@@ -8,7 +8,7 @@ package io.debezium.connector.sqlserver;
 
 import java.sql.SQLException;
 
-import org.fest.assertions.Assertions;
+import org.assertj.core.api.Assertions;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -43,7 +43,7 @@ public class TablesWithUniqueIndexOnlyIT extends AbstractConnectorTest {
         TestHelper.createTestDatabase();
         initializeConnectorTestFramework();
 
-        Testing.Files.delete(TestHelper.DB_HISTORY_PATH);
+        Testing.Files.delete(TestHelper.SCHEMA_HISTORY_PATH);
     }
 
     @After
@@ -70,8 +70,8 @@ public class TablesWithUniqueIndexOnlyIT extends AbstractConnectorTest {
         final int expectedRecordsCount = 1;
 
         final SourceRecords records = consumeRecordsByTopic(expectedRecordsCount);
-        Assertions.assertThat(records.recordsForTopic("server1.dbo.t1").get(0).keySchema().field("key1")).isNotNull();
-        Assertions.assertThat(records.recordsForTopic("server1.dbo.t1").get(0).keySchema().field("key2")).isNotNull();
+        Assertions.assertThat(records.recordsForTopic("server1.testDB1.dbo.t1").get(0).keySchema().field("key1")).isNotNull();
+        Assertions.assertThat(records.recordsForTopic("server1.testDB1.dbo.t1").get(0).keySchema().field("key2")).isNotNull();
     }
 
     @Test
@@ -90,14 +90,14 @@ public class TablesWithUniqueIndexOnlyIT extends AbstractConnectorTest {
         final int expectedRecordsCount = 1;
 
         SourceRecords records = consumeRecordsByTopic(expectedRecordsCount);
-        Assertions.assertThat(records.recordsForTopic("server1.dbo.t1").get(0).keySchema().field("key1")).isNotNull();
-        Assertions.assertThat(records.recordsForTopic("server1.dbo.t1").get(0).keySchema().field("key2")).isNotNull();
+        Assertions.assertThat(records.recordsForTopic("server1.testDB1.dbo.t1").get(0).keySchema().field("key1")).isNotNull();
+        Assertions.assertThat(records.recordsForTopic("server1.testDB1.dbo.t1").get(0).keySchema().field("key2")).isNotNull();
 
         connection.execute("INSERT INTO t1 VALUES (2, 20, 'data2', 200);");
 
         records = consumeRecordsByTopic(expectedRecordsCount);
-        Assertions.assertThat(records.recordsForTopic("server1.dbo.t1").get(0).keySchema().field("key1")).isNotNull();
-        Assertions.assertThat(records.recordsForTopic("server1.dbo.t1").get(0).keySchema().field("key2")).isNotNull();
+        Assertions.assertThat(records.recordsForTopic("server1.testDB1.dbo.t1").get(0).keySchema().field("key1")).isNotNull();
+        Assertions.assertThat(records.recordsForTopic("server1.testDB1.dbo.t1").get(0).keySchema().field("key2")).isNotNull();
 
         connection.execute(DDL_STATEMENTS_STREAM);
         TestHelper.enableTableCdc(connection, "t2", "t2_CT", Collect.arrayListOf("key1", "key2"));
@@ -105,7 +105,7 @@ public class TablesWithUniqueIndexOnlyIT extends AbstractConnectorTest {
         connection.execute("INSERT INTO t2 VALUES (2, 20, 'data2', 200);");
 
         records = consumeRecordsByTopic(expectedRecordsCount);
-        Assertions.assertThat(records.recordsForTopic("server1.dbo.t2").get(0).keySchema().field("key1")).isNotNull();
-        Assertions.assertThat(records.recordsForTopic("server1.dbo.t2").get(0).keySchema().field("key2")).isNotNull();
+        Assertions.assertThat(records.recordsForTopic("server1.testDB1.dbo.t2").get(0).keySchema().field("key1")).isNotNull();
+        Assertions.assertThat(records.recordsForTopic("server1.testDB1.dbo.t2").get(0).keySchema().field("key2")).isNotNull();
     }
 }

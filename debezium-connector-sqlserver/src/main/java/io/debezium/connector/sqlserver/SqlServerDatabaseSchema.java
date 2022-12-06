@@ -17,7 +17,7 @@ import io.debezium.relational.ddl.DdlParser;
 import io.debezium.relational.history.TableChanges;
 import io.debezium.schema.SchemaChangeEvent;
 import io.debezium.schema.SchemaChangeEvent.SchemaChangeEventType;
-import io.debezium.schema.TopicSelector;
+import io.debezium.spi.topic.TopicNamingStrategy;
 import io.debezium.util.SchemaNameAdjuster;
 
 /**
@@ -29,15 +29,18 @@ public class SqlServerDatabaseSchema extends HistorizedRelationalDatabaseSchema 
 
     private static final Logger LOGGER = LoggerFactory.getLogger(SqlServerDatabaseSchema.class);
 
-    public SqlServerDatabaseSchema(SqlServerConnectorConfig connectorConfig, ValueConverterProvider valueConverter, TopicSelector<TableId> topicSelector,
+    public SqlServerDatabaseSchema(SqlServerConnectorConfig connectorConfig, SqlServerDefaultValueConverter defaultValueConverter,
+                                   ValueConverterProvider valueConverter, TopicNamingStrategy<TableId> topicNamingStrategy,
                                    SchemaNameAdjuster schemaNameAdjuster) {
-        super(connectorConfig, topicSelector, connectorConfig.getTableFilters().dataCollectionFilter(), connectorConfig.getColumnFilter(),
+        super(connectorConfig, topicNamingStrategy, connectorConfig.getTableFilters().dataCollectionFilter(), connectorConfig.getColumnFilter(),
                 new TableSchemaBuilder(
                         valueConverter,
+                        defaultValueConverter,
                         schemaNameAdjuster,
                         connectorConfig.customConverterRegistry(),
                         connectorConfig.getSourceInfoStructMaker().schema(),
-                        connectorConfig.getSanitizeFieldNames()),
+                        connectorConfig.getSanitizeFieldNames(),
+                        true),
                 false, connectorConfig.getKeyMapper());
     }
 
@@ -67,4 +70,5 @@ public class SqlServerDatabaseSchema extends HistorizedRelationalDatabaseSchema 
     protected DdlParser getDdlParser() {
         return null;
     }
+
 }

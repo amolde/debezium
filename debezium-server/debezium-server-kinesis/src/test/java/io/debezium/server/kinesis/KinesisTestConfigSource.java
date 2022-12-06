@@ -24,10 +24,17 @@ public class KinesisTestConfigSource extends TestConfigSource {
         kinesisTest.put("debezium.source.connector.class", "io.debezium.connector.postgresql.PostgresConnector");
         kinesisTest.put("debezium.source." + StandaloneConfig.OFFSET_STORAGE_FILE_FILENAME_CONFIG, OFFSET_STORE_PATH.toAbsolutePath().toString());
         kinesisTest.put("debezium.source.offset.flush.interval.ms", "0");
-        kinesisTest.put("debezium.source.database.server.name", "testc");
+        kinesisTest.put("debezium.source.topic.prefix", "testc");
         kinesisTest.put("debezium.source.schema.include.list", "inventory");
         kinesisTest.put("debezium.source.table.include.list", "inventory.customers");
 
         config = kinesisTest;
+    }
+
+    @Override
+    public int getOrdinal() {
+        // Configuration property precedence is based on ordinal values and since we override the
+        // properties in TestConfigSource, we should give this a higher priority.
+        return super.getOrdinal() + 1;
     }
 }

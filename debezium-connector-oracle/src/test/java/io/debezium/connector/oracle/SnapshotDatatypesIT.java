@@ -39,6 +39,7 @@ public class SnapshotDatatypesIT extends AbstractOracleDatatypesTest {
         insertIntTypes();
         insertTimeTypes();
         insertClobTypes();
+        insertGeometryTypes();
     }
 
     @Before
@@ -51,7 +52,7 @@ public class SnapshotDatatypesIT extends AbstractOracleDatatypesTest {
         setConsumeTimeout(TestHelper.defaultMessageConsumerPollTimeout(), TimeUnit.SECONDS);
         initializeConnectorTestFramework();
         Testing.Debug.enable();
-        Testing.Files.delete(TestHelper.DB_HISTORY_PATH);
+        Testing.Files.delete(TestHelper.SCHEMA_HISTORY_PATH);
 
         Configuration config = connectorConfig()
                 .with(OracleConnectorConfig.TIME_PRECISION_MODE, temporalPrecisionMode)
@@ -85,6 +86,8 @@ public class SnapshotDatatypesIT extends AbstractOracleDatatypesTest {
                 return "debezium.type_time";
             case "clobTypes":
                 return "debezium.type_clob";
+            case "geometryTypes":
+                return "debezium.type_geometry";
             default:
                 throw new IllegalArgumentException("Unexpected test method: " + name.getMethodName());
         }

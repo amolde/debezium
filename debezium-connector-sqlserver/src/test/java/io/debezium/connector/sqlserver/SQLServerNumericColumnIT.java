@@ -13,7 +13,7 @@ import org.apache.kafka.connect.data.Decimal;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.source.SourceRecord;
-import org.fest.assertions.Assertions;
+import org.assertj.core.api.Assertions;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -57,7 +57,7 @@ public class SQLServerNumericColumnIT extends AbstractConnectorTest {
         TestHelper.enableTableCdc(connection, "tablenumd");
 
         initializeConnectorTestFramework();
-        Testing.Files.delete(TestHelper.DB_HISTORY_PATH);
+        Testing.Files.delete(TestHelper.SCHEMA_HISTORY_PATH);
     }
 
     @After
@@ -88,7 +88,7 @@ public class SQLServerNumericColumnIT extends AbstractConnectorTest {
 
         connection.execute("INSERT INTO tablenuma VALUES (111.1111, 1111111, 1111111.1, 1111111 );");
         final SourceRecords records = consumeRecordsByTopic(1);
-        final List<SourceRecord> tableA = records.recordsForTopic("server1.dbo.tablenuma");
+        final List<SourceRecord> tableA = records.recordsForTopic("server1.testDB1.dbo.tablenuma");
         Assertions.assertThat(tableA).hasSize(1);
         final Struct valueA = (Struct) tableA.get(0).value();
         assertSchema(valueA, Schema.OPTIONAL_STRING_SCHEMA);
@@ -120,7 +120,7 @@ public class SQLServerNumericColumnIT extends AbstractConnectorTest {
 
         connection.execute("INSERT INTO tablenumb VALUES (222.2222, 22222, 22222.2, 2222222 );");
         final SourceRecords records = consumeRecordsByTopic(1);
-        final List<SourceRecord> results = records.recordsForTopic("server1.dbo.tablenumb");
+        final List<SourceRecord> results = records.recordsForTopic("server1.testDB1.dbo.tablenumb");
         Assertions.assertThat(results).hasSize(1);
         final Struct valueA = (Struct) results.get(0).value();
         assertSchema(valueA, Schema.OPTIONAL_FLOAT64_SCHEMA);
@@ -151,7 +151,7 @@ public class SQLServerNumericColumnIT extends AbstractConnectorTest {
 
         connection.execute("INSERT INTO tablenumc VALUES (333.3333, 3333, 3333.3, 33333333 );");
         final SourceRecords records = consumeRecordsByTopic(1);
-        final List<SourceRecord> results = records.recordsForTopic("server1.dbo.tablenumc");
+        final List<SourceRecord> results = records.recordsForTopic("server1.testDB1.dbo.tablenumc");
         Assertions.assertThat(results).hasSize(1);
         final Struct valueA = (Struct) results.get(0).value();
         Assertions.assertThat(valueA.schema().field("after").schema().field("cola").schema())

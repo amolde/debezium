@@ -71,11 +71,12 @@ public class OracleConnector extends RelationalBaseSourceConnector {
         final ConfigValue userValue = configValues.get(RelationalDatabaseConnectorConfig.USER.name());
 
         OracleConnectorConfig connectorConfig = new OracleConnectorConfig(config);
-        try (OracleConnection connection = new OracleConnection(connectorConfig.jdbcConfig(), () -> getClass().getClassLoader())) {
-            LOGGER.debug("Successfully tested connection for {} with user '{}'", OracleConnection.connectionString(config), connection.username());
+        try (OracleConnection connection = new OracleConnection(connectorConfig.getJdbcConfig())) {
+            LOGGER.debug("Successfully tested connection for {} with user '{}'", OracleConnection.connectionString(connectorConfig.getJdbcConfig()),
+                    connection.username());
         }
         catch (SQLException | RuntimeException e) {
-            LOGGER.info("Failed testing connection for {} with user '{}'", config.withMaskedPasswords(), userValue, e);
+            LOGGER.error("Failed testing connection for {} with user '{}'", config.withMaskedPasswords(), userValue, e);
             hostnameValue.addErrorMessage("Unable to connect: " + e.getMessage());
         }
     }

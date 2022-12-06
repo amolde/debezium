@@ -5,6 +5,8 @@
  */
 package io.debezium.schema;
 
+import io.debezium.spi.schema.DataCollectionId;
+
 /**
  * The schema of a database. Provides information about the structures of the tables (collections etc.) it contains.
  *
@@ -13,11 +15,9 @@ package io.debezium.schema;
  * @param <I>
  *            The type of {@link DataCollectionId} used by a given implementation
  */
-public interface DatabaseSchema<I extends DataCollectionId> {
+public interface DatabaseSchema<I extends DataCollectionId> extends AutoCloseable {
 
     String NO_CAPTURED_DATA_COLLECTIONS_WARNING = "After applying the include/exclude list filters, no changes will be captured. Please check your configuration!";
-
-    void close();
 
     DataCollectionSchema schemaFor(I id);
 
@@ -31,4 +31,9 @@ public interface DatabaseSchema<I extends DataCollectionId> {
 
     default void assureNonEmptySchema() {
     }
+
+    /**
+     * Whether this schema is historized (i.e. a history of all schema changes is kept which is recovered upon connector restart) or not.
+     */
+    boolean isHistorized();
 }

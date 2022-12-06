@@ -6,6 +6,7 @@
 package io.debezium.connector.mongodb;
 
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -27,6 +28,7 @@ import io.debezium.pipeline.ChangeEventSourceCoordinator;
 import io.debezium.pipeline.DataChangeEvent;
 import io.debezium.pipeline.ErrorHandler;
 import io.debezium.pipeline.EventDispatcher;
+import io.debezium.pipeline.spi.Offsets;
 import io.debezium.util.Clock;
 import io.debezium.util.LoggingContext.PreviousContext;
 import io.debezium.util.SchemaNameAdjuster;
@@ -44,7 +46,9 @@ import io.debezium.util.SchemaNameAdjuster;
  * @author Randall Hauch
  */
 @ThreadSafe
-public final class MongoDbConnectorTask extends BaseSourceTask<MongoDbOffsetContext> {
+public final class MongoDbConnectorTask extends BaseSourceTask<MongoDbPartition, MongoDbOffsetContext> {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(MongoDbConnectorTask.class);
 
     private static final String CONTEXT_NAME = "mongodb-connector-task";
 
@@ -63,18 +67,18 @@ public final class MongoDbConnectorTask extends BaseSourceTask<MongoDbOffsetCont
     }
 
     @Override
-    public ChangeEventSourceCoordinator<MongoDbOffsetContext> start(Configuration config) {
+    public ChangeEventSourceCoordinator<MongoDbPartition, MongoDbOffsetContext> start(Configuration config) {
         final MongoDbConnectorConfig connectorConfig = new MongoDbConnectorConfig(config);
-        final SchemaNameAdjuster schemaNameAdjuster = SchemaNameAdjuster.create();
+        final SchemaNameAdjuster schemaNameAdjuster = connectorConfig.schemaNameAdjustmentMode().createAdjuster();
 
         this.taskName = "task" + config.getInteger(MongoDbConnectorConfig.TASK_ID);
         this.taskContext = new MongoDbTaskContext(config);
 
         final Schema structSchema = connectorConfig.getSourceInfoStructMaker().schema();
-        this.schema = new MongoDbSchema(taskContext.filters(), taskContext.topicSelector(), structSchema);
+        this.schema = new MongoDbSchema(taskContext.filters(), taskContext.topicNamingStrategy(), structSchema, schemaNameAdjuster);
 
         final ReplicaSets replicaSets = getReplicaSets(config);
-        final MongoDbOffsetContext previousOffsets = getPreviousOffsets(connectorConfig, replicaSets);
+        final MongoDbOffsetContext previousOffset = getPreviousOffset(connectorConfig, replicaSets);
         final Clock clock = Clock.system();
 
         PreviousContext previousLogContext = taskContext.configureLoggingContext(taskName);
@@ -89,13 +93,13 @@ public final class MongoDbConnectorTask extends BaseSourceTask<MongoDbOffsetCont
                     .loggingContextSupplier(() -> taskContext.configureLoggingContext(CONTEXT_NAME))
                     .build();
 
-            errorHandler = new MongoDbErrorHandler(connectorConfig.getLogicalName(), queue);
+            errorHandler = new MongoDbErrorHandler(connectorConfig, queue);
 
             final MongoDbEventMetadataProvider metadataProvider = new MongoDbEventMetadataProvider();
 
-            final EventDispatcher<CollectionId> dispatcher = new EventDispatcher<>(
+            final EventDispatcher<MongoDbPartition, CollectionId> dispatcher = new EventDispatcher<>(
                     connectorConfig,
-                    taskContext.topicSelector(),
+                    taskContext.topicNamingStrategy(),
                     schema,
                     queue,
                     taskContext.filters().collectionFilter()::test,
@@ -103,8 +107,9 @@ public final class MongoDbConnectorTask extends BaseSourceTask<MongoDbOffsetCont
                     metadataProvider,
                     schemaNameAdjuster);
 
-            ChangeEventSourceCoordinator<MongoDbOffsetContext> coordinator = new ChangeEventSourceCoordinator<>(
-                    previousOffsets,
+            ChangeEventSourceCoordinator<MongoDbPartition, MongoDbOffsetContext> coordinator = new ChangeEventSourceCoordinator<>(
+                    // TODO pass offsets from all the partitions
+                    Offsets.of(Collections.singletonMap(new MongoDbPartition(), previousOffset)),
                     errorHandler,
                     MongoDbConnector.class,
                     connectorConfig,
@@ -114,7 +119,8 @@ public final class MongoDbConnectorTask extends BaseSourceTask<MongoDbOffsetCont
                             dispatcher,
                             clock,
                             replicaSets,
-                            taskContext),
+                            taskContext,
+                            schema),
                     new MongoDbChangeEventSourceMetricsFactory(),
                     dispatcher,
                     schema);
@@ -152,12 +158,12 @@ public final class MongoDbConnectorTask extends BaseSourceTask<MongoDbOffsetCont
         return MongoDbConnectorConfig.ALL_FIELDS;
     }
 
-    private MongoDbOffsetContext getPreviousOffsets(MongoDbConnectorConfig connectorConfig, ReplicaSets replicaSets) {
+    private MongoDbOffsetContext getPreviousOffset(MongoDbConnectorConfig connectorConfig, ReplicaSets replicaSets) {
         MongoDbOffsetContext.Loader loader = new MongoDbOffsetContext.Loader(connectorConfig, replicaSets);
         Collection<Map<String, String>> partitions = loader.getPartitions();
 
         Map<Map<String, String>, Map<String, Object>> offsets = context.offsetStorageReader().offsets(partitions);
-        if (offsets != null && !offsets.values().stream().filter(Objects::nonNull).collect(Collectors.toList()).isEmpty()) {
+        if (offsets != null && offsets.values().stream().anyMatch(Objects::nonNull)) {
             MongoDbOffsetContext offsetContext = loader.loadOffsets(offsets);
             logger.info("Found previous offsets {}", offsetContext);
             return offsetContext;

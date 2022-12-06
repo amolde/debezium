@@ -8,8 +8,11 @@ package io.debezium.connector.oracle.xstream;
 import java.util.Map;
 
 import io.debezium.connector.oracle.BaseChangeRecordEmitter;
+import io.debezium.connector.oracle.OracleConnectorConfig;
+import io.debezium.connector.oracle.OracleDatabaseSchema;
 import io.debezium.data.Envelope.Operation;
 import io.debezium.pipeline.spi.OffsetContext;
+import io.debezium.pipeline.spi.Partition;
 import io.debezium.relational.Table;
 import io.debezium.util.Clock;
 
@@ -24,16 +27,17 @@ import oracle.streams.RowLCR;
 public class XStreamChangeRecordEmitter extends BaseChangeRecordEmitter<ColumnValue> {
 
     private final RowLCR lcr;
-    private final Map<String, Object> chunkValues;
 
-    public XStreamChangeRecordEmitter(OffsetContext offset, RowLCR lcr, Map<String, Object> chunkValues, Table table, Clock clock) {
-        super(offset, table, clock);
+    public XStreamChangeRecordEmitter(OracleConnectorConfig connectorConfig, Partition partition, OffsetContext offset, RowLCR lcr,
+                                      Map<String, Object> oldChunkValues, Map<String, Object> newChunkValues,
+                                      Table table, OracleDatabaseSchema schema, Clock clock) {
+        super(connectorConfig, partition, offset, schema, table, clock, getColumnValues(table, lcr.getOldValues(), oldChunkValues),
+                getColumnValues(table, lcr.getNewValues(), newChunkValues));
         this.lcr = lcr;
-        this.chunkValues = chunkValues;
     }
 
     @Override
-    protected Operation getOperation() {
+    public Operation getOperation() {
         switch (lcr.getCommandType()) {
             case RowLCR.INSERT:
                 return Operation.CREATE;
@@ -41,26 +45,20 @@ public class XStreamChangeRecordEmitter extends BaseChangeRecordEmitter<ColumnVa
                 return Operation.DELETE;
             case RowLCR.UPDATE:
                 return Operation.UPDATE;
+            case "TRUNCATE TABLE":
+                return Operation.TRUNCATE;
             default:
                 throw new IllegalArgumentException("Received event of unexpected command type: " + lcr);
         }
     }
 
-    @Override
-    protected Object[] getOldColumnValues() {
-        return getColumnValues(lcr.getOldValues());
-    }
-
-    @Override
-    protected Object[] getNewColumnValues() {
-        return getColumnValues(lcr.getNewValues());
-    }
-
-    private Object[] getColumnValues(ColumnValue[] columnValues) {
+    private static Object[] getColumnValues(Table table, ColumnValue[] columnValues, Map<String, Object> chunkValues) {
         Object[] values = new Object[table.columns().size()];
-        for (ColumnValue columnValue : columnValues) {
-            int index = table.columnWithName(columnValue.getColumnName()).position() - 1;
-            values[index] = columnValue.getColumnData();
+        if (columnValues != null) {
+            for (ColumnValue columnValue : columnValues) {
+                int index = table.columnWithName(columnValue.getColumnName()).position() - 1;
+                values[index] = columnValue.getColumnData();
+            }
         }
 
         // Overlay chunk values into non-chunk value array
@@ -71,5 +69,4 @@ public class XStreamChangeRecordEmitter extends BaseChangeRecordEmitter<ColumnVa
 
         return values;
     }
-
 }

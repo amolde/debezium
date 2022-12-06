@@ -22,8 +22,10 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import io.debezium.config.CommonConnectorConfig;
 import io.debezium.config.Configuration;
-import io.debezium.relational.history.FileDatabaseHistory;
+import io.debezium.config.Configuration.Builder;
+import io.debezium.storage.file.history.FileSchemaHistory;
 
 /**
  * Create and populate a unique instance of a MySQL database for each run of JUnit test. A user of class
@@ -127,6 +129,10 @@ public class UniqueDatabase {
         return serverName;
     }
 
+    public String getTopicPrefix() {
+        return serverName;
+    }
+
     /**
      * Creates the database and populates it with initialization SQL script. To use multiline
      * statements for stored procedures definition use delimiter $$ to delimit statements in the procedure.
@@ -173,7 +179,7 @@ public class UniqueDatabase {
 
     /**
      * @param dbHistoryPath - directory where to store database schema history
-     * @see io.debezium.relational.history.FileDatabaseHistory
+     * @see io.debezium.storage.file.history.FileSchemaHistory
      */
     public UniqueDatabase withDbHistoryPath(final Path dbHistoryPath) {
         this.dbHistoryPath = dbHistoryPath;
@@ -184,11 +190,33 @@ public class UniqueDatabase {
      * @return Configuration builder initialized with JDBC connection parameters.
      */
     public Configuration.Builder defaultJdbcConfigBuilder() {
-        return Configuration.create()
+        Builder builder = Configuration.create()
                 .with(MySqlConnectorConfig.HOSTNAME, System.getProperty("database.hostname", "localhost"))
                 .with(MySqlConnectorConfig.PORT, System.getProperty("database.port", "3306"))
                 .with(MySqlConnectorConfig.USER, "snapper")
                 .with(MySqlConnectorConfig.PASSWORD, "snapperpass");
+
+        String sslMode = System.getProperty("database.ssl.mode", "disabled");
+
+        if (sslMode.equals("disabled")) {
+            builder.with(MySqlConnectorConfig.SSL_MODE, MySqlConnectorConfig.SecureConnectionMode.DISABLED);
+        }
+        else {
+            URL trustStoreFile = UniqueDatabase.class.getClassLoader().getResource("ssl/truststore");
+            URL keyStoreFile = UniqueDatabase.class.getClassLoader().getResource("ssl/keystore");
+
+            builder.with(MySqlConnectorConfig.SSL_MODE, sslMode)
+                    .with(MySqlConnectorConfig.SSL_TRUSTSTORE, System.getProperty("database.ssl.truststore", trustStoreFile.getPath()))
+                    .with(MySqlConnectorConfig.SSL_TRUSTSTORE_PASSWORD, System.getProperty("database.ssl.truststore.password", "debezium"))
+                    .with(MySqlConnectorConfig.SSL_KEYSTORE, System.getProperty("database.ssl.keystore", keyStoreFile.getPath()))
+                    .with(MySqlConnectorConfig.SSL_KEYSTORE_PASSWORD, System.getProperty("database.ssl.keystore.password", "debezium"));
+        }
+
+        if (dbHistoryPath != null) {
+            builder.with(FileSchemaHistory.FILE_PATH, dbHistoryPath);
+        }
+
+        return builder;
     }
 
     /**
@@ -204,20 +232,12 @@ public class UniqueDatabase {
      * database not filtered by default
      */
     public Configuration.Builder defaultConfigWithoutDatabaseFilter() {
-        final Configuration.Builder builder = defaultJdbcConfigBuilder()
-                .with(MySqlConnectorConfig.SSL_MODE, MySqlConnectorConfig.SecureConnectionMode.DISABLED)
+        return defaultJdbcConfigBuilder()
                 .with(MySqlConnectorConfig.SERVER_ID, 18765)
-                .with(MySqlConnectorConfig.SERVER_NAME, getServerName())
                 .with(MySqlConnectorConfig.POLL_INTERVAL_MS, 10)
-                .with(MySqlConnectorConfig.DATABASE_HISTORY, FileDatabaseHistory.class)
+                .with(MySqlConnectorConfig.SCHEMA_HISTORY, FileSchemaHistory.class)
                 .with(MySqlConnectorConfig.BUFFER_SIZE_FOR_BINLOG_READER, 10_000)
-                .with(MySqlConnector.IMPLEMENTATION_PROP, System.getProperty(MySqlConnector.IMPLEMENTATION_PROP, "new"));
-
-        if (dbHistoryPath != null) {
-            builder.with(FileDatabaseHistory.FILE_PATH, dbHistoryPath);
-        }
-
-        return builder;
+                .with(CommonConnectorConfig.TOPIC_PREFIX, getServerName());
     }
 
     /**

@@ -97,6 +97,26 @@ public interface Table {
     String defaultCharsetName();
 
     /**
+     * Get the comment of the table.
+     * @return the table comment; may be null if not set
+     */
+    String comment();
+
+    /**
+     * Get the attributes of the table.
+     * @return the table attributes; may be null if not set
+     */
+    List<Attribute> attributes();
+
+    /**
+     * Get the definition for an attribute in this table with the supplied name.
+     *
+     * @param name the case-insensitive name of the attribute
+     * @return the attribute definition, or null if there is no attribute with the given name
+     */
+    Attribute attributeWithName(String name);
+
+    /**
      * Determine if the named column is part of the primary key.
      *
      * @param columnName the name of the column

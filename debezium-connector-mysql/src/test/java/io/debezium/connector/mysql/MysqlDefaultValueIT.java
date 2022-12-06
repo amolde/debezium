@@ -6,7 +6,7 @@
 package io.debezium.connector.mysql;
 
 import static io.debezium.junit.EqualityCheck.LESS_THAN;
-import static org.fest.assertions.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import java.math.BigDecimal;
 import java.nio.file.Path;
@@ -25,6 +25,7 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.time.temporal.TemporalAccessor;
+import java.util.List;
 
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.Struct;
@@ -44,7 +45,7 @@ import io.debezium.junit.SkipWhenDatabaseVersion;
 import io.debezium.junit.SkipWhenKafkaVersion;
 import io.debezium.junit.SkipWhenKafkaVersion.KafkaVersion;
 import io.debezium.relational.RelationalDatabaseConnectorConfig;
-import io.debezium.relational.history.DatabaseHistory;
+import io.debezium.relational.history.SchemaHistory;
 import io.debezium.time.MicroTimestamp;
 import io.debezium.time.Timestamp;
 import io.debezium.time.ZonedTimestamp;
@@ -59,9 +60,9 @@ public class MysqlDefaultValueIT extends AbstractConnectorTest {
     // 4 meta events (set character_set etc.) and then 14 tables with 3 events each (drop DDL, create DDL, insert)
     private static final int EVENT_COUNT = 4 + 14 * 3;
 
-    private static final Path DB_HISTORY_PATH = Testing.Files.createTestingPath("file-db-history-connect.txt").toAbsolutePath();
+    private static final Path SCHEMA_HISTORY_PATH = Testing.Files.createTestingPath("file-schema-history-connect.txt").toAbsolutePath();
     private final UniqueDatabase DATABASE = new UniqueDatabase("myServer1", "default_value")
-            .withDbHistoryPath(DB_HISTORY_PATH);
+            .withDbHistoryPath(SCHEMA_HISTORY_PATH);
 
     private Configuration config;
 
@@ -70,8 +71,7 @@ public class MysqlDefaultValueIT extends AbstractConnectorTest {
         stopConnector();
         DATABASE.createAndInitialize();
         initializeConnectorTestFramework();
-        Testing.Files.delete(DB_HISTORY_PATH);
-        skipAvroValidation(); // https://github.com/confluentinc/schema-registry/issues/1693
+        Testing.Files.delete(SCHEMA_HISTORY_PATH);
     }
 
     @After
@@ -80,7 +80,7 @@ public class MysqlDefaultValueIT extends AbstractConnectorTest {
             stopConnector();
         }
         finally {
-            Testing.Files.delete(DB_HISTORY_PATH);
+            Testing.Files.delete(SCHEMA_HISTORY_PATH);
         }
     }
 
@@ -331,7 +331,7 @@ public class MysqlDefaultValueIT extends AbstractConnectorTest {
 
     @Test
     @SkipWhenKafkaVersion(check = EqualityCheck.EQUAL, value = KafkaVersion.KAFKA_1XX, description = "Not compatible with Kafka 1.x")
-    public void databaseHistorySaveDefaultValuesTest() throws InterruptedException, SQLException {
+    public void schemaHistorySaveDefaultValuesTest() throws InterruptedException, SQLException {
         config = DATABASE.defaultConfig()
                 .with(MySqlConnectorConfig.SNAPSHOT_MODE, MySqlConnectorConfig.SnapshotMode.INITIAL)
                 .build();
@@ -569,7 +569,7 @@ public class MysqlDefaultValueIT extends AbstractConnectorTest {
 
         Schema schemaA = record.valueSchema().fields().get(1).schema().fields().get(0).schema();
         Schema schemaB = record.valueSchema().fields().get(1).schema().fields().get(1).schema();
-        assertThat(schemaA.defaultValue()).isEqualTo(0d);
+        assertThat(schemaA.defaultValue()).isEqualTo(0f);
         assertThat(schemaB.defaultValue()).isEqualTo(1.0d);
         assertEmptyFieldValue(record, "H");
     }
@@ -646,7 +646,7 @@ public class MysqlDefaultValueIT extends AbstractConnectorTest {
         config = DATABASE.defaultConfig()
                 .with(MySqlConnectorConfig.SNAPSHOT_MODE, MySqlConnectorConfig.SnapshotMode.INITIAL)
                 .with(MySqlConnectorConfig.TABLE_INCLUDE_LIST, DATABASE.qualifiedTableName("DATE_TIME_TABLE"))
-                .with(DatabaseHistory.STORE_ONLY_CAPTURED_TABLES_DDL, true)
+                .with(SchemaHistory.STORE_ONLY_CAPTURED_TABLES_DDL, true)
                 .build();
         start(MySqlConnector.class, config);
 
@@ -715,7 +715,7 @@ public class MysqlDefaultValueIT extends AbstractConnectorTest {
                 .with(MySqlConnectorConfig.SNAPSHOT_MODE, MySqlConnectorConfig.SnapshotMode.INITIAL)
                 .with(MySqlConnectorConfig.TABLE_INCLUDE_LIST, DATABASE.qualifiedTableName("DATE_TIME_TABLE"))
                 .with(MySqlConnectorConfig.TIME_PRECISION_MODE, TemporalPrecisionMode.CONNECT)
-                .with(DatabaseHistory.STORE_ONLY_CAPTURED_TABLES_DDL, true)
+                .with(SchemaHistory.STORE_ONLY_CAPTURED_TABLES_DDL, true)
                 .build();
         start(MySqlConnector.class, config);
 
@@ -858,7 +858,7 @@ public class MysqlDefaultValueIT extends AbstractConnectorTest {
         config = DATABASE.defaultConfig()
                 .with(MySqlConnectorConfig.SNAPSHOT_MODE, MySqlConnectorConfig.SnapshotMode.INITIAL)
                 .with(MySqlConnectorConfig.TABLE_INCLUDE_LIST, DATABASE.qualifiedTableName("ALTER_DATE_TIME"))
-                .with(DatabaseHistory.STORE_ONLY_CAPTURED_TABLES_DDL, true)
+                .with(SchemaHistory.STORE_ONLY_CAPTURED_TABLES_DDL, true)
                 .with(MySqlConnectorConfig.INCLUDE_SCHEMA_CHANGES, false)
                 .build();
         start(MySqlConnector.class, config);
@@ -883,4 +883,125 @@ public class MysqlDefaultValueIT extends AbstractConnectorTest {
         final Schema columnSchema = record.valueSchema().fields().get(1).schema().fields().get(1).schema();
         assertThat(columnSchema.defaultValue()).isEqualTo("1970-01-01T00:00:00Z");
     }
+
+    @Test
+    @FixFor("DBZ-4822")
+    public void shouldConvertDefaultBoolean2Number() throws Exception {
+        config = DATABASE.defaultConfig()
+                .with(MySqlConnectorConfig.SNAPSHOT_MODE, MySqlConnectorConfig.SnapshotMode.SCHEMA_ONLY)
+                .with(MySqlConnectorConfig.TABLE_INCLUDE_LIST, DATABASE.qualifiedTableName("DBZ_4822_DEFAULT_BOOLEAN"))
+                .with(SchemaHistory.STORE_ONLY_CAPTURED_TABLES_DDL, true)
+                .with(MySqlConnectorConfig.INCLUDE_SCHEMA_CHANGES, false)
+                .with(MySqlConnectorConfig.DECIMAL_HANDLING_MODE, RelationalDatabaseConnectorConfig.DecimalHandlingMode.STRING)
+                .build();
+
+        start(MySqlConnector.class, config);
+        waitForSnapshotToBeCompleted("mysql", DATABASE.getServerName());
+
+        // Connect to the DB and issue our alter statement to test.
+        try (MySqlTestConnection db = MySqlTestConnection.forTestDatabase(DATABASE.getDatabaseName())) {
+            try (JdbcConnection connection = db.connect()) {
+                String addColumnDdl = "CREATE TABLE DBZ_4822_DEFAULT_BOOLEAN (\n"
+                        + "ID INT NOT NULL AUTO_INCREMENT PRIMARY KEY,\n"
+                        + "C0 BIGINT NULL DEFAULT TRUE,\n"
+                        + "C1 INT(1) NULL DEFAULT true,\n"
+                        + "C2 BIT DEFAULT true,\n"
+                        + "C3 TINYINT DEFAULT false,\n"
+                        + "C4 FLOAT DEFAULT false,\n"
+                        + "C5 REAL DEFAULT false\n,"
+                        + "C6 DOUBLE DEFAULT false\n,"
+                        + "C7 NUMERIC(38, 26) DEFAULT false,\n"
+                        + "C8 DECIMAL(10, 2) DEFAULT false,\n"
+                        + "C9 BIGINT DEFAULT false);";
+                connection.execute(addColumnDdl);
+                connection.execute("insert into DBZ_4822_DEFAULT_BOOLEAN (C0) values(1000);");
+            }
+        }
+
+        SourceRecords records = consumeRecordsByTopic(100);
+        assertThat(records).isNotNull();
+
+        List<SourceRecord> events = records.recordsForTopic(DATABASE.topicForTable("DBZ_4822_DEFAULT_BOOLEAN"));
+        assertThat(events).hasSize(1);
+        SourceRecord record = events.get(0);
+        Struct change = ((Struct) record.value()).getStruct("after");
+        assertThat(change.get("C7")).isEqualTo("0.00000000000000000000000000");
+        assertThat(change.get("C8")).isEqualTo("0.00");
+        assertThat(change.get("C9")).isEqualTo(0L);
+    }
+
+    @Test
+    @FixFor("DBZ-5241")
+    public void shouldConvertDefaultWithCharacterSetIntroducer() throws Exception {
+        config = DATABASE.defaultConfig()
+                .with(MySqlConnectorConfig.SNAPSHOT_MODE, MySqlConnectorConfig.SnapshotMode.SCHEMA_ONLY)
+                .with(MySqlConnectorConfig.TABLE_INCLUDE_LIST, DATABASE.qualifiedTableName("DBZ_5241_DEFAULT_CS_INTRO"))
+                .with(SchemaHistory.STORE_ONLY_CAPTURED_TABLES_DDL, true)
+                .with(MySqlConnectorConfig.INCLUDE_SCHEMA_CHANGES, false)
+                .build();
+
+        start(MySqlConnector.class, config);
+        waitForSnapshotToBeCompleted("mysql", DATABASE.getServerName());
+
+        // Connect to the DB and create our table and insert a value
+        try (MySqlTestConnection db = MySqlTestConnection.forTestDatabase(DATABASE.getDatabaseName())) {
+            try (JdbcConnection connection = db.connect()) {
+                final String createTable = "CREATE TABLE DBZ_5241_DEFAULT_CS_INTRO (\n"
+                        + "ID INT NOT NULL AUTO_INCREMENT PRIMARY KEY, \n"
+                        + "C0 BIGINT NOT NULL, \n"
+                        + "C1 TINYINT(4) UNSIGNED DEFAULT 0, \n"
+                        + "C2 TINYINT(4) UNSIGNED DEFAULT _UTF8MB4'0' COMMENT 'c2', \n"
+                        + "C3 TINYINT(1) NOT NULL DEFAULT _UTF8MB4'0' COMMENT 'c3', \n"
+                        + "C4 VARCHAR(25) DEFAULT _utf8'abc', \n"
+                        + "C5 VARCHAR(25) NOT NULL DEFAULT _utf8'abc', \n"
+                        + "C6 CHAR(25) DEFAULT _utf8'abc', \n"
+                        + "C7 CHAR(25) NOT NULL DEFAULT _utf8'abc', \n"
+                        + "C8 BIGINT UNSIGNED DEFAULT _UTF8MB4'0', \n"
+                        + "C9 BIGINT UNSIGNED NOT NULL DEFAULT _UTF8MB4'0', \n"
+                        + "C10 INT DEFAULT _utf8'0', \n"
+                        + "C11 INT NOT NULL DEFAULT _utf8'0', \n"
+                        + "C12 MEDIUMINT DEFAULT _utf8'0', \n"
+                        + "C13 MEDIUMINT NOT NULL DEFAULT _utf8'0', \n"
+                        + "C14 SMALLINT DEFAULT _utf8'0', \n"
+                        + "C15 SMALLINT NOT NULL DEFAULT _utf8'0', \n"
+                        + "C16 NUMERIC(3, 2) DEFAULT _UTF8MB4'1.23', \n"
+                        + "C17 NUMERIC(3, 2) NOT NULL DEFAULT _UTF8MB4'1.23', \n"
+                        + "C18 REAL DEFAULT _UTF8MB4'3.14', \n"
+                        + "C19 REAL NOT NULL DEFAULT _UTF8MB4'3.14');";
+                connection.execute(createTable);
+                connection.execute("INSERT INTO DBZ_5241_DEFAULT_CS_INTRO (C0) values (1);");
+            }
+        }
+
+        SourceRecords records = consumeRecordsByTopic(100);
+
+        List<SourceRecord> events = records.recordsForTopic(DATABASE.topicForTable("DBZ_5241_DEFAULT_CS_INTRO"));
+        assertThat(events).hasSize(1);
+        SourceRecord record = events.get(0);
+        Struct change = ((Struct) record.value()).getStruct("after");
+        assertFieldDefaultValue(change, "C1", (short) 0);
+        assertFieldDefaultValue(change, "C2", (short) 0);
+        assertFieldDefaultValue(change, "C3", (short) 0);
+        assertFieldDefaultValue(change, "C4", "abc");
+        assertFieldDefaultValue(change, "C5", "abc");
+        assertFieldDefaultValue(change, "C6", "abc");
+        assertFieldDefaultValue(change, "C7", "abc");
+        assertFieldDefaultValue(change, "C8", 0L);
+        assertFieldDefaultValue(change, "C9", 0L);
+        assertFieldDefaultValue(change, "C10", 0);
+        assertFieldDefaultValue(change, "C11", 0);
+        assertFieldDefaultValue(change, "C12", 0);
+        assertFieldDefaultValue(change, "C13", 0);
+        assertFieldDefaultValue(change, "C14", (short) 0);
+        assertFieldDefaultValue(change, "C15", (short) 0);
+        assertFieldDefaultValue(change, "C16", BigDecimal.valueOf(1.23));
+        assertFieldDefaultValue(change, "C17", BigDecimal.valueOf(1.23));
+        assertFieldDefaultValue(change, "C18", 3.14f);
+        assertFieldDefaultValue(change, "C19", 3.14f);
+    }
+
+    private void assertFieldDefaultValue(Struct value, String fieldName, Object defaultValue) {
+        assertThat(value.schema().field(fieldName).schema().defaultValue()).isEqualTo(defaultValue);
+    }
+
 }

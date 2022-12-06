@@ -7,7 +7,7 @@
 package io.debezium.connector.postgresql;
 
 import static io.debezium.connector.postgresql.TestHelper.PK_FIELD;
-import static org.fest.assertions.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
@@ -102,15 +102,17 @@ public abstract class AbstractRecordsProducerTest extends AbstractConnectorTest 
     public TestRule logTestName = new TestLogger(LOGGER);
 
     protected static final Pattern INSERT_TABLE_MATCHING_PATTERN = Pattern.compile("insert into (.*)\\(.*\\) VALUES .*", Pattern.CASE_INSENSITIVE);
+    protected static final Pattern DELETE_TABLE_MATCHING_PATTERN = Pattern.compile("delete from (.*) where .*", Pattern.CASE_INSENSITIVE);
 
     protected static final String INSERT_CASH_TYPES_STMT = "INSERT INTO cash_table (csh) VALUES ('$1234.11')";
     protected static final String INSERT_NEGATIVE_CASH_TYPES_STMT = "INSERT INTO cash_table (csh) VALUES ('($1234.11)')";
     protected static final String INSERT_NULL_CASH_TYPES_STMT = "INSERT INTO cash_table (csh) VALUES (NULL)";
-    protected static final String INSERT_DATE_TIME_TYPES_STMT = "INSERT INTO time_table(ts, tsneg, ts_ms, ts_us, tz, date, ti, tip, ttf, ttz, tptz, it, ts_large, ts_large_us, ts_large_ms, tz_large, ts_max, ts_min, tz_max, tz_min, ts_pinf, ts_ninf, tz_pinf, tz_ninf) "
+    protected static final String INSERT_DATE_TIME_TYPES_STMT = "INSERT INTO time_table(ts, tsneg, ts_ms, ts_us, tz, date, date_pinf, date_ninf, ti, tip, ttf, ttz, tptz, it, ts_large, ts_large_us, ts_large_ms, tz_large, ts_max, ts_min, tz_max, tz_min, ts_pinf, ts_ninf, tz_pinf, tz_ninf) "
             +
             "VALUES ('2016-11-04T13:51:30.123456'::TIMESTAMP, '1936-10-25T22:10:12.608'::TIMESTAMP, '2016-11-04T13:51:30.123456'::TIMESTAMP, '2016-11-04T13:51:30.123456'::TIMESTAMP, '2016-11-04T13:51:30.123456+02:00'::TIMESTAMPTZ, "
             +
-            "'2016-11-04'::DATE, '13:51:30'::TIME, '13:51:30.123'::TIME, '24:00:00'::TIME, '13:51:30.123789+02:00'::TIMETZ, '13:51:30.123+02:00'::TIMETZ, " +
+            "'2016-11-04'::DATE, 'infinity'::DATE, '-infinity'::DATE, '13:51:30'::TIME, '13:51:30.123'::TIME, '24:00:00'::TIME, '13:51:30.123789+02:00'::TIMETZ, '13:51:30.123+02:00'::TIMETZ, "
+            +
             "'P1Y2M3DT4H5M6.78S'::INTERVAL," +
             "'21016-11-04T13:51:30.123456'::TIMESTAMP, '21016-11-04T13:51:30.123457'::TIMESTAMP, '21016-11-04T13:51:30.124'::TIMESTAMP," +
             "'21016-11-04T13:51:30.123456+07:00'::TIMESTAMPTZ," +
@@ -217,6 +219,8 @@ public abstract class AbstractRecordsProducerTest extends AbstractConnectorTest 
 
     protected static final String INSERT_HSTORE_TYPE_WITH_SPECIAL_CHAR_STMT = "INSERT INTO hstore_table_with_special (hs) VALUES ('\"key_#1\" => \"val 1\",\"key 2\" =>\" ##123 78\"')";
 
+    protected static final String DELETE_DATE_TIME_TYPES_STMT = "DELETE FROM time_table WHERE pk=1;";
+
     protected static final Set<String> ALL_STMTS = new HashSet<>(Arrays.asList(INSERT_NUMERIC_TYPES_STMT, INSERT_NUMERIC_DECIMAL_TYPES_STMT_NO_NAN,
             INSERT_DATE_TIME_TYPES_STMT, INSERT_BIN_TYPES_STMT, INSERT_GEOM_TYPES_STMT, INSERT_TEXT_TYPES_STMT,
             INSERT_CASH_TYPES_STMT, INSERT_STRING_TYPES_STMT, INSERT_CIDR_NETWORK_ADDRESS_TYPE_STMT,
@@ -237,16 +241,13 @@ public abstract class AbstractRecordsProducerTest extends AbstractConnectorTest 
                 new SchemaAndValueField("ss", SchemaBuilder.int16().defaultValue((short) 0).build(), (short) 1),
                 new SchemaAndValueField("bs", SchemaBuilder.int64().defaultValue(0L).build(), 123L),
                 new SchemaAndValueField("b", Schema.OPTIONAL_BOOLEAN_SCHEMA, Boolean.TRUE),
-                new SchemaAndValueField("o", Schema.OPTIONAL_INT64_SCHEMA, 4_000_000_000L)));
-        if (!DecoderDifferences.areSpecialFPValuesUnsupported()) {
-            fields.addAll(Arrays.asList(
-                    new SchemaAndValueField("r_nan", Schema.OPTIONAL_FLOAT32_SCHEMA, Float.NaN),
-                    new SchemaAndValueField("db_nan", Schema.OPTIONAL_FLOAT64_SCHEMA, Double.NaN),
-                    new SchemaAndValueField("r_pinf", Schema.OPTIONAL_FLOAT32_SCHEMA, Float.POSITIVE_INFINITY),
-                    new SchemaAndValueField("db_pinf", Schema.OPTIONAL_FLOAT64_SCHEMA, Double.POSITIVE_INFINITY),
-                    new SchemaAndValueField("r_ninf", Schema.OPTIONAL_FLOAT32_SCHEMA, Float.NEGATIVE_INFINITY),
-                    new SchemaAndValueField("db_ninf", Schema.OPTIONAL_FLOAT64_SCHEMA, Double.NEGATIVE_INFINITY)));
-        }
+                new SchemaAndValueField("o", Schema.OPTIONAL_INT64_SCHEMA, 4_000_000_000L),
+                new SchemaAndValueField("r_nan", Schema.OPTIONAL_FLOAT32_SCHEMA, Float.NaN),
+                new SchemaAndValueField("db_nan", Schema.OPTIONAL_FLOAT64_SCHEMA, Double.NaN),
+                new SchemaAndValueField("r_pinf", Schema.OPTIONAL_FLOAT32_SCHEMA, Float.POSITIVE_INFINITY),
+                new SchemaAndValueField("db_pinf", Schema.OPTIONAL_FLOAT64_SCHEMA, Double.POSITIVE_INFINITY),
+                new SchemaAndValueField("r_ninf", Schema.OPTIONAL_FLOAT32_SCHEMA, Float.NEGATIVE_INFINITY),
+                new SchemaAndValueField("db_ninf", Schema.OPTIONAL_FLOAT64_SCHEMA, Double.NEGATIVE_INFINITY)));
         return fields;
     }
 
@@ -287,16 +288,13 @@ public abstract class AbstractRecordsProducerTest extends AbstractConnectorTest 
                 new SchemaAndValueField("dvs_int", Schema.OPTIONAL_STRING_SCHEMA, "10"),
                 new SchemaAndValueField("n_int", Schema.OPTIONAL_STRING_SCHEMA, "22.0000"),
                 new SchemaAndValueField("nzs_int", Schema.OPTIONAL_STRING_SCHEMA, "22"),
-                new SchemaAndValueField("nvs_int", Schema.OPTIONAL_STRING_SCHEMA, "22")));
-        if (!DecoderDifferences.areSpecialFPValuesUnsupported()) {
-            fields.addAll(Arrays.asList(
-                    new SchemaAndValueField("d_nan", Schema.OPTIONAL_STRING_SCHEMA, "NAN"),
-                    new SchemaAndValueField("dzs_nan", Schema.OPTIONAL_STRING_SCHEMA, "NAN"),
-                    new SchemaAndValueField("dvs_nan", Schema.OPTIONAL_STRING_SCHEMA, "NAN"),
-                    new SchemaAndValueField("n_nan", Schema.OPTIONAL_STRING_SCHEMA, "NAN"),
-                    new SchemaAndValueField("nzs_nan", Schema.OPTIONAL_STRING_SCHEMA, "NAN"),
-                    new SchemaAndValueField("nvs_nan", Schema.OPTIONAL_STRING_SCHEMA, "NAN")));
-        }
+                new SchemaAndValueField("nvs_int", Schema.OPTIONAL_STRING_SCHEMA, "22"),
+                new SchemaAndValueField("d_nan", Schema.OPTIONAL_STRING_SCHEMA, "NAN"),
+                new SchemaAndValueField("dzs_nan", Schema.OPTIONAL_STRING_SCHEMA, "NAN"),
+                new SchemaAndValueField("dvs_nan", Schema.OPTIONAL_STRING_SCHEMA, "NAN"),
+                new SchemaAndValueField("n_nan", Schema.OPTIONAL_STRING_SCHEMA, "NAN"),
+                new SchemaAndValueField("nzs_nan", Schema.OPTIONAL_STRING_SCHEMA, "NAN"),
+                new SchemaAndValueField("nvs_nan", Schema.OPTIONAL_STRING_SCHEMA, "NAN")));
         return fields;
     }
 
@@ -307,16 +305,13 @@ public abstract class AbstractRecordsProducerTest extends AbstractConnectorTest 
                 new SchemaAndValueField("dvs", Schema.OPTIONAL_FLOAT64_SCHEMA, 10.1111d),
                 new SchemaAndValueField("n", Schema.OPTIONAL_FLOAT64_SCHEMA, 22.22d),
                 new SchemaAndValueField("nzs", Schema.OPTIONAL_FLOAT64_SCHEMA, 22d),
-                new SchemaAndValueField("nvs", Schema.OPTIONAL_FLOAT64_SCHEMA, 22.2222d)));
-        if (!DecoderDifferences.areSpecialFPValuesUnsupported()) {
-            fields.addAll(Arrays.asList(
-                    new SchemaAndValueField("d_nan", Schema.OPTIONAL_FLOAT64_SCHEMA, Double.NaN),
-                    new SchemaAndValueField("dzs_nan", Schema.OPTIONAL_FLOAT64_SCHEMA, Double.NaN),
-                    new SchemaAndValueField("dvs_nan", Schema.OPTIONAL_FLOAT64_SCHEMA, Double.NaN),
-                    new SchemaAndValueField("n_nan", Schema.OPTIONAL_FLOAT64_SCHEMA, Double.NaN),
-                    new SchemaAndValueField("nzs_nan", Schema.OPTIONAL_FLOAT64_SCHEMA, Double.NaN),
-                    new SchemaAndValueField("nvs_nan", Schema.OPTIONAL_FLOAT64_SCHEMA, Double.NaN)));
-        }
+                new SchemaAndValueField("nvs", Schema.OPTIONAL_FLOAT64_SCHEMA, 22.2222d),
+                new SchemaAndValueField("d_nan", Schema.OPTIONAL_FLOAT64_SCHEMA, Double.NaN),
+                new SchemaAndValueField("dzs_nan", Schema.OPTIONAL_FLOAT64_SCHEMA, Double.NaN),
+                new SchemaAndValueField("dvs_nan", Schema.OPTIONAL_FLOAT64_SCHEMA, Double.NaN),
+                new SchemaAndValueField("n_nan", Schema.OPTIONAL_FLOAT64_SCHEMA, Double.NaN),
+                new SchemaAndValueField("nzs_nan", Schema.OPTIONAL_FLOAT64_SCHEMA, Double.NaN),
+                new SchemaAndValueField("nvs_nan", Schema.OPTIONAL_FLOAT64_SCHEMA, Double.NaN)));
         return fields;
     }
 
@@ -425,12 +420,20 @@ public abstract class AbstractRecordsProducerTest extends AbstractConnectorTest 
         return Arrays.asList(new SchemaAndValueField("ba", Schema.OPTIONAL_STRING_SCHEMA, "AQID"));
     }
 
+    protected List<SchemaAndValueField> schemaAndValueForByteaBase64UrlSafe() {
+        return Arrays.asList(new SchemaAndValueField("ba", Schema.OPTIONAL_STRING_SCHEMA, "AQID"));
+    }
+
     protected List<SchemaAndValueField> schemaAndValueForUnknownColumnBytes() {
         return Arrays.asList(new SchemaAndValueField("ccircle", Schema.OPTIONAL_BYTES_SCHEMA, ByteBuffer.wrap("<(10.0,20.0),10.0>".getBytes(StandardCharsets.UTF_8))));
     }
 
     protected List<SchemaAndValueField> schemaAndValueForUnknownColumnBase64() {
         return Arrays.asList(new SchemaAndValueField("ccircle", Schema.OPTIONAL_STRING_SCHEMA, "PCgxMC4wLDIwLjApLDEwLjA+"));
+    }
+
+    protected List<SchemaAndValueField> schemaAndValueForUnknownColumnBase64UrlSafe() {
+        return Arrays.asList(new SchemaAndValueField("ccircle", Schema.OPTIONAL_STRING_SCHEMA, "PCgxMC4wLDIwLjApLDEwLjA-"));
     }
 
     protected List<SchemaAndValueField> schemaAndValueForUnknownColumnHex() {
@@ -1050,7 +1053,27 @@ public abstract class AbstractRecordsProducerTest extends AbstractConnectorTest 
         }
     }
 
-    protected void assertRecordOffsetAndSnapshotSource(SourceRecord record, boolean shouldBeSnapshot, boolean shouldBeLastSnapshotRecord) {
+    protected SnapshotRecord expectedSnapshotRecordFromPosition(int totalPosition, int totalCount, int topicPosition, int topicCount) {
+        if (totalPosition == totalCount) {
+            return SnapshotRecord.LAST;
+        }
+
+        if (totalPosition == 1) {
+            return SnapshotRecord.FIRST;
+        }
+
+        if (topicPosition == topicCount) {
+            return SnapshotRecord.LAST_IN_DATA_COLLECTION;
+        }
+
+        if (topicPosition == 1) {
+            return SnapshotRecord.FIRST_IN_DATA_COLLECTION;
+        }
+
+        return SnapshotRecord.TRUE;
+    }
+
+    protected void assertRecordOffsetAndSnapshotSource(SourceRecord record, SnapshotRecord expectedType) {
         Map<String, ?> offset = record.sourceOffset();
         assertNotNull(offset.get(SourceInfo.TXID_KEY));
         assertNotNull(offset.get(SourceInfo.TIMESTAMP_USEC_KEY));
@@ -1059,9 +1082,8 @@ public abstract class AbstractRecordsProducerTest extends AbstractConnectorTest 
 
         Object lastSnapshotRecord = offset.get(SourceInfo.LAST_SNAPSHOT_RECORD_KEY);
 
-        if (shouldBeSnapshot) {
+        if (expectedType != SnapshotRecord.FALSE) {
             assertTrue("Snapshot marker expected but not found", (Boolean) snapshot);
-            assertEquals("Last snapshot record marker mismatch", shouldBeLastSnapshotRecord, lastSnapshotRecord);
         }
         else {
             assertNull("Snapshot marker not expected, but found", snapshot);
@@ -1071,16 +1093,11 @@ public abstract class AbstractRecordsProducerTest extends AbstractConnectorTest 
         if (envelope != null && Envelope.isEnvelopeSchema(envelope.schema())) {
             final Struct source = (Struct) envelope.get("source");
             final SnapshotRecord sourceSnapshot = SnapshotRecord.fromSource(source);
-            if (shouldBeSnapshot) {
-                if (shouldBeLastSnapshotRecord) {
-                    assertEquals("Expected snapshot last record", SnapshotRecord.LAST, sourceSnapshot);
-                }
-                else {
-                    assertEquals("Expected snapshot intermediary record", SnapshotRecord.TRUE, sourceSnapshot);
-                }
+            if (sourceSnapshot != null) {
+                assertEquals("Expected snapshot of type, but found", expectedType, sourceSnapshot);
             }
             else {
-                assertNull("Source snapshot marker not expected, but found", sourceSnapshot);
+                assertEquals("Source snapshot marker not expected, but found", expectedType, SnapshotRecord.FALSE);
             }
         }
     }
@@ -1108,6 +1125,19 @@ public abstract class AbstractRecordsProducerTest extends AbstractConnectorTest 
 
     protected static TableId tableIdFromInsertStmt(String statement) {
         Matcher matcher = INSERT_TABLE_MATCHING_PATTERN.matcher(statement);
+        assertTrue("Extraction of table name from insert statement failed: " + statement, matcher.matches());
+
+        TableId id = TableId.parse(matcher.group(1), false);
+
+        if (id.schema() == null) {
+            id = new TableId(id.catalog(), "public", id.table());
+        }
+
+        return id;
+    }
+
+    protected static TableId tableIdFromDeleteStmt(String statement) {
+        Matcher matcher = DELETE_TABLE_MATCHING_PATTERN.matcher(statement);
         assertTrue("Extraction of table name from insert statement failed: " + statement, matcher.matches());
 
         TableId id = TableId.parse(matcher.group(1), false);

@@ -9,6 +9,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -21,10 +22,12 @@ import org.apache.kafka.connect.errors.ConnectException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.mongodb.ConnectionString;
 import com.mongodb.MongoCredential;
 import com.mongodb.ServerAddress;
 import com.mongodb.client.MongoClient;
 import com.mongodb.connection.ClusterDescription;
+import com.mongodb.connection.ClusterType;
 
 import io.debezium.config.Configuration;
 import io.debezium.function.BlockingConsumer;
@@ -48,7 +51,6 @@ public class ConnectionContext implements AutoCloseable {
 
     protected final Configuration config;
     protected final MongoClients pool;
-    protected final ReplicaSets replicaSets;
     protected final DelayStrategy primaryBackoffStrategy;
     protected final boolean useHostsAsSeeds;
 
@@ -66,11 +68,28 @@ public class ConnectionContext implements AutoCloseable {
         final boolean sslAllowInvalidHostnames = config.getBoolean(MongoDbConnectorConfig.SSL_ALLOW_INVALID_HOSTNAMES);
 
         final int connectTimeoutMs = config.getInteger(MongoDbConnectorConfig.CONNECT_TIMEOUT_MS);
+        final int heartbeatFrequencyMs = config.getInteger(MongoDbConnectorConfig.HEARTBEAT_FREQUENCY_MS);
         final int socketTimeoutMs = config.getInteger(MongoDbConnectorConfig.SOCKET_TIMEOUT_MS);
         final int serverSelectionTimeoutMs = config.getInteger(MongoDbConnectorConfig.SERVER_SELECTION_TIMEOUT_MS);
 
         // Set up the client pool so that it ...
         MongoClients.Builder clientBuilder = MongoClients.create();
+
+        clientBuilder.settings()
+                .applyToSocketSettings(builder -> builder.connectTimeout(connectTimeoutMs, TimeUnit.MILLISECONDS)
+                        .readTimeout(socketTimeoutMs, TimeUnit.MILLISECONDS))
+                .applyToClusterSettings(
+                        builder -> builder.serverSelectionTimeout(serverSelectionTimeoutMs, TimeUnit.MILLISECONDS))
+                .applyToServerSettings(
+                        builder -> builder.heartbeatFrequency(heartbeatFrequencyMs, TimeUnit.MILLISECONDS));
+
+        // Use credentials if provided as part of connection String
+        var cs = connectionString();
+        cs
+                .map(ConnectionString::getCredential)
+                .ifPresent(clientBuilder::withCredential);
+
+        // Use credential if provided as properties
         if (username != null || password != null) {
             clientBuilder.withCredential(MongoCredential.createCredential(username, adminDbName, password.toCharArray()));
         }
@@ -87,17 +106,15 @@ public class ConnectionContext implements AutoCloseable {
 
         pool = clientBuilder.build();
 
-        this.replicaSets = ReplicaSets.parse(hosts());
-
         final int initialDelayInMs = config.getInteger(MongoDbConnectorConfig.CONNECT_BACKOFF_INITIAL_DELAY_MS);
         final long maxDelayInMs = config.getLong(MongoDbConnectorConfig.CONNECT_BACKOFF_MAX_DELAY_MS);
-        this.primaryBackoffStrategy = DelayStrategy.exponential(initialDelayInMs, maxDelayInMs);
+        this.primaryBackoffStrategy = DelayStrategy.exponential(Duration.ofMillis(initialDelayInMs), Duration.ofMillis(maxDelayInMs));
     }
 
     public void shutdown() {
         try {
             // Closing all connections ...
-            logger().info("Closing all connections to {}", replicaSets);
+            logger().info("Closing all connections to {}", connectionSeed());
             pool.clear();
         }
         catch (Throwable e) {
@@ -118,21 +135,27 @@ public class ConnectionContext implements AutoCloseable {
         return pool;
     }
 
-    public ReplicaSets replicaSets() {
-        return replicaSets;
-    }
-
     public boolean performSnapshotEvenIfNotNeeded() {
         return false;
     }
 
-    public MongoClient clientForReplicaSet(ReplicaSet replicaSet) {
+    public MongoClient clientFor(ReplicaSet replicaSet) {
         return clientFor(replicaSet.addresses());
     }
 
     public MongoClient clientFor(String seedAddresses) {
         List<ServerAddress> addresses = MongoUtil.parseAddresses(seedAddresses);
         return clientFor(addresses);
+    }
+
+    public MongoClient clientForSeedConnection() {
+        return connectionString()
+                .map(this::clientFor)
+                .orElseGet(() -> clientFor(hosts()));
+    }
+
+    public MongoClient clientFor(ConnectionString connectionString) {
+        return pool.clientForMembers(connectionString);
     }
 
     public MongoClient clientFor(List<ServerAddress> addresses) {
@@ -146,14 +169,23 @@ public class ConnectionContext implements AutoCloseable {
         return config.getString(MongoDbConnectorConfig.HOSTS);
     }
 
+    /**
+     * Initial connection seed which is either a host specification or connection string
+     * @return hosts or connection string
+     */
+    public String connectionSeed() {
+        return connectionString()
+                .map(ConnectionString::toString)
+                .orElse(config.getString(MongoDbConnectorConfig.HOSTS));
+    }
+
+    public Optional<ConnectionString> connectionString() {
+        String raw = config.getString(MongoDbConnectorConfig.CONNECTION_STRING);
+        return Optional.ofNullable(raw).map(ConnectionString::new);
+    }
+
     public Duration pollInterval() {
-        if (config.hasKey(MongoDbConnectorConfig.MONGODB_POLL_INTERVAL_MS.name())) {
-            return Duration.ofMillis(config.getLong(MongoDbConnectorConfig.MONGODB_POLL_INTERVAL_MS));
-        }
-        if (config.hasKey(MongoDbConnectorConfig.POLL_INTERVAL_SEC.name())) {
-            LOGGER.warn("The option `mongodb.poll.interval.sec` is deprecated. Use `mongodb.poll.interval.ms` instead.");
-        }
-        return Duration.ofSeconds(config.getInteger(MongoDbConnectorConfig.POLL_INTERVAL_SEC));
+        return Duration.ofMillis(config.getLong(MongoDbConnectorConfig.MONGODB_POLL_INTERVAL_MS));
     }
 
     public int maxConnectionAttemptsForPrimary() {
@@ -433,9 +465,9 @@ public class ConnectionContext implements AutoCloseable {
      * @return the client, or {@code null} if no primary could be found for the replica set
      */
     protected MongoClient clientForPrimary(ReplicaSet replicaSet) {
-        MongoClient replicaSetClient = clientForReplicaSet(replicaSet);
-        final ClusterDescription clusterDescription = replicaSetClient.getClusterDescription();
-        if (clusterDescription == null) {
+        MongoClient replicaSetClient = clientFor(replicaSet);
+        final ClusterDescription clusterDescription = MongoUtil.clusterDescription(replicaSetClient);
+        if (clusterDescription.getType() == ClusterType.UNKNOWN) {
             if (!this.useHostsAsSeeds) {
                 // No replica set status is available, but it may still be a replica set ...
                 return replicaSetClient;

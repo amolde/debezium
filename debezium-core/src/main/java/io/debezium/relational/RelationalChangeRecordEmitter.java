@@ -16,6 +16,7 @@ import io.debezium.data.Envelope.Operation;
 import io.debezium.pipeline.AbstractChangeRecordEmitter;
 import io.debezium.pipeline.spi.ChangeRecordEmitter;
 import io.debezium.pipeline.spi.OffsetContext;
+import io.debezium.pipeline.spi.Partition;
 import io.debezium.schema.DataCollectionSchema;
 import io.debezium.util.Clock;
 
@@ -24,19 +25,20 @@ import io.debezium.util.Clock;
  *
  * @author Gunnar Morling
  */
-public abstract class RelationalChangeRecordEmitter extends AbstractChangeRecordEmitter<TableSchema> {
+public abstract class RelationalChangeRecordEmitter<P extends Partition>
+        extends AbstractChangeRecordEmitter<P, TableSchema> {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(RelationalChangeRecordEmitter.class);
 
     public static final String PK_UPDATE_OLDKEY_FIELD = "__debezium.oldkey";
     public static final String PK_UPDATE_NEWKEY_FIELD = "__debezium.newkey";
 
-    protected final Logger logger = LoggerFactory.getLogger(getClass());
-
-    public RelationalChangeRecordEmitter(OffsetContext offsetContext, Clock clock) {
-        super(offsetContext, clock);
+    public RelationalChangeRecordEmitter(P partition, OffsetContext offsetContext, Clock clock) {
+        super(partition, offsetContext, clock);
     }
 
     @Override
-    public void emitChangeRecords(DataCollectionSchema schema, Receiver receiver) throws InterruptedException {
+    public void emitChangeRecords(DataCollectionSchema schema, Receiver<P> receiver) throws InterruptedException {
         TableSchema tableSchema = (TableSchema) schema;
         Operation operation = getOperation();
 
@@ -62,7 +64,7 @@ public abstract class RelationalChangeRecordEmitter extends AbstractChangeRecord
     }
 
     @Override
-    protected void emitCreateRecord(Receiver receiver, TableSchema tableSchema)
+    protected void emitCreateRecord(Receiver<P> receiver, TableSchema tableSchema)
             throws InterruptedException {
         Object[] newColumnValues = getNewColumnValues();
         Struct newKey = tableSchema.keyFromColumnData(newColumnValues);
@@ -71,25 +73,25 @@ public abstract class RelationalChangeRecordEmitter extends AbstractChangeRecord
 
         if (skipEmptyMessages() && (newColumnValues == null || newColumnValues.length == 0)) {
             // This case can be hit on UPDATE / DELETE when there's no primary key defined while using certain decoders
-            logger.warn("no new values found for table '{}' from create message at '{}'; skipping record", tableSchema, getOffset().getSourceInfo());
+            LOGGER.warn("no new values found for table '{}' from create message at '{}'; skipping record", tableSchema, getOffset().getSourceInfo());
             return;
         }
-        receiver.changeRecord(tableSchema, Operation.CREATE, newKey, envelope, getOffset(), null);
+        receiver.changeRecord(getPartition(), tableSchema, Operation.CREATE, newKey, envelope, getOffset(), null);
     }
 
     @Override
-    protected void emitReadRecord(Receiver receiver, TableSchema tableSchema)
+    protected void emitReadRecord(Receiver<P> receiver, TableSchema tableSchema)
             throws InterruptedException {
         Object[] newColumnValues = getNewColumnValues();
         Struct newKey = tableSchema.keyFromColumnData(newColumnValues);
         Struct newValue = tableSchema.valueFromColumnData(newColumnValues);
         Struct envelope = tableSchema.getEnvelopeSchema().read(newValue, getOffset().getSourceInfo(), getClock().currentTimeAsInstant());
 
-        receiver.changeRecord(tableSchema, Operation.READ, newKey, envelope, getOffset(), null);
+        receiver.changeRecord(getPartition(), tableSchema, Operation.READ, newKey, envelope, getOffset(), null);
     }
 
     @Override
-    protected void emitUpdateRecord(Receiver receiver, TableSchema tableSchema)
+    protected void emitUpdateRecord(Receiver<P> receiver, TableSchema tableSchema)
             throws InterruptedException {
         Object[] oldColumnValues = getOldColumnValues();
         Object[] newColumnValues = getNewColumnValues();
@@ -101,55 +103,39 @@ public abstract class RelationalChangeRecordEmitter extends AbstractChangeRecord
         Struct oldValue = tableSchema.valueFromColumnData(oldColumnValues);
 
         if (skipEmptyMessages() && (newColumnValues == null || newColumnValues.length == 0)) {
-            logger.warn("no new values found for table '{}' from update message at '{}'; skipping record", tableSchema, getOffset().getSourceInfo());
+            LOGGER.warn("no new values found for table '{}' from update message at '{}'; skipping record", tableSchema, getOffset().getSourceInfo());
             return;
         }
         // some configurations does not provide old values in case of updates
         // in this case we handle all updates as regular ones
         if (oldKey == null || Objects.equals(oldKey, newKey)) {
             Struct envelope = tableSchema.getEnvelopeSchema().update(oldValue, newValue, getOffset().getSourceInfo(), getClock().currentTimeAsInstant());
-            receiver.changeRecord(tableSchema, Operation.UPDATE, newKey, envelope, getOffset(), null);
+            receiver.changeRecord(getPartition(), tableSchema, Operation.UPDATE, newKey, envelope, getOffset(), null);
         }
         // PK update -> emit as delete and re-insert with new key
         else {
-            ConnectHeaders headers = new ConnectHeaders();
-            headers.add(PK_UPDATE_NEWKEY_FIELD, newKey, tableSchema.keySchema());
-
-            Struct envelope = tableSchema.getEnvelopeSchema().delete(oldValue, getOffset().getSourceInfo(), getClock().currentTimeAsInstant());
-            receiver.changeRecord(tableSchema, Operation.DELETE, oldKey, envelope, getOffset(), headers);
-
-            headers = new ConnectHeaders();
-            headers.add(PK_UPDATE_OLDKEY_FIELD, oldKey, tableSchema.keySchema());
-
-            envelope = tableSchema.getEnvelopeSchema().create(newValue, getOffset().getSourceInfo(), getClock().currentTimeAsInstant());
-            receiver.changeRecord(tableSchema, Operation.CREATE, newKey, envelope, getOffset(), headers);
+            emitUpdateAsPrimaryKeyChangeRecord(receiver, tableSchema, oldKey, newKey, oldValue, newValue);
         }
     }
 
     @Override
-    protected void emitDeleteRecord(Receiver receiver, TableSchema tableSchema) throws InterruptedException {
+    protected void emitDeleteRecord(Receiver<P> receiver, TableSchema tableSchema) throws InterruptedException {
         Object[] oldColumnValues = getOldColumnValues();
         Struct oldKey = tableSchema.keyFromColumnData(oldColumnValues);
         Struct oldValue = tableSchema.valueFromColumnData(oldColumnValues);
 
         if (skipEmptyMessages() && (oldColumnValues == null || oldColumnValues.length == 0)) {
-            logger.warn("no old values found for table '{}' from delete message at '{}'; skipping record", tableSchema, getOffset().getSourceInfo());
+            LOGGER.warn("no old values found for table '{}' from delete message at '{}'; skipping record", tableSchema, getOffset().getSourceInfo());
             return;
         }
 
         Struct envelope = tableSchema.getEnvelopeSchema().delete(oldValue, getOffset().getSourceInfo(), getClock().currentTimeAsInstant());
-        receiver.changeRecord(tableSchema, Operation.DELETE, oldKey, envelope, getOffset(), null);
+        receiver.changeRecord(getPartition(), tableSchema, Operation.DELETE, oldKey, envelope, getOffset(), null);
     }
 
-    protected void emitTruncateRecord(Receiver receiver, TableSchema schema) throws InterruptedException {
+    protected void emitTruncateRecord(Receiver<P> receiver, TableSchema schema) throws InterruptedException {
         throw new UnsupportedOperationException("TRUNCATE not supported");
     }
-
-    /**
-     * Returns the operation done by the represented change.
-     */
-    @Override
-    protected abstract Operation getOperation();
 
     /**
      * Returns the old row state in case of an UPDATE or DELETE.
@@ -169,5 +155,21 @@ public abstract class RelationalChangeRecordEmitter extends AbstractChangeRecord
      */
     protected boolean skipEmptyMessages() {
         return false;
+    }
+
+    protected void emitUpdateAsPrimaryKeyChangeRecord(Receiver<P> receiver, TableSchema tableSchema, Struct oldKey,
+                                                      Struct newKey, Struct oldValue, Struct newValue)
+            throws InterruptedException {
+        ConnectHeaders headers = new ConnectHeaders();
+        headers.add(PK_UPDATE_NEWKEY_FIELD, newKey, tableSchema.keySchema());
+
+        Struct envelope = tableSchema.getEnvelopeSchema().delete(oldValue, getOffset().getSourceInfo(), getClock().currentTimeAsInstant());
+        receiver.changeRecord(getPartition(), tableSchema, Operation.DELETE, oldKey, envelope, getOffset(), headers);
+
+        headers = new ConnectHeaders();
+        headers.add(PK_UPDATE_OLDKEY_FIELD, oldKey, tableSchema.keySchema());
+
+        envelope = tableSchema.getEnvelopeSchema().create(newValue, getOffset().getSourceInfo(), getClock().currentTimeAsInstant());
+        receiver.changeRecord(getPartition(), tableSchema, Operation.CREATE, newKey, envelope, getOffset(), headers);
     }
 }

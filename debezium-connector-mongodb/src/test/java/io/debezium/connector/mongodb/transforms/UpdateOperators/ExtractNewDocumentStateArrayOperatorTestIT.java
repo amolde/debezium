@@ -5,7 +5,7 @@
  */
 package io.debezium.connector.mongodb.transforms.UpdateOperators;
 
-import static org.fest.assertions.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import java.util.Arrays;
 
@@ -40,10 +40,10 @@ public class ExtractNewDocumentStateArrayOperatorTestIT extends AbstractExtractN
         final Struct transformedUpdateValue = (Struct) transformedUpdate.value();
         final Schema valueSchema = transformedUpdate.valueSchema();
 
-        VerifyRecord.assertConnectSchemasAreEqual("id", valueSchema.field("id").schema(), Schema.OPTIONAL_INT32_SCHEMA);
+        VerifyRecord.assertConnectSchemasAreEqual("_id", valueSchema.field("_id").schema(), Schema.OPTIONAL_INT32_SCHEMA);
         VerifyRecord.assertConnectSchemasAreEqual("dataArrayOfStr", valueSchema.field("dataArrayOfStr").schema(),
                 SchemaBuilder.array(Schema.OPTIONAL_STRING_SCHEMA).optional().build());
-        assertThat(transformedUpdateValue.get("id")).isEqualTo(1);
+        assertThat(transformedUpdateValue.get("_id")).isEqualTo(1);
         assertThat(transformedUpdateValue.get("dataArrayOfStr")).isEqualTo(Arrays.asList("a", "c", "e", "b"));
     }
 
@@ -59,10 +59,10 @@ public class ExtractNewDocumentStateArrayOperatorTestIT extends AbstractExtractN
         final Struct transformedUpdateValue = (Struct) transformedUpdate.value();
         final Schema valueSchema = transformedUpdate.valueSchema();
 
-        VerifyRecord.assertConnectSchemasAreEqual("id", valueSchema.field("id").schema(), Schema.OPTIONAL_INT32_SCHEMA);
+        VerifyRecord.assertConnectSchemasAreEqual("_id", valueSchema.field("_id").schema(), Schema.OPTIONAL_INT32_SCHEMA);
         VerifyRecord.assertConnectSchemasAreEqual("dataArrayOfStr", valueSchema.field("dataArrayOfStr").schema(),
                 SchemaBuilder.array(Schema.OPTIONAL_STRING_SCHEMA).optional().build());
-        assertThat(transformedUpdateValue.get("id")).isEqualTo(1);
+        assertThat(transformedUpdateValue.get("_id")).isEqualTo(1);
         assertThat(transformedUpdateValue.get("dataArrayOfStr")).isEqualTo(Arrays.asList("c", "e"));
     }
 
@@ -78,10 +78,10 @@ public class ExtractNewDocumentStateArrayOperatorTestIT extends AbstractExtractN
         final Struct transformedUpdateValue = (Struct) transformedUpdate.value();
         final Schema valueSchema = transformedUpdate.valueSchema();
 
-        VerifyRecord.assertConnectSchemasAreEqual("id", valueSchema.field("id").schema(), Schema.OPTIONAL_INT32_SCHEMA);
+        VerifyRecord.assertConnectSchemasAreEqual("_id", valueSchema.field("_id").schema(), Schema.OPTIONAL_INT32_SCHEMA);
         VerifyRecord.assertConnectSchemasAreEqual("dataArrayOfStr", valueSchema.field("dataArrayOfStr").schema(),
                 SchemaBuilder.array(Schema.OPTIONAL_STRING_SCHEMA).optional().build());
-        assertThat(transformedUpdateValue.get("id")).isEqualTo(1);
+        assertThat(transformedUpdateValue.get("_id")).isEqualTo(1);
         assertThat(transformedUpdateValue.get("dataArrayOfStr")).isEqualTo(Arrays.asList("a", "e"));
     }
 
@@ -97,10 +97,10 @@ public class ExtractNewDocumentStateArrayOperatorTestIT extends AbstractExtractN
         final Struct transformedUpdateValue = (Struct) transformedUpdate.value();
         final Schema valueSchema = transformedUpdate.valueSchema();
 
-        VerifyRecord.assertConnectSchemasAreEqual("id", valueSchema.field("id").schema(), Schema.OPTIONAL_INT32_SCHEMA);
+        VerifyRecord.assertConnectSchemasAreEqual("_id", valueSchema.field("_id").schema(), Schema.OPTIONAL_INT32_SCHEMA);
         VerifyRecord.assertConnectSchemasAreEqual("dataArrayOfStr", valueSchema.field("dataArrayOfStr").schema(),
                 SchemaBuilder.array(Schema.OPTIONAL_STRING_SCHEMA).optional().build());
-        assertThat(transformedUpdateValue.get("id")).isEqualTo(1);
+        assertThat(transformedUpdateValue.get("_id")).isEqualTo(1);
         assertThat(transformedUpdateValue.get("dataArrayOfStr")).isEqualTo(Arrays.asList("a", "e"));
     }
 
@@ -117,9 +117,10 @@ public class ExtractNewDocumentStateArrayOperatorTestIT extends AbstractExtractN
         final Schema valueSchema = transformedUpdate.valueSchema();
 
         // Operations which include items to arrays result in a new field where the structure looks like "FIELD_NAME.ARRAY_INDEX"
-        VerifyRecord.assertConnectSchemasAreEqual("id", valueSchema.field("id").schema(), Schema.OPTIONAL_INT32_SCHEMA);
-        VerifyRecord.assertConnectSchemasAreEqual("dataArrayOfStr.3", valueSchema.field("dataArrayOfStr.3").schema(), Schema.OPTIONAL_STRING_SCHEMA);
-        assertThat(transformedUpdateValue.get("id")).isEqualTo(1);
-        assertThat(transformedUpdateValue.get("dataArrayOfStr.3")).isEqualTo("g");
+        VerifyRecord.assertConnectSchemasAreEqual("_id", valueSchema.field("_id").schema(), Schema.OPTIONAL_INT32_SCHEMA);
+        assertThat(transformedUpdateValue.get("_id")).isEqualTo(1);
+        VerifyRecord.assertConnectSchemasAreEqual("dataArrayOfStr", valueSchema.field("dataArrayOfStr").schema(),
+                SchemaBuilder.array(Schema.OPTIONAL_STRING_SCHEMA).optional().build());
+        assertThat(transformedUpdateValue.get("dataArrayOfStr")).isEqualTo(Arrays.asList("a", "c", "e", "g"));
     }
 }

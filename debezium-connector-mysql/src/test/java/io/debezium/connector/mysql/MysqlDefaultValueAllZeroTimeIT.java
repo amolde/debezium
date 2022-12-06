@@ -5,14 +5,9 @@
  */
 package io.debezium.connector.mysql;
 
-import static org.fest.assertions.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import java.nio.file.Path;
-import java.time.Instant;
-import java.time.LocalDateTime;
-import java.time.ZoneOffset;
-import java.time.ZonedDateTime;
-import java.time.format.DateTimeFormatter;
 import java.util.Collections;
 
 import org.apache.kafka.connect.data.Schema;
@@ -22,9 +17,8 @@ import org.junit.Before;
 import org.junit.Test;
 
 import io.debezium.config.Configuration;
+import io.debezium.doc.FixFor;
 import io.debezium.embedded.AbstractConnectorTest;
-import io.debezium.time.Timestamp;
-import io.debezium.time.ZonedTimestamp;
 import io.debezium.util.Testing;
 
 /**
@@ -32,9 +26,9 @@ import io.debezium.util.Testing;
  */
 public class MysqlDefaultValueAllZeroTimeIT extends AbstractConnectorTest {
 
-    private static final Path DB_HISTORY_PATH = Testing.Files.createTestingPath("file-db-history-connect.txt").toAbsolutePath();
+    private static final Path SCHEMA_HISTORY_PATH = Testing.Files.createTestingPath("file-schema-history-connect.txt").toAbsolutePath();
     private final UniqueDatabase DATABASE = new UniqueDatabase("myServer1", "default_value_all_zero_time")
-            .withDbHistoryPath(DB_HISTORY_PATH);
+            .withDbHistoryPath(SCHEMA_HISTORY_PATH);
 
     private Configuration config;
 
@@ -43,7 +37,7 @@ public class MysqlDefaultValueAllZeroTimeIT extends AbstractConnectorTest {
         stopConnector();
         DATABASE.createAndInitialize(Collections.singletonMap("sessionVariables", "sql_mode=''"));
         initializeConnectorTestFramework();
-        Testing.Files.delete(DB_HISTORY_PATH);
+        Testing.Files.delete(SCHEMA_HISTORY_PATH);
     }
 
     @After
@@ -52,7 +46,7 @@ public class MysqlDefaultValueAllZeroTimeIT extends AbstractConnectorTest {
             stopConnector();
         }
         finally {
-            Testing.Files.delete(DB_HISTORY_PATH);
+            Testing.Files.delete(SCHEMA_HISTORY_PATH);
         }
     }
 
@@ -60,14 +54,14 @@ public class MysqlDefaultValueAllZeroTimeIT extends AbstractConnectorTest {
     public void allZeroDateAndTimeTypeTest() throws InterruptedException {
         config = DATABASE.defaultConfig()
                 .with(MySqlConnectorConfig.SNAPSHOT_MODE, MySqlConnectorConfig.SnapshotMode.INITIAL)
-                .with(MySqlConnectorConfig.TABLE_INCLUDE_LIST, DATABASE.qualifiedTableName("ALL_ZERO_DATE_AND_TIME_TABLE"))
+                .with(MySqlConnectorConfig.TABLE_INCLUDE_LIST, DATABASE.qualifiedTableName("all_zero_date_and_time_table"))
                 .build();
         start(MySqlConnector.class, config);
 
         // Testing.Print.enable();
 
-        AbstractConnectorTest.SourceRecords records = consumeRecordsByTopic(7);
-        final SourceRecord record = records.recordsForTopic(DATABASE.topicForTable("ALL_ZERO_DATE_AND_TIME_TABLE")).get(0);
+        AbstractConnectorTest.SourceRecords records = consumeRecordsByTopic(9);
+        final SourceRecord record = records.recordsForTopic(DATABASE.topicForTable("all_zero_date_and_time_table")).get(0);
 
         Schema schemaA = record.valueSchema().fields().get(1).schema().fields().get(0).schema();
         Schema schemaB = record.valueSchema().fields().get(1).schema().fields().get(1).schema();
@@ -83,18 +77,14 @@ public class MysqlDefaultValueAllZeroTimeIT extends AbstractConnectorTest {
         Schema schemaL = record.valueSchema().fields().get(1).schema().fields().get(11).schema();
 
         // column A, 0000-00-00 00:00:00 => 1970-01-01 00:00:00
-        ZonedDateTime a = ZonedDateTime.ofInstant(Instant.EPOCH, ZoneOffset.UTC);
-        String isoStringA = ZonedTimestamp.toIsoString(a, ZoneOffset.UTC, MySqlValueConverters::adjustTemporal);
-        assertThat(schemaA.defaultValue()).isEqualTo(isoStringA);
+        assertThat(schemaA.defaultValue()).isEqualTo("1970-01-01T00:00:00Z");
 
         // column B allows null, default value should be null
         assertThat(schemaB.isOptional()).isEqualTo(true);
         assertThat(schemaB.defaultValue()).isEqualTo(null);
 
         // column C, 0000-00-00 00:00:00 => 1970-01-01 00:00:00
-        ZonedDateTime c = ZonedDateTime.ofInstant(Instant.EPOCH, ZoneOffset.UTC);
-        String isoStringC = ZonedTimestamp.toIsoString(c, ZoneOffset.UTC, MySqlValueConverters::adjustTemporal);
-        assertThat(schemaC.defaultValue()).isEqualTo(isoStringC);
+        assertThat(schemaC.defaultValue()).isEqualTo("1970-01-01T00:00:00Z");
 
         // column D allows null, default value should be null
         assertThat(schemaD.isOptional()).isEqualTo(true);
@@ -114,25 +104,71 @@ public class MysqlDefaultValueAllZeroTimeIT extends AbstractConnectorTest {
         assertThat(schemaH.isOptional()).isEqualTo(true);
         assertThat(schemaH.defaultValue()).isEqualTo(null);
 
-        // column I, 0000-00-00 00:00:00 => 1970-01-01 00:00:00
-        String valueI = "1970-01-01 00:00:00";
-        long toEpochMillisI = Timestamp.toEpochMillis(LocalDateTime.from(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").parse(valueI)),
-                MySqlValueConverters::adjustTemporal);
-        assertThat(schemaI.defaultValue()).isEqualTo(toEpochMillisI);
+        // column I, DATETIME: 0000-00-00 00:00:00 => 1970-01-01 00:00:00
+        assertThat(schemaI.defaultValue()).isEqualTo(0L);
 
         // column J allows null, default value should be null
         assertThat(schemaJ.isOptional()).isEqualTo(true);
         assertThat(schemaJ.defaultValue()).isEqualTo(null);
 
-        // column K, 0000-00-00 00:00:00 => 1970-01-01 00:00:00
-        String valueK = "1970-01-01 00:00:00";
-        long toEpochMillisK = Timestamp.toEpochMillis(LocalDateTime.from(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").parse(valueK)),
-                MySqlValueConverters::adjustTemporal);
-        assertThat(schemaK.defaultValue()).isEqualTo(toEpochMillisK);
+        // column K, DATETIME: 0000-00-00 00:00:00 => 1970-01-01 00:00:00
+        assertThat(schemaK.defaultValue()).isEqualTo(0L);
 
         // column L allows null, default value should be null
         assertThat(schemaL.isOptional()).isEqualTo(true);
         assertThat(schemaL.defaultValue()).isEqualTo(null);
 
+    }
+
+    @Test
+    @FixFor("DBZ-4334")
+    public void partZeroDateAndTimeTypeTest() throws InterruptedException {
+        config = DATABASE.defaultConfig()
+                .with(MySqlConnectorConfig.SNAPSHOT_MODE, MySqlConnectorConfig.SnapshotMode.INITIAL)
+                .with(MySqlConnectorConfig.TABLE_INCLUDE_LIST, DATABASE.qualifiedTableName("part_zero_date_and_time_table"))
+                .build();
+        start(MySqlConnector.class, config);
+
+        // Testing.Print.enable();
+
+        AbstractConnectorTest.SourceRecords records = consumeRecordsByTopic(9);
+        final SourceRecord record = records.recordsForTopic(DATABASE.topicForTable("part_zero_date_and_time_table")).get(0);
+
+        Schema schemaA = record.valueSchema().fields().get(1).schema().fields().get(0).schema();
+        Schema schemaB = record.valueSchema().fields().get(1).schema().fields().get(1).schema();
+        Schema schemaC = record.valueSchema().fields().get(1).schema().fields().get(2).schema();
+        Schema schemaD = record.valueSchema().fields().get(1).schema().fields().get(3).schema();
+        Schema schemaE = record.valueSchema().fields().get(1).schema().fields().get(4).schema();
+        Schema schemaF = record.valueSchema().fields().get(1).schema().fields().get(5).schema();
+        Schema schemaG = record.valueSchema().fields().get(1).schema().fields().get(6).schema();
+        Schema schemaH = record.valueSchema().fields().get(1).schema().fields().get(7).schema();
+
+        // column A, 0000-00-00 00:00:00 => 1970-01-01 00:00:00
+        assertThat(schemaA.defaultValue()).isEqualTo("1970-01-01T00:00:00Z");
+
+        // column B allows null, default value should be null
+        assertThat(schemaB.isOptional()).isEqualTo(true);
+        assertThat(schemaB.defaultValue()).isEqualTo(null);
+
+        // column C, 0000-00-00 01:00:00.000 => 1970-01-01 00:00:00
+        assertThat(schemaC.defaultValue()).isEqualTo(0L);
+
+        // column D allows null, default value should be null
+        assertThat(schemaD.isOptional()).isEqualTo(true);
+        assertThat(schemaD.defaultValue()).isEqualTo(null);
+
+        // column E, 1000-00-00 01:00:00.000 => 1970-01-01
+        assertThat(schemaE.defaultValue()).isEqualTo(0);
+
+        // column F allows null, default value should be null
+        assertThat(schemaF.isOptional()).isEqualTo(true);
+        assertThat(schemaF.defaultValue()).isEqualTo(null);
+
+        // column G, 01:00:00.000 => 0
+        assertThat(schemaG.defaultValue()).isEqualTo(3600000000L);
+
+        // column H allows null
+        assertThat(schemaH.isOptional()).isEqualTo(true);
+        assertThat(schemaH.defaultValue()).isEqualTo(3600000000L);
     }
 }

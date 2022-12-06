@@ -24,18 +24,19 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 
 import org.postgresql.replication.fluent.logical.ChainedLogicalStreamBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import io.debezium.connector.postgresql.PostgresConnectorConfig;
 import io.debezium.connector.postgresql.PostgresStreamingChangeEventSource.PgConnectionSupplier;
 import io.debezium.connector.postgresql.PostgresType;
 import io.debezium.connector.postgresql.TypeRegistry;
 import io.debezium.connector.postgresql.UnchangedToastedReplicationMessageColumn;
 import io.debezium.connector.postgresql.connection.AbstractMessageDecoder;
 import io.debezium.connector.postgresql.connection.AbstractReplicationMessageColumn;
+import io.debezium.connector.postgresql.connection.LogicalDecodingMessage;
 import io.debezium.connector.postgresql.connection.Lsn;
 import io.debezium.connector.postgresql.connection.MessageDecoderContext;
 import io.debezium.connector.postgresql.connection.PostgresConnection;
@@ -45,6 +46,7 @@ import io.debezium.connector.postgresql.connection.ReplicationMessage.Operation;
 import io.debezium.connector.postgresql.connection.ReplicationStream.ReplicationMessageProcessor;
 import io.debezium.connector.postgresql.connection.TransactionMessage;
 import io.debezium.connector.postgresql.connection.WalPositionLocator;
+import io.debezium.data.Envelope;
 import io.debezium.relational.ColumnEditor;
 import io.debezium.relational.Table;
 import io.debezium.relational.TableId;
@@ -69,7 +71,11 @@ public class PgOutputMessageDecoder extends AbstractMessageDecoder {
     private final PostgresConnection connection;
 
     private Instant commitTimestamp;
-    private int transactionId;
+
+    /**
+     * Will be null for a non-transactional decoding message
+     */
+    private Long transactionId;
 
     public enum MessageType {
         RELATION,
@@ -80,7 +86,8 @@ public class PgOutputMessageDecoder extends AbstractMessageDecoder {
         DELETE,
         TYPE,
         ORIGIN,
-        TRUNCATE;
+        TRUNCATE,
+        LOGICAL_DECODING_MESSAGE;
 
         public static MessageType forType(char type) {
             switch (type) {
@@ -102,15 +109,17 @@ public class PgOutputMessageDecoder extends AbstractMessageDecoder {
                     return ORIGIN;
                 case 'T':
                     return TRUNCATE;
+                case 'M':
+                    return LOGICAL_DECODING_MESSAGE;
                 default:
                     throw new IllegalArgumentException("Unsupported message type: " + type);
             }
         }
     }
 
-    public PgOutputMessageDecoder(MessageDecoderContext decoderContext) {
+    public PgOutputMessageDecoder(MessageDecoderContext decoderContext, PostgresConnection connection) {
         this.decoderContext = decoderContext;
-        this.connection = new PostgresConnection(decoderContext.getConfig().jdbcConfig(), decoderContext.getSchema().getTypeRegistry());
+        this.connection = connection;
     }
 
     @Override
@@ -121,6 +130,23 @@ public class PgOutputMessageDecoder extends AbstractMessageDecoder {
         try {
             MessageType type = MessageType.forType((char) buffer.get());
             LOGGER.trace("Message Type: {}", type);
+            switch (type) {
+                case TYPE:
+                case ORIGIN:
+                    // TYPE/ORIGIN
+                    // These should be skipped without calling shouldMessageBeSkipped. DBZ-5792
+                    LOGGER.trace("{} messages are always skipped without calling shouldMessageBeSkipped", type);
+                    return true;
+                case TRUNCATE:
+                    if (!isTruncateEventsIncluded()) {
+                        LOGGER.trace("{} messages are being skipped without calling shouldMessageBeSkipped", type);
+                        return true;
+                    }
+                    // else delegate to super.shouldMessageBeSkipped
+                    break;
+                default:
+                    // call super.shouldMessageBeSkipped for rest of the types
+            }
             final boolean candidateForSkipping = super.shouldMessageBeSkipped(buffer, lastReceivedLsn, startLsn, walPosition);
             switch (type) {
                 case COMMIT:
@@ -138,7 +164,7 @@ public class PgOutputMessageDecoder extends AbstractMessageDecoder {
                     LOGGER.trace("{} messages are always reprocessed", type);
                     return false;
                 default:
-                    // INSERT/UPDATE/DELETE/TRUNCATE/TYPE/ORIGIN
+                    // INSERT/UPDATE/DELETE/TRUNCATE/LOGICAL_DECODING_MESSAGE
                     // These should be excluded based on the normal behavior, delegating to default method
                     return candidateForSkipping;
             }
@@ -175,6 +201,9 @@ public class PgOutputMessageDecoder extends AbstractMessageDecoder {
             case RELATION:
                 handleRelationMessage(buffer, typeRegistry);
                 break;
+            case LOGICAL_DECODING_MESSAGE:
+                handleLogicalDecodingMessage(buffer, processor);
+                break;
             case INSERT:
                 decodeInsert(buffer, typeRegistry, processor);
                 break;
@@ -185,7 +214,7 @@ public class PgOutputMessageDecoder extends AbstractMessageDecoder {
                 decodeDelete(buffer, typeRegistry, processor);
                 break;
             case TRUNCATE:
-                if (decoderContext.getConfig().truncateHandlingMode() == PostgresConnectorConfig.TruncateHandlingMode.INCLUDE) {
+                if (isTruncateEventsIncluded()) {
                     decodeTruncate(buffer, typeRegistry, processor);
                 }
                 else {
@@ -199,14 +228,20 @@ public class PgOutputMessageDecoder extends AbstractMessageDecoder {
     }
 
     @Override
-    public ChainedLogicalStreamBuilder optionsWithMetadata(ChainedLogicalStreamBuilder builder) {
-        return builder.withSlotOption("proto_version", 1)
+    public ChainedLogicalStreamBuilder defaultOptions(ChainedLogicalStreamBuilder builder, Function<Integer, Boolean> hasMinimumServerVersion) {
+        builder = builder.withSlotOption("proto_version", 1)
                 .withSlotOption("publication_names", decoderContext.getConfig().publicationName());
+
+        // DBZ-4374 Use enum once the driver got updated
+        if (hasMinimumServerVersion.apply(140000)) {
+            builder = builder.withSlotOption("messages", true);
+        }
+
+        return builder;
     }
 
-    @Override
-    public ChainedLogicalStreamBuilder optionsWithoutMetadata(ChainedLogicalStreamBuilder builder) {
-        return builder;
+    private boolean isTruncateEventsIncluded() {
+        return !decoderContext.getConfig().getSkippedOperations().contains(Envelope.Operation.TRUNCATE);
     }
 
     /**
@@ -218,7 +253,7 @@ public class PgOutputMessageDecoder extends AbstractMessageDecoder {
     private void handleBeginMessage(ByteBuffer buffer, ReplicationMessageProcessor processor) throws SQLException, InterruptedException {
         final Lsn lsn = Lsn.valueOf(buffer.getLong()); // LSN
         this.commitTimestamp = PG_EPOCH.plus(buffer.getLong(), ChronoUnit.MICROS);
-        this.transactionId = buffer.getInt();
+        this.transactionId = Integer.toUnsignedLong(buffer.getInt());
         LOGGER.trace("Event: {}", MessageType.BEGIN);
         LOGGER.trace("Final LSN of transaction: {}", lsn);
         LOGGER.trace("Commit timestamp of transaction: {}", commitTimestamp);
@@ -262,7 +297,7 @@ public class PgOutputMessageDecoder extends AbstractMessageDecoder {
         LOGGER.trace("Schema: '{}', Table: '{}'", schemaName, tableName);
 
         // Perform several out-of-bands database metadata queries
-        Map<String, Optional<Object>> columnDefaults;
+        Map<String, Optional<String>> columnDefaults;
         Map<String, Boolean> columnOptionality;
         List<String> primaryKeyColumns;
 
@@ -272,7 +307,7 @@ public class PgOutputMessageDecoder extends AbstractMessageDecoder {
         final List<io.debezium.relational.Column> readColumns = getTableColumnsFromDatabase(connection, databaseMetadata, tableId);
         columnDefaults = readColumns.stream()
                 .filter(io.debezium.relational.Column::hasDefaultValue)
-                .collect(toMap(io.debezium.relational.Column::name, column -> Optional.ofNullable(column.defaultValue())));
+                .collect(toMap(io.debezium.relational.Column::name, io.debezium.relational.Column::defaultValueExpression));
 
         columnOptionality = readColumns.stream().collect(toMap(io.debezium.relational.Column::name, io.debezium.relational.Column::isOptional));
         primaryKeyColumns = connection.readPrimaryKeyNames(databaseMetadata, tableId);
@@ -294,14 +329,16 @@ public class PgOutputMessageDecoder extends AbstractMessageDecoder {
 
             Boolean optional = columnOptionality.get(columnName);
             if (optional == null) {
-                LOGGER.warn("Column '{}' optionality could not be determined, defaulting to true", columnName);
+                if (decoderContext.getConfig().getColumnFilter().matches(tableId.catalog(), tableId.schema(), tableId.table(), columnName)) {
+                    LOGGER.warn("Column '{}' optionality could not be determined, defaulting to true", columnName);
+                }
                 optional = true;
             }
 
             final boolean hasDefault = columnDefaults.containsKey(columnName);
-            final Object defaultValue = columnDefaults.getOrDefault(columnName, Optional.empty()).orElse(null);
+            final String defaultValueExpression = columnDefaults.getOrDefault(columnName, Optional.empty()).orElse(null);
 
-            columns.add(new ColumnMetaData(columnName, postgresType, key, optional, hasDefault, defaultValue, attypmod));
+            columns.add(new ColumnMetaData(columnName, postgresType, key, optional, hasDefault, defaultValueExpression, attypmod));
             columnNames.add(columnName);
         }
 
@@ -326,7 +363,8 @@ public class PgOutputMessageDecoder extends AbstractMessageDecoder {
         decoderContext.getSchema().applySchemaChangesForTable(relationId, table);
     }
 
-    private List<io.debezium.relational.Column> getTableColumnsFromDatabase(PostgresConnection connection, DatabaseMetaData databaseMetadata, TableId tableId) {
+    private List<io.debezium.relational.Column> getTableColumnsFromDatabase(PostgresConnection connection, DatabaseMetaData databaseMetadata, TableId tableId)
+            throws SQLException {
         List<io.debezium.relational.Column> readColumns = new ArrayList<>();
         try {
             try (ResultSet columnMetadata = databaseMetadata.getColumns(null, tableId.schema(), tableId.table(), null)) {
@@ -337,8 +375,8 @@ public class PgOutputMessageDecoder extends AbstractMessageDecoder {
             }
         }
         catch (SQLException e) {
-            LOGGER.warn("Failed to read column metadata for '{}.{}'", tableId.schema(), tableId.table());
-            // todo: DBZ-766 Should this throw the exception or just log the warning?
+            LOGGER.error("Failed to read column metadata for '{}.{}'", tableId.schema(), tableId.table());
+            throw e;
         }
 
         return readColumns;
@@ -553,6 +591,52 @@ public class PgOutputMessageDecoder extends AbstractMessageDecoder {
     }
 
     /**
+     * Callback handler for the 'M' logical decoding message
+     *
+     * @param buffer       The replication stream buffer
+     * @param processor    The replication message processor
+     */
+    private void handleLogicalDecodingMessage(ByteBuffer buffer, ReplicationMessageProcessor processor)
+            throws SQLException, InterruptedException {
+        // As of PG14, the MESSAGE message format is as described:
+        // Byte1 Always 'M'
+        // Int32 Xid of the transaction (only present for streamed transactions in protocol version 2).
+        // Int8 flags; Either 0 for no flags or 1 if the logical decoding message is transactional.
+        // Int64 The LSN of the logical decoding message
+        // String The prefix of the logical decoding message.
+        // Int32 Length of the content.
+        // Byten The content of the logical decoding message.
+
+        boolean isTransactional = buffer.get() == 1;
+        final Lsn lsn = Lsn.valueOf(buffer.getLong());
+        String prefix = readString(buffer);
+        int contentLength = buffer.getInt();
+        byte[] content = new byte[contentLength];
+        buffer.get(content);
+
+        // non-transactional messages do not have xids or commitTimestamps
+        if (!isTransactional) {
+            transactionId = null;
+            commitTimestamp = null;
+        }
+
+        LOGGER.trace("Event: {}", MessageType.LOGICAL_DECODING_MESSAGE);
+        LOGGER.trace("Commit LSN: {}", lsn);
+        LOGGER.trace("Commit timestamp of transaction: {}", commitTimestamp);
+        LOGGER.trace("XID of transaction: {}", transactionId);
+        LOGGER.trace("Transactional: {}", isTransactional);
+        LOGGER.trace("Prefix: {}", prefix);
+
+        processor.process(new LogicalDecodingMessage(
+                Operation.MESSAGE,
+                commitTimestamp,
+                transactionId,
+                isTransactional,
+                prefix,
+                content));
+    }
+
+    /**
      * Resolves a given replication message relation identifier to a {@link Table}.
      *
      * @param relationId The replication message stream's relation identifier
@@ -582,7 +666,7 @@ public class PgOutputMessageDecoder extends AbstractMessageDecoder {
                     .scale(columnMetadata.getScale());
 
             if (columnMetadata.hasDefaultValue()) {
-                editor.defaultValue(columnMetadata.getDefaultValue());
+                editor.defaultValueExpression(columnMetadata.getDefaultValueExpression());
             }
 
             columns.add(editor.create());
@@ -649,6 +733,8 @@ public class PgOutputMessageDecoder extends AbstractMessageDecoder {
             final String typeExpression = column.typeExpression();
             final boolean optional = column.isOptional();
 
+            final Column replicationMessageColumn;
+
             // Read the sub-message type
             // 't' : Value is represented as text
             // 'u' : An unchanged TOAST-ed value, actual value is not sent.
@@ -656,46 +742,53 @@ public class PgOutputMessageDecoder extends AbstractMessageDecoder {
             char type = (char) buffer.get();
             if (type == 't') {
                 final String valueStr = readColumnValueAsString(buffer);
-                columns.add(
-                        new AbstractReplicationMessageColumn(columnName, columnType, typeExpression, optional, true) {
-                            @Override
-                            public Object getValue(PgConnectionSupplier connection, boolean includeUnknownDatatypes) {
-                                return PgOutputReplicationMessage.getValue(columnName, columnType, typeExpression, valueStr, connection, includeUnknownDatatypes,
-                                        typeRegistry);
-                            }
+                replicationMessageColumn = new AbstractReplicationMessageColumn(columnName, columnType, typeExpression, optional) {
+                    @Override
+                    public Object getValue(PgConnectionSupplier connection, boolean includeUnknownDatatypes) {
+                        return PgOutputReplicationMessage.getValue(columnName, columnType, typeExpression, valueStr, connection, includeUnknownDatatypes,
+                                typeRegistry);
+                    }
 
-                            @Override
-                            public String toString() {
-                                return columnName + "(" + typeExpression + ")=" + valueStr;
-                            }
-                        });
+                    @Override
+                    public String toString() {
+                        return columnName + "(" + typeExpression + ")=" + valueStr;
+                    }
+                };
             }
             else if (type == 'u') {
-                columns.add(
-                        new UnchangedToastedReplicationMessageColumn(columnName, columnType, typeExpression, optional, true) {
-                            @Override
-                            public String toString() {
-                                return columnName + "(" + typeExpression + ") - Unchanged toasted column";
-                            }
-                        });
+                replicationMessageColumn = new UnchangedToastedReplicationMessageColumn(columnName, columnType, typeExpression, optional) {
+                    @Override
+                    public String toString() {
+                        return columnName + "(" + typeExpression + ") - Unchanged toasted column";
+                    }
+                };
             }
             else if (type == 'n') {
-                columns.add(
-                        new AbstractReplicationMessageColumn(columnName, columnType, typeExpression, true, true) {
-                            @Override
-                            public Object getValue(PgConnectionSupplier connection, boolean includeUnknownDatatypes) {
-                                return null;
-                            }
-                        });
+                replicationMessageColumn = new AbstractReplicationMessageColumn(columnName, columnType, typeExpression, true) {
+                    @Override
+                    public Object getValue(PgConnectionSupplier connection, boolean includeUnknownDatatypes) {
+                        return null;
+                    }
+                };
+            }
+            else {
+                replicationMessageColumn = null;
+                LOGGER.trace("Unsupported type '{}' for column: '{}'", type, column);
+            }
+
+            if (replicationMessageColumn != null) {
+                columns.add(replicationMessageColumn);
+                LOGGER.trace("Column: {}", replicationMessageColumn);
             }
         }
 
-        columns.forEach(c -> LOGGER.trace("Column: {}", c));
         return columns;
     }
 
     @Override
     public void close() {
-        connection.close();
+        if (connection != null) {
+            connection.close();
+        }
     }
 }

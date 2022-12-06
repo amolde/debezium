@@ -13,8 +13,11 @@ import org.apache.kafka.connect.errors.ConnectException;
 import org.junit.Assert;
 import org.junit.Test;
 
+import io.debezium.connector.postgresql.connection.PostgresConnection;
 import io.debezium.connector.postgresql.connection.ReplicationConnection;
 import io.debezium.doc.FixFor;
+import io.debezium.schema.SchemaTopicNamingStrategy;
+import io.debezium.spi.topic.TopicNamingStrategy;
 
 /**
  * Integration test for {@link PostgresConnectorTask} class.
@@ -34,7 +37,7 @@ public class PostgresConnectorTaskIT {
         }
 
         @Override
-        protected ReplicationConnection createReplicationConnection(boolean doSnapshot) throws SQLException {
+        protected ReplicationConnection createReplicationConnection(boolean doSnapshot, PostgresConnection jdbcConnection) throws SQLException {
             throw new SQLException("Could not connect");
         }
     }
@@ -48,7 +51,7 @@ public class PostgresConnectorTaskIT {
         postgresConnectorTask.createReplicationConnection(new FakeContext(config, new PostgresSchema(
                 config,
                 null,
-                PostgresTopicSelector.create(config), null)), true, 3, Duration.ofSeconds(2));
+                (TopicNamingStrategy) SchemaTopicNamingStrategy.create(config), null)), true, 3, Duration.ofSeconds(2));
 
         // Verify retry happened for 10 seconds
         long endTime = System.currentTimeMillis();

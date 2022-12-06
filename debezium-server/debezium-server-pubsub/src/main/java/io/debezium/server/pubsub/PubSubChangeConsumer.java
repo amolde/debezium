@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ExecutionException;
 
 import javax.annotation.PostConstruct;
@@ -24,11 +25,22 @@ import org.eclipse.microprofile.config.ConfigProvider;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.threeten.bp.Duration;
 
 import com.google.api.core.ApiFuture;
 import com.google.api.core.ApiFutures;
+import com.google.api.gax.batching.BatchingSettings;
+import com.google.api.gax.batching.FlowControlSettings;
+import com.google.api.gax.batching.FlowController;
+import com.google.api.gax.core.CredentialsProvider;
+import com.google.api.gax.core.NoCredentialsProvider;
+import com.google.api.gax.grpc.GrpcTransportChannel;
+import com.google.api.gax.retrying.RetrySettings;
+import com.google.api.gax.rpc.FixedTransportChannelProvider;
+import com.google.api.gax.rpc.TransportChannelProvider;
 import com.google.cloud.ServiceOptions;
 import com.google.cloud.pubsub.v1.Publisher;
+import com.google.cloud.pubsub.v1.Publisher.Builder;
 import com.google.protobuf.ByteString;
 import com.google.pubsub.v1.ProjectTopicName;
 import com.google.pubsub.v1.PubsubMessage;
@@ -39,6 +51,8 @@ import io.debezium.engine.DebeziumEngine;
 import io.debezium.engine.DebeziumEngine.RecordCommitter;
 import io.debezium.server.BaseChangeConsumer;
 import io.debezium.server.CustomConsumerBuilder;
+import io.grpc.ManagedChannel;
+import io.grpc.ManagedChannelBuilder;
 
 /**
  * Implementation of the consumer that delivers the messages into Google Pub/Sub destination.
@@ -70,25 +84,111 @@ public class PubSubChangeConsumer extends BaseChangeConsumer implements Debezium
     @ConfigProperty(name = PROP_PREFIX + "null.key", defaultValue = "default")
     String nullKey;
 
+    @ConfigProperty(name = PROP_PREFIX + "batch.delay.threshold.ms", defaultValue = "100")
+    Integer maxDelayThresholdMs;
+
+    @ConfigProperty(name = PROP_PREFIX + "batch.element.count.threshold", defaultValue = "100")
+    Long maxBufferSize;
+
+    @ConfigProperty(name = PROP_PREFIX + "batch.request.byte.threshold", defaultValue = "10000000")
+    Long maxBufferBytes;
+
+    @ConfigProperty(name = PROP_PREFIX + "flowcontrol.enabled", defaultValue = "false")
+    boolean flowControlEnabled;
+
+    @ConfigProperty(name = PROP_PREFIX + "flowcontrol.max.outstanding.messages", defaultValue = "9223372036854775807")
+    Long maxOutstandingMessages;
+
+    @ConfigProperty(name = PROP_PREFIX + "flowcontrol.max.outstanding.bytes", defaultValue = "9223372036854775807")
+    Long maxOutstandingRequestBytes;
+
+    @ConfigProperty(name = PROP_PREFIX + "retry.total.timeout.ms", defaultValue = "60000")
+    Integer maxTotalTimeoutMs;
+
+    @ConfigProperty(name = PROP_PREFIX + "retry.max.rpc.timeout.ms", defaultValue = "10000")
+    Integer maxRequestTimeoutMs;
+
+    @ConfigProperty(name = PROP_PREFIX + "retry.initial.delay.ms", defaultValue = "5")
+    Integer initialRetryDelay;
+
+    @ConfigProperty(name = PROP_PREFIX + "retry.delay.multiplier", defaultValue = "2.0")
+    Double retryDelayMultiplier;
+
+    @ConfigProperty(name = PROP_PREFIX + "retry.max.delay.ms", defaultValue = "9223372036854775807")
+    Long maxRetryDelay;
+
+    @ConfigProperty(name = PROP_PREFIX + "retry.initial.rpc.timeout.ms", defaultValue = "10000")
+    Integer initialRpcTimeout;
+
+    @ConfigProperty(name = PROP_PREFIX + "retry.rpc.timeout.multiplier", defaultValue = "2.0")
+    Double rpcTimeoutMultiplier;
+
+    @ConfigProperty(name = PROP_PREFIX + "address")
+    Optional<String> address;
+
     @Inject
     @CustomConsumerBuilder
     Instance<PublisherBuilder> customPublisherBuilder;
 
+    private ManagedChannel channel;
+    private TransportChannelProvider channelProvider;
+    private CredentialsProvider credentialsProvider;
+
     @PostConstruct
     void connect() {
+        final Config config = ConfigProvider.getConfig();
+        projectId = config.getOptionalValue(PROP_PROJECT_ID, String.class).orElse(ServiceOptions.getDefaultProjectId());
+
         if (customPublisherBuilder.isResolvable()) {
             publisherBuilder = customPublisherBuilder.get();
             LOGGER.info("Obtained custom configured PublisherBuilder '{}'", customPublisherBuilder);
             return;
         }
 
-        final Config config = ConfigProvider.getConfig();
-        projectId = config.getOptionalValue(PROP_PROJECT_ID, String.class).orElse(ServiceOptions.getDefaultProjectId());
+        BatchingSettings.Builder batchingSettings = BatchingSettings.newBuilder()
+                .setDelayThreshold(Duration.ofMillis(maxDelayThresholdMs))
+                .setElementCountThreshold(maxBufferSize)
+                .setRequestByteThreshold(maxBufferBytes);
+
+        if (flowControlEnabled) {
+            batchingSettings.setFlowControlSettings(FlowControlSettings.newBuilder()
+                    .setMaxOutstandingRequestBytes(maxOutstandingRequestBytes)
+                    .setMaxOutstandingElementCount(maxOutstandingMessages)
+                    .setLimitExceededBehavior(FlowController.LimitExceededBehavior.Block)
+                    .build());
+        }
+
+        if (address.isPresent()) {
+            String hostport = address.get();
+            channel = ManagedChannelBuilder
+                    .forTarget(hostport)
+                    .usePlaintext()
+                    .build();
+            channelProvider = FixedTransportChannelProvider.create(GrpcTransportChannel.create(channel));
+            credentialsProvider = NoCredentialsProvider.create();
+        }
+
         publisherBuilder = (t) -> {
             try {
-                return Publisher.newBuilder(t)
+                Builder builder = Publisher.newBuilder(t)
                         .setEnableMessageOrdering(orderingEnabled)
-                        .build();
+                        .setBatchingSettings(batchingSettings.build())
+                        .setRetrySettings(
+                                RetrySettings.newBuilder()
+                                        .setTotalTimeout(Duration.ofMillis(maxTotalTimeoutMs))
+                                        .setMaxRpcTimeout(Duration.ofMillis(maxRequestTimeoutMs))
+                                        .setInitialRetryDelay(Duration.ofMillis(initialRetryDelay))
+                                        .setRetryDelayMultiplier(retryDelayMultiplier)
+                                        .setMaxRetryDelay(Duration.ofMillis(maxRetryDelay))
+                                        .setInitialRpcTimeout(Duration.ofMillis(initialRpcTimeout))
+                                        .setRpcTimeoutMultiplier(rpcTimeoutMultiplier)
+                                        .build());
+
+                if (address.isPresent()) {
+                    builder.setChannelProvider(channelProvider).setCredentialsProvider(credentialsProvider);
+                }
+
+                return builder.build();
             }
             catch (IOException e) {
                 throw new DebeziumException(e);
@@ -108,6 +208,10 @@ public class PubSubChangeConsumer extends BaseChangeConsumer implements Debezium
                 LOGGER.warn("Exception while closing publisher: {}", e);
             }
         });
+
+        if (channel != null && !channel.isShutdown()) {
+            channel.shutdown();
+        }
     }
 
     @Override

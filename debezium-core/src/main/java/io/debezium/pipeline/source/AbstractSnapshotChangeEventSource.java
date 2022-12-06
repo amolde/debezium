@@ -8,6 +8,7 @@ package io.debezium.pipeline.source;
 import java.time.Duration;
 import java.util.Collection;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 import org.slf4j.Logger;
@@ -19,8 +20,9 @@ import io.debezium.config.ConfigurationDefaults;
 import io.debezium.pipeline.source.spi.SnapshotChangeEventSource;
 import io.debezium.pipeline.source.spi.SnapshotProgressListener;
 import io.debezium.pipeline.spi.OffsetContext;
+import io.debezium.pipeline.spi.Partition;
 import io.debezium.pipeline.spi.SnapshotResult;
-import io.debezium.schema.DataCollectionId;
+import io.debezium.spi.schema.DataCollectionId;
 import io.debezium.util.Clock;
 import io.debezium.util.Metronome;
 import io.debezium.util.Threads;
@@ -31,21 +33,26 @@ import io.debezium.util.Threads;
  *
  * @author Chris Cranford
  */
-public abstract class AbstractSnapshotChangeEventSource<O extends OffsetContext> implements SnapshotChangeEventSource<O> {
+public abstract class AbstractSnapshotChangeEventSource<P extends Partition, O extends OffsetContext> implements SnapshotChangeEventSource<P, O> {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(AbstractSnapshotChangeEventSource.class);
 
-    private final CommonConnectorConfig connectorConfig;
-    private final SnapshotProgressListener snapshotProgressListener;
+    /**
+     * Interval for showing a log statement with the progress while scanning a single table.
+     */
+    public static final Duration LOG_INTERVAL = Duration.ofMillis(10_000);
 
-    public AbstractSnapshotChangeEventSource(CommonConnectorConfig connectorConfig, SnapshotProgressListener snapshotProgressListener) {
+    private final CommonConnectorConfig connectorConfig;
+    private final SnapshotProgressListener<P> snapshotProgressListener;
+
+    public AbstractSnapshotChangeEventSource(CommonConnectorConfig connectorConfig, SnapshotProgressListener<P> snapshotProgressListener) {
         this.connectorConfig = connectorConfig;
         this.snapshotProgressListener = snapshotProgressListener;
     }
 
     @Override
-    public SnapshotResult<O> execute(ChangeEventSourceContext context, O previousOffset) throws InterruptedException {
-        SnapshottingTask snapshottingTask = getSnapshottingTask(previousOffset);
+    public SnapshotResult<O> execute(ChangeEventSourceContext context, P partition, O previousOffset) throws InterruptedException {
+        SnapshottingTask snapshottingTask = getSnapshottingTask(partition, previousOffset);
         if (snapshottingTask.shouldSkipSnapshot()) {
             LOGGER.debug("Skipping snapshotting");
             return SnapshotResult.skipped(previousOffset);
@@ -53,9 +60,9 @@ public abstract class AbstractSnapshotChangeEventSource<O extends OffsetContext>
 
         delaySnapshotIfNeeded(context);
 
-        final SnapshotContext<O> ctx;
+        final SnapshotContext<P, O> ctx;
         try {
-            ctx = prepare(context);
+            ctx = prepare(partition);
         }
         catch (Exception e) {
             LOGGER.error("Failed to initialize snapshot context.", e);
@@ -65,7 +72,7 @@ public abstract class AbstractSnapshotChangeEventSource<O extends OffsetContext>
         boolean completedSuccessfully = true;
 
         try {
-            snapshotProgressListener.snapshotStarted();
+            snapshotProgressListener.snapshotStarted(partition);
             return doExecute(context, previousOffset, ctx, snapshottingTask);
         }
         catch (InterruptedException e) {
@@ -82,22 +89,25 @@ public abstract class AbstractSnapshotChangeEventSource<O extends OffsetContext>
             complete(ctx);
 
             if (completedSuccessfully) {
-                snapshotProgressListener.snapshotCompleted();
+                LOGGER.info("Snapshot completed");
+                snapshotProgressListener.snapshotCompleted(partition);
             }
             else {
-                snapshotProgressListener.snapshotAborted();
+                LOGGER.warn("Snapshot was not completed successfully, it will be re-executed upon connector restart");
+                snapshotProgressListener.snapshotAborted(partition);
             }
         }
     }
 
     protected <T extends DataCollectionId> Stream<T> determineDataCollectionsToBeSnapshotted(final Collection<T> allDataCollections) {
-        final Set<String> snapshotAllowedDataCollections = connectorConfig.getDataCollectionsToBeSnapshotted();
+        final Set<Pattern> snapshotAllowedDataCollections = connectorConfig.getDataCollectionsToBeSnapshotted();
         if (snapshotAllowedDataCollections.size() == 0) {
             return allDataCollections.stream();
         }
         else {
             return allDataCollections.stream()
-                    .filter(dataCollectionId -> snapshotAllowedDataCollections.stream().anyMatch(s -> dataCollectionId.identifier().matches(s)));
+                    .filter(dataCollectionId -> snapshotAllowedDataCollections.stream()
+                            .anyMatch(s -> s.matcher(dataCollectionId.identifier()).matches()));
         }
     }
 
@@ -136,18 +146,19 @@ public abstract class AbstractSnapshotChangeEventSource<O extends OffsetContext>
      * @return an indicator to the position at which the snapshot was taken
      */
     protected abstract SnapshotResult<O> doExecute(ChangeEventSourceContext context, O previousOffset,
-                                                   SnapshotContext<O> snapshotContext, SnapshottingTask snapshottingTask)
+                                                   SnapshotContext<P, O> snapshotContext,
+                                                   SnapshottingTask snapshottingTask)
             throws Exception;
 
     /**
      * Returns the snapshotting task based on the previous offset (if available) and the connector's snapshotting mode.
      */
-    protected abstract SnapshottingTask getSnapshottingTask(O previousOffset);
+    protected abstract SnapshottingTask getSnapshottingTask(P partition, O previousOffset);
 
     /**
      * Prepares the taking of a snapshot and returns an initial {@link SnapshotContext}.
      */
-    protected abstract SnapshotContext<O> prepare(ChangeEventSourceContext changeEventSourceContext) throws Exception;
+    protected abstract SnapshotContext<P, O> prepare(P partition) throws Exception;
 
     /**
      * Completes the snapshot, doing any required clean-up (resource disposal etc.).
@@ -155,14 +166,19 @@ public abstract class AbstractSnapshotChangeEventSource<O extends OffsetContext>
      *
      * @param snapshotContext snapshot context
      */
-    protected void complete(SnapshotContext<O> snapshotContext) {
+    protected void complete(SnapshotContext<P, O> snapshotContext) {
     }
 
     /**
      * Mutable context which is populated in the course of snapshotting
      */
-    public static class SnapshotContext<O extends OffsetContext> implements AutoCloseable {
+    public static class SnapshotContext<P extends Partition, O extends OffsetContext> implements AutoCloseable {
+        public P partition;
         public O offset;
+
+        public SnapshotContext(P partition) {
+            this.partition = partition;
+        }
 
         @Override
         public void close() throws Exception {

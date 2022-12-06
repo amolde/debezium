@@ -43,9 +43,10 @@ pipeline {
                         --dir="${STRZ_RESOURCES}"                                   \\
                         --images="${STRZ_IMAGES}"                                   \\
                         --registry="quay.io" --organisation="${QUAY_ORGANISATION}"  \\
-                        --dest-creds="${QUAY_USERNAME}:${QUAY_PASSWORD}"            \\
+                        --dest-login="${QUAY_USERNAME}"                             \\
+                        --dest-pass="${QUAY_PASSWORD}"                              \\
                         --deployment-desc="${STRZ_RESOURCES_DEPLOYMENT_DESCRIPTOR}" \\
-                        --img-output="${WORKSPACE}/published_images.txt"            
+                        --img-output="${WORKSPACE}/published_images.txt"
                     '''
                     zip(archive: true, zipFile: 'amq-streams-install-examples.zip', dir: 'strimzi')
                 }
@@ -69,18 +70,33 @@ pipeline {
                         --libs="${DBZ_EXTRA_LIBS}"                                  \\
                         --images="${STRZ_IMAGES}"                                   \\
                         --registry="quay.io" --organisation="${QUAY_ORGANISATION}"  \\
-                        --dest-creds="${QUAY_USERNAME}:${QUAY_PASSWORD}"            \\
+                        --dest-login="${QUAY_USERNAME}"                             \\
+                        --dest-pass="${QUAY_PASSWORD}"                              \\
                         --img-output="${WORKSPACE}/published_images_dbz.txt"
                     '''
                 }
+            }
+        }
+
+        stage('Create main artefact') {
+            steps {
+                sh '''
+                set -x
+                mkdir "${WORKSPACE}/amq-streams-all"
+                cp -R "${WORKSPACE}/strimzi" "${WORKSPACE}/amq-streams-all/strimzi"
+                cp "${WORKSPACE}/published_images.txt" "${WORKSPACE}/amq-streams-all/amq-streams-published-images.txt"
+                cp "${WORKSPACE}/published_images_dbz.txt" \\
+                "${WORKSPACE}/amq-streams-all/amq-streams-published-images-dbz.txt" || :
+                '''
+                zip(archive: true, zipFile: 'amq-streams-all.zip', dir: 'amq-streams-all')
             }
         }
     }
 
     post {
         always {
-            mail to: 'jcechace@redhat.com', subject: "Debezium OpenShift test run #${BUILD_NUMBER} finished", body: """
-${currentBuild.projectName} run ${BUILD_URL} finished with result: ${currentBuild.currentResult}
+            mail to: params.MAIL_TO, subject: "Debezium OpenShift test run #${env.BUILD_NUMBER} finished", body: """
+${currentBuild.projectName} run ${env.BUILD_URL} finished with result: ${currentBuild.currentResult}
 """
         }
         success {

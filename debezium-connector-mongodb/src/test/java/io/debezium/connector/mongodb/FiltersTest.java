@@ -5,9 +5,10 @@
  */
 package io.debezium.connector.mongodb;
 
-import static org.fest.assertions.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.Assert.assertEquals;
 
-import org.apache.kafka.common.config.ConfigException;
+import org.bson.Document;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -162,39 +163,82 @@ public class FiltersTest {
         assertCollectionIncluded("db2.collectionA");
     }
 
-    @Test(expected = ConfigException.class)
-    public void shouldThrowExceptionWhenFieldBlacklistDatabaseAndCollectionPartsAreMissing() {
-        build.excludeFields(".name").createFilters();
+    @Test
+    public void shouldIncludeSignalingCollectionAndNoWhitelistAndNoBlacklist() {
+        filters = build.signalingCollection("db1.signal").createFilters();
+        assertCollectionIncluded("db1.signal");
     }
 
-    @Test(expected = ConfigException.class)
-    public void shouldThrowExceptionWhenFieldBlacklistFieldPartIsMissing() {
-        build.excludeFields("db1.collectionA.").createFilters();
+    @Test
+    public void shouldIncludeSignalingCollectionNotCoveredByWhitelist() {
+        filters = build.includeCollections("db1.table").signalingCollection("db1.signal").createFilters();
+        assertCollectionIncluded("db1.signal");
     }
 
-    @Test(expected = ConfigException.class)
-    public void shouldThrowExceptionWhenFieldRenamesDatabaseAndCollectionPartsAreMissing() {
-        build.renameFields(".name=new_name").createFilters();
+    @Test
+    public void shouldIncludeSignalingCollectionCoveredByLiteralInBlacklist() {
+        filters = build.excludeCollections("db1.signal").signalingCollection("db1.signal").createFilters();
+        assertCollectionIncluded("db1.signal");
     }
 
-    @Test(expected = ConfigException.class)
-    public void shouldThrowExceptionWhenFieldRenamesReplacementPartIsMissing() {
-        build.renameFields("db1.collectionA.").createFilters();
+    @Test
+    public void shouldIncludeSignalingCollectionCoveredByRegexInBlacklist() {
+        filters = build.excludeCollections("db1.*").signalingCollection("db1.signal").createFilters();
+        assertCollectionIncluded("db1.signal");
     }
 
-    @Test(expected = ConfigException.class)
-    public void shouldThrowExceptionWhenFieldRenamesReplacementPartSeparatorIsMissing() {
-        build.renameFields("db1.collectionA.namenew_name").createFilters();
+    @Test
+    public void excludeFilterShouldRemoveMatchingField() {
+        filters = build.excludeFields("db1.collectionA.key1").createFilters();
+        CollectionId id = CollectionId.parse("rs1.", "db1.collectionA");
+        assertEquals(
+                Document.parse(" { \"key2\" : \"value2\" }"),
+                filters.fieldFilterFor(id).apply(Document.parse(" { \"key1\" : \"value1\", \"key2\" : \"value2\" }")));
     }
 
-    @Test(expected = ConfigException.class)
-    public void shouldThrowExceptionWhenFieldRenamesRenameMappingKeyIsMissing() {
-        build.renameFields("db1.collectionA.=new_name").createFilters();
+    @Test
+    public void excludeFilterShouldRemoveMatchingFieldWithLeadingWhiteSpaces() {
+        filters = build.excludeFields(" *.collectionA.key1").createFilters();
+        CollectionId id = CollectionId.parse("rs1.", " *.collectionA");
+        assertEquals(
+                Document.parse(" { \"key2\" : \"value2\" }"),
+                filters.fieldFilterFor(id).apply(Document.parse(" { \"key1\" : \"value1\", \"key2\" : \"value2\" }")));
     }
 
-    @Test(expected = ConfigException.class)
-    public void shouldThrowExceptionWhenFieldRenamesRenameMappingValueIsMissing() {
-        build.renameFields("db1.collectionA.name=").createFilters();
+    @Test
+    public void excludeFilterShouldRemoveMatchingFieldWithTrailingWhiteSpaces() {
+        filters = build.excludeFields("db.collectionA.key1 ,db.collectionA.key2 ").createFilters();
+        CollectionId id = CollectionId.parse("rs1.", "db.collectionA");
+        assertEquals(
+                Document.parse(" { \"key3\" : \"value3\" }"),
+                filters.fieldFilterFor(id).apply(Document.parse(" { \"key1\" : \"value1\", \"key2\" : \"value2\", \"key3\" : \"value3\" }")));
+    }
+
+    @Test
+    public void renameFilterShouldRenameMatchingField() {
+        filters = build.renameFields("db1.collectionA.key1:key2").createFilters();
+        CollectionId id = CollectionId.parse("rs1.", "db1.collectionA");
+        assertEquals(
+                Document.parse(" { \"key2\" : \"value1\" }"),
+                filters.fieldFilterFor(id).apply(Document.parse(" { \"key1\" : \"value1\" }")));
+    }
+
+    @Test
+    public void renameFilterShouldRenameMatchingFieldWithLeadingWhiteSpaces() {
+        filters = build.renameFields(" *.collectionA.key2:key3").createFilters();
+        CollectionId id = CollectionId.parse("rs1.", " *.collectionA");
+        assertEquals(
+                Document.parse(" { \"key1\" : \"valueA\", \"key3\" : \"valueB\" }"),
+                filters.fieldFilterFor(id).apply(Document.parse(" { \"key1\" : \"valueA\", \"key2\" : \"valueB\" }")));
+    }
+
+    @Test
+    public void renameFilterShouldRenameMatchingFieldWithTrailingWhiteSpaces() {
+        filters = build.renameFields("db2.collectionA.key1:key2 ,db2.collectionA.key3:key4 ").createFilters();
+        CollectionId id = CollectionId.parse("rs1.", "db2.collectionA");
+        assertEquals(
+                Document.parse(" { \"key2\" : \"valueA\", \"key4\" : \"valueB\" }"),
+                filters.fieldFilterFor(id).apply(Document.parse(" { \"key1\" : \"valueA\", \"key3\" : \"valueB\" }")));
     }
 
     protected void assertCollectionIncluded(String fullyQualifiedCollectionName) {

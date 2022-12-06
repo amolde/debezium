@@ -7,19 +7,15 @@ package io.debezium.connector.oracle;
 
 import java.sql.Clob;
 import java.sql.DatabaseMetaData;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.sql.Types;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
+import java.sql.Timestamp;
+import java.time.OffsetDateTime;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
-import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -27,16 +23,16 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.debezium.DebeziumException;
-import io.debezium.config.Configuration;
 import io.debezium.config.Field;
 import io.debezium.connector.oracle.OracleConnectorConfig.ConnectorAdapter;
+import io.debezium.jdbc.JdbcConfiguration;
 import io.debezium.jdbc.JdbcConnection;
 import io.debezium.relational.Column;
-import io.debezium.relational.TableEditor;
+import io.debezium.relational.ColumnEditor;
 import io.debezium.relational.TableId;
 import io.debezium.relational.Tables;
 import io.debezium.relational.Tables.ColumnNameFilter;
-import io.debezium.relational.Tables.TableFilter;
+import io.debezium.util.Strings;
 
 import oracle.jdbc.OracleTypes;
 
@@ -55,6 +51,16 @@ public class OracleConnection extends JdbcConnection {
     private static final Pattern SYS_NC_PATTERN = Pattern.compile("^SYS_NC(?:_OID|_ROWINFO|[0-9][0-9][0-9][0-9][0-9])\\$$");
 
     /**
+     * Pattern to identify abstract data type indices and column names.
+     */
+    private static final Pattern ADT_INDEX_NAMES_PATTERN = Pattern.compile("^\".*\"\\.\".*\".*");
+
+    /**
+     * Pattern to identify a hidden column based on redefining a table with the {@code ROWID} option.
+     */
+    private static final Pattern MROW_PATTERN = Pattern.compile("^M_ROW\\$\\$");
+
+    /**
      * A field for the raw jdbc url. This field has no default value.
      */
     private static final Field URL = Field.create("url", "Raw JDBC url");
@@ -64,11 +70,18 @@ public class OracleConnection extends JdbcConnection {
      */
     private final OracleDatabaseVersion databaseVersion;
 
-    public OracleConnection(Configuration config, Supplier<ClassLoader> classLoaderSupplier) {
-        super(config, resolveConnectionFactory(config), classLoaderSupplier);
+    private static final String QUOTED_CHARACTER = "\"";
 
+    public OracleConnection(JdbcConfiguration config) {
+        this(config, true);
+    }
+
+    public OracleConnection(JdbcConfiguration config, boolean showVersion) {
+        super(config, resolveConnectionFactory(config), QUOTED_CHARACTER, QUOTED_CHARACTER);
         this.databaseVersion = resolveOracleDatabaseVersion();
-        LOGGER.info("Database Version: {}", databaseVersion.getBanner());
+        if (showVersion) {
+            LOGGER.info("Database Version: {}", databaseVersion.getBanner());
+        }
     }
 
     public void setSessionToPdb(String pdbName) {
@@ -193,7 +206,11 @@ public class OracleConnection extends JdbcConnection {
                 "and table_name NOT LIKE 'MDRS_%' " +
                 "and table_name NOT LIKE 'MDXT_%' " +
                 // filter index-organized-tables
-                "and (table_name NOT LIKE 'SYS_IOT_OVER_%' and IOT_NAME IS NULL) ";
+                "and (table_name NOT LIKE 'SYS_IOT_OVER_%' and IOT_NAME IS NULL) " +
+                // filter nested tables
+                "and nested = 'NO'" +
+                // filter parent tables of nested tables
+                "and table_name not in (select PARENT_TABLE_NAME from ALL_NESTED_TABLES)";
 
         Set<TableId> tableIds = new HashSet<>();
         query(query, (rs) -> {
@@ -206,80 +223,10 @@ public class OracleConnection extends JdbcConnection {
         return tableIds;
     }
 
-    // todo replace metadata with something like this
-    private ResultSet getTableColumnsInfo(String schemaNamePattern, String tableName) throws SQLException {
-        String columnQuery = "select column_name, data_type, data_length, data_precision, data_scale, default_length, density, char_length from " +
-                "all_tab_columns where owner like '" + schemaNamePattern + "' and table_name='" + tableName + "'";
-
-        PreparedStatement statement = connection().prepareStatement(columnQuery);
-        return statement.executeQuery();
-    }
-
-    // this is much faster, we will use it until full replacement of the metadata usage TODO
-    public void readSchemaForCapturedTables(Tables tables, String databaseCatalog, String schemaNamePattern,
-                                            ColumnNameFilter columnFilter, boolean removeTablesNotFoundInJdbc, Set<TableId> capturedTables)
-            throws SQLException {
-
-        Set<TableId> tableIdsBefore = new HashSet<>(tables.tableIds());
-
-        DatabaseMetaData metadata = connection().getMetaData();
-        Map<TableId, List<Column>> columnsByTable = new HashMap<>();
-
-        for (TableId tableId : capturedTables) {
-            try (ResultSet columnMetadata = metadata.getColumns(databaseCatalog, schemaNamePattern, tableId.table(), null)) {
-                while (columnMetadata.next()) {
-                    // add all whitelisted columns
-                    readTableColumn(columnMetadata, tableId, columnFilter).ifPresent(column -> {
-                        columnsByTable.computeIfAbsent(tableId, t -> new ArrayList<>())
-                                .add(column.create());
-                    });
-                }
-            }
-        }
-
-        // Read the metadata for the primary keys ...
-        for (Map.Entry<TableId, List<Column>> tableEntry : columnsByTable.entrySet()) {
-            // First get the primary key information, which must be done for *each* table ...
-            List<String> pkColumnNames = readPrimaryKeyNames(metadata, tableEntry.getKey());
-
-            // Then define the table ...
-            List<Column> columns = tableEntry.getValue();
-            Collections.sort(columns);
-            tables.overwriteTable(tableEntry.getKey(), columns, pkColumnNames, null);
-        }
-
-        if (removeTablesNotFoundInJdbc) {
-            // Remove any definitions for tables that were not found in the database metadata ...
-            tableIdsBefore.removeAll(columnsByTable.keySet());
-            tableIdsBefore.forEach(tables::removeTable);
-        }
-
-        for (TableId tableId : capturedTables) {
-            overrideOracleSpecificColumnTypes(tables, tableId, tableId);
-        }
-
-    }
-
     @Override
-    public void readSchema(Tables tables, String databaseCatalog, String schemaNamePattern, TableFilter tableFilter,
-                           ColumnNameFilter columnFilter, boolean removeTablesNotFoundInJdbc)
-            throws SQLException {
-
-        super.readSchema(tables, null, schemaNamePattern, tableFilter, columnFilter, removeTablesNotFoundInJdbc);
-
-        Set<TableId> tableIds = tables.tableIds().stream().filter(x -> schemaNamePattern.equals(x.schema())).collect(Collectors.toSet());
-
-        for (TableId tableId : tableIds) {
-            // super.readSchema() populates ids without the catalog; hence we apply the filtering only
-            // here and if a table is included, overwrite it with a new id including the catalog
-            TableId tableIdWithCatalog = new TableId(databaseCatalog, tableId.schema(), tableId.table());
-
-            if (tableFilter.isIncluded(tableIdWithCatalog)) {
-                overrideOracleSpecificColumnTypes(tables, tableId, tableIdWithCatalog);
-            }
-
-            tables.removeTable(tableId);
-        }
+    protected String resolveCatalogName(String catalogName) {
+        final String pdbName = config().getString("pdb.name");
+        return (!Strings.isNullOrEmpty(pdbName) ? pdbName : config().getString("dbname")).toUpperCase();
     }
 
     @Override
@@ -288,41 +235,19 @@ public class OracleConnection extends JdbcConnection {
     }
 
     @Override
-    protected boolean isTableUniqueIndexIncluded(String indexName, String columnName) {
-        if (columnName != null) {
-            return !SYS_NC_PATTERN.matcher(columnName).matches();
-        }
-        return false;
+    public Optional<Timestamp> getCurrentTimestamp() throws SQLException {
+        return queryAndMap("SELECT CURRENT_TIMESTAMP FROM DUAL",
+                rs -> rs.next() ? Optional.of(rs.getTimestamp(1)) : Optional.empty());
     }
 
-    private void overrideOracleSpecificColumnTypes(Tables tables, TableId tableId, TableId tableIdWithCatalog) {
-        TableEditor editor = tables.editTable(tableId);
-        editor.tableId(tableIdWithCatalog);
-
-        List<String> columnNames = new ArrayList<>(editor.columnNames());
-        for (String columnName : columnNames) {
-            Column column = editor.columnWithName(columnName);
-            if (column.jdbcType() == Types.TIMESTAMP) {
-                editor.addColumn(
-                        column.edit()
-                                .length(column.scale().orElse(Column.UNSET_INT_VALUE))
-                                .scale(null)
-                                .create());
-            }
-            // NUMBER columns without scale value have it set to -127 instead of null;
-            // let's rectify that
-            else if (column.jdbcType() == OracleTypes.NUMBER) {
-                column.scale()
-                        .filter(s -> s == ORACLE_UNSET_SCALE)
-                        .ifPresent(s -> {
-                            editor.addColumn(
-                                    column.edit()
-                                            .scale(null)
-                                            .create());
-                        });
-            }
+    @Override
+    protected boolean isTableUniqueIndexIncluded(String indexName, String columnName) {
+        if (columnName != null) {
+            return !SYS_NC_PATTERN.matcher(columnName).matches()
+                    && !ADT_INDEX_NAMES_PATTERN.matcher(columnName).matches()
+                    && !MROW_PATTERN.matcher(columnName).matches();
         }
-        tables.overwriteTable(editor.create());
+        return false;
     }
 
     /**
@@ -347,12 +272,26 @@ public class OracleConnection extends JdbcConnection {
      * @param tableId table identifier, should never be {@code null}
      * @return generated DDL
      * @throws SQLException if an exception occurred obtaining the DDL metadata
+     * @throws NonRelationalTableException the table is not a relational table
      */
-    public String getTableMetadataDdl(TableId tableId) throws SQLException {
+    public String getTableMetadataDdl(TableId tableId) throws SQLException, NonRelationalTableException {
         try {
+            // This table contains all available objects that are considered relational & object based.
+            // By querying for TABLE_TYPE is null, we are explicitly confirming what if an entry exists
+            // that the table is in-fact a relational table and if the result set is empty, the object
+            // is another type, likely an object-based table, in which case we cannot generate DDL.
+            final String tableType = "SELECT COUNT(1) FROM ALL_ALL_TABLES WHERE OWNER='" + tableId.schema()
+                    + "' AND TABLE_NAME='" + tableId.table() + "' AND TABLE_TYPE IS NULL";
+            if (queryAndMap(tableType, rs -> rs.next() ? rs.getInt(1) : 0) == 0) {
+                throw new NonRelationalTableException("Table " + tableId + " is not a relational table");
+            }
+
             // The storage and segment attributes aren't necessary
             executeWithoutCommitting("begin dbms_metadata.set_transform_param(DBMS_METADATA.SESSION_TRANSFORM, 'STORAGE', false); end;");
             executeWithoutCommitting("begin dbms_metadata.set_transform_param(DBMS_METADATA.SESSION_TRANSFORM, 'SEGMENT_ATTRIBUTES', false); end;");
+            // In case DDL is returned as multiple DDL statements, this allows the parser to parse each separately.
+            // This is only critical during streaming as during snapshot the table structure is built from JDBC driver queries.
+            executeWithoutCommitting("begin dbms_metadata.set_transform_param(DBMS_METADATA.SESSION_TRANSFORM, 'SQLTERMINATOR', true); end;");
             return queryAndMap("SELECT dbms_metadata.get_ddl('TABLE','" + tableId.table() + "','" + tableId.schema() + "') FROM DUAL", rs -> {
                 if (!rs.next()) {
                     throw new DebeziumException("Could not get DDL metadata for table: " + tableId);
@@ -367,12 +306,205 @@ public class OracleConnection extends JdbcConnection {
         }
     }
 
-    public static String connectionString(Configuration config) {
+    /**
+     * Get the current connection's session statistic by name.
+     *
+     * @param name the name of the statistic to be fetched, must not be {@code null}
+     * @return the session statistic value, never {@code null}
+     * @throws SQLException if an exception occurred obtaining the session statistic value
+     */
+    public Long getSessionStatisticByName(String name) throws SQLException {
+        return queryAndMap("SELECT VALUE FROM v$statname n, v$mystat m WHERE n.name='" + name +
+                "' AND n.statistic#=m.statistic#", rs -> rs.next() ? rs.getLong(1) : 0L);
+    }
+
+    /**
+     * Returns whether the given table exists or not.
+     *
+     * @param tableName table name, should not be {@code null}
+     * @return true if the table exists, false if it does not
+     * @throws SQLException if a database exception occurred
+     */
+    public boolean isTableExists(String tableName) throws SQLException {
+        return queryAndMap("SELECT COUNT(1) FROM USER_TABLES WHERE TABLE_NAME = '" + tableName + "'",
+                rs -> rs.next() && rs.getLong(1) > 0);
+    }
+
+    public boolean isTableExists(TableId tableId) throws SQLException {
+        return queryAndMap("SELECT COUNT(1) FROM ALL_TABLES WHERE OWNER = '" + tableId.schema() + "' AND TABLE_NAME = '" + tableId.table() + "'",
+                rs -> rs.next() && rs.getLong(1) > 0);
+    }
+
+    /**
+     * Returns whether the given table is empty or not.
+     *
+     * @param tableName table name, should not be {@code null}
+     * @return true if the table has no records, false otherwise
+     * @throws SQLException if a database exception occurred
+     */
+    public boolean isTableEmpty(String tableName) throws SQLException {
+        return getRowCount(tableName) == 0L;
+    }
+
+    /**
+     * Returns the number of rows in a given table.
+     *
+     * @param tableName table name, should not be {@code null}
+     * @return the number of rows
+     * @throws SQLException if a database exception occurred
+     */
+    public long getRowCount(String tableName) throws SQLException {
+        return queryAndMap("SELECT COUNT(1) FROM " + tableName, rs -> {
+            if (rs.next()) {
+                return rs.getLong(1);
+            }
+            return 0L;
+        });
+    }
+
+    public <T> T singleOptionalValue(String query, ResultSetExtractor<T> extractor) throws SQLException {
+        return queryAndMap(query, rs -> rs.next() ? extractor.apply(rs) : null);
+    }
+
+    @Override
+    public String buildSelectWithRowLimits(TableId tableId,
+                                           int limit,
+                                           String projection,
+                                           Optional<String> condition,
+                                           Optional<String> additionalCondition,
+                                           String orderBy) {
+        final TableId table = new TableId(null, tableId.schema(), tableId.table());
+        final StringBuilder sql = new StringBuilder("SELECT ");
+        sql
+                .append(projection)
+                .append(" FROM ");
+        sql.append(quotedTableIdString(table));
+        if (condition.isPresent()) {
+            sql
+                    .append(" WHERE ")
+                    .append(condition.get());
+            if (additionalCondition.isPresent()) {
+                sql.append(" AND ");
+                sql.append(additionalCondition.get());
+            }
+        }
+        else if (additionalCondition.isPresent()) {
+            sql.append(" WHERE ");
+            sql.append(additionalCondition.get());
+        }
+        if (getOracleVersion().getMajor() < 12) {
+            sql
+                    .insert(0, " SELECT * FROM (")
+                    .append(" ORDER BY ")
+                    .append(orderBy)
+                    .append(")")
+                    .append(" WHERE ROWNUM <=")
+                    .append(limit);
+        }
+        else {
+            sql
+                    .append(" ORDER BY ")
+                    .append(orderBy)
+                    .append(" FETCH NEXT ")
+                    .append(limit)
+                    .append(" ROWS ONLY");
+        }
+        return sql.toString();
+    }
+
+    public static String connectionString(JdbcConfiguration config) {
         return config.getString(URL) != null ? config.getString(URL)
                 : ConnectorAdapter.parse(config.getString("connection.adapter")).getConnectionUrl();
     }
 
-    private static ConnectionFactory resolveConnectionFactory(Configuration config) {
+    private static ConnectionFactory resolveConnectionFactory(JdbcConfiguration config) {
         return JdbcConnection.patternBasedFactory(connectionString(config));
+    }
+
+    /**
+     * Determine whether the Oracle server has the archive log enabled.
+     *
+     * @return {@code true} if the server's {@code LOG_MODE} is set to {@code ARCHIVELOG}, or {@code false} otherwise
+     */
+    protected boolean isArchiveLogMode() {
+        try {
+            final String mode = queryAndMap("SELECT LOG_MODE FROM V$DATABASE", rs -> rs.next() ? rs.getString(1) : "");
+            LOGGER.debug("LOG_MODE={}", mode);
+            return "ARCHIVELOG".equalsIgnoreCase(mode);
+        }
+        catch (SQLException e) {
+            throw new DebeziumException("Unexpected error while connecting to Oracle and looking at LOG_MODE mode: ", e);
+        }
+    }
+
+    /**
+     * Resolve a system change number to a timestamp, return value is in database timezone.
+     *
+     * The SCN to TIMESTAMP mapping is only retained for the duration of the flashback query area.
+     * This means that eventually the mapping between these values are no longer kept by Oracle
+     * and making a call with a SCN value that has aged out will result in an ORA-08181 error.
+     * This function explicitly checks for this use case and if a ORA-08181 error is thrown, it is
+     * therefore treated as if a value does not exist returning an empty optional value.
+     *
+     * @param scn the system change number, must not be {@code null}
+     * @return an optional timestamp when the system change number occurred
+     * @throws SQLException if a database exception occurred
+     */
+    public Optional<OffsetDateTime> getScnToTimestamp(Scn scn) throws SQLException {
+        try {
+            return queryAndMap("SELECT scn_to_timestamp('" + scn + "') FROM DUAL", rs -> rs.next()
+                    ? Optional.of(rs.getObject(1, OffsetDateTime.class))
+                    : Optional.empty());
+        }
+        catch (SQLException e) {
+            if (e.getMessage().startsWith("ORA-08181")) {
+                // ORA-08181 specified number is not a valid system change number
+                // This happens when the SCN provided is outside the flashback area range
+                // This should be treated as a value is not available rather than an error
+                return Optional.empty();
+            }
+            // Any other SQLException should be thrown
+            throw e;
+        }
+    }
+
+    @Override
+    protected ColumnEditor overrideColumn(ColumnEditor column) {
+        // This allows the column state to be overridden before default-value resolution so that the
+        // output of the default value is within the same precision as that of the column values.
+        if (OracleTypes.TIMESTAMP == column.jdbcType()) {
+            column.length(column.scale().orElse(Column.UNSET_INT_VALUE)).scale(null);
+        }
+        else if (OracleTypes.NUMBER == column.jdbcType()) {
+            column.scale().filter(s -> s == ORACLE_UNSET_SCALE).ifPresent(s -> column.scale(null));
+        }
+        return column;
+    }
+
+    @Override
+    protected Map<TableId, List<Column>> getColumnsDetails(String databaseCatalog,
+                                                           String schemaNamePattern,
+                                                           String tableName,
+                                                           Tables.TableFilter tableFilter,
+                                                           ColumnNameFilter columnFilter,
+                                                           DatabaseMetaData metadata,
+                                                           Set<TableId> viewIds)
+            throws SQLException {
+        // The Oracle JDBC driver expects that if the table name contains a "/" character that
+        // the table name is pre-escaped prior to the JDBC driver call, or else it throws an
+        // exception about the character sequence being improperly escaped.
+        if (tableName != null && tableName.contains("/")) {
+            tableName = tableName.replace("/", "//");
+        }
+        return super.getColumnsDetails(databaseCatalog, schemaNamePattern, tableName, tableFilter, columnFilter, metadata, viewIds);
+    }
+
+    /**
+     * An exception that indicates the operation failed because the table is not a relational table.
+     */
+    public static class NonRelationalTableException extends DebeziumException {
+        public NonRelationalTableException(String message) {
+            super(message);
+        }
     }
 }

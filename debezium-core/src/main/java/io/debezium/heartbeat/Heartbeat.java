@@ -5,7 +5,6 @@
  */
 package io.debezium.heartbeat;
 
-import java.time.Duration;
 import java.util.Map;
 
 import org.apache.kafka.common.config.ConfigDef.Importance;
@@ -15,7 +14,6 @@ import org.apache.kafka.connect.source.SourceRecord;
 
 import io.debezium.config.Field;
 import io.debezium.function.BlockingConsumer;
-import io.debezium.jdbc.JdbcConnection;
 
 /**
  * A class that is able to generate periodic heartbeat messages based on a pre-configured interval. The clients are
@@ -24,7 +22,7 @@ import io.debezium.jdbc.JdbcConnection;
  * @author Jiri Pechanec
  *
  */
-public interface Heartbeat {
+public interface Heartbeat extends AutoCloseable {
 
     String HEARTBEAT_INTERVAL_PROPERTY_NAME = "heartbeat.interval.ms";
 
@@ -41,6 +39,7 @@ public interface Heartbeat {
     Field HEARTBEAT_INTERVAL = Field.create(HEARTBEAT_INTERVAL_PROPERTY_NAME)
             .withDisplayName("Connector heartbeat interval (milli-seconds)")
             .withType(Type.INT)
+            .withGroup(Field.createGroupEntry(Field.Group.ADVANCED_HEARTBEAT, 0))
             .withWidth(Width.MEDIUM)
             .withImportance(Importance.MEDIUM)
             .withDescription("Length of an interval in milli-seconds in in which the connector periodically sends heartbeat messages "
@@ -53,6 +52,7 @@ public interface Heartbeat {
     Field HEARTBEAT_TOPICS_PREFIX = Field.create("heartbeat.topics.prefix")
             .withDisplayName("A prefix used for naming of heartbeat topics")
             .withType(Type.STRING)
+            .withGroup(Field.createGroupEntry(Field.Group.ADVANCED_HEARTBEAT, 1))
             .withWidth(Width.MEDIUM)
             .withImportance(Importance.LOW)
             .withDescription("The prefix that is used to name heartbeat topics."
@@ -119,27 +119,8 @@ public interface Heartbeat {
      */
     boolean isEnabled();
 
-    /**
-     * Provide an instance of Heartbeat object
-     *
-     * @param heartbeatInterval heartbeat interval config value as java.time.Duration
-     * @param topicName topic to which the heartbeat messages will be sent
-     * @param key kafka partition key to use for the heartbeat message
-     */
-    static Heartbeat create(Duration heartbeatInterval, String topicName, String key) {
-        return heartbeatInterval.isZero() ? DEFAULT_NOOP_HEARTBEAT : new HeartbeatImpl(heartbeatInterval, topicName, key);
-    }
-
-    static Heartbeat create(Duration heartbeatInterval, String heartbeatQuery, String topicName, String key, JdbcConnection jdbcConnection,
-                            HeartbeatErrorHandler errorHandler) {
-        if (heartbeatInterval.isZero()) {
-            return DEFAULT_NOOP_HEARTBEAT;
-        }
-
-        if (heartbeatQuery != null) {
-            return new DatabaseHeartbeatImpl(heartbeatInterval, topicName, key, jdbcConnection, heartbeatQuery, errorHandler);
-        }
-
-        return new HeartbeatImpl(heartbeatInterval, topicName, key);
+    @Override
+    default void close() {
+        // default implementations are no-op
     }
 }

@@ -22,15 +22,16 @@ import io.debezium.pipeline.source.spi.SnapshotChangeEventSource;
 import io.debezium.pipeline.source.spi.SnapshotProgressListener;
 import io.debezium.pipeline.source.spi.StreamingChangeEventSource;
 import io.debezium.relational.TableId;
-import io.debezium.schema.DataCollectionId;
+import io.debezium.spi.schema.DataCollectionId;
 import io.debezium.util.Clock;
+import io.debezium.util.Strings;
 
-public class MySqlChangeEventSourceFactory implements ChangeEventSourceFactory<MySqlOffsetContext> {
+public class MySqlChangeEventSourceFactory implements ChangeEventSourceFactory<MySqlPartition, MySqlOffsetContext> {
 
     private final MySqlConnectorConfig configuration;
     private final MySqlConnection connection;
     private final ErrorHandler errorHandler;
-    private final EventDispatcher<TableId> dispatcher;
+    private final EventDispatcher<MySqlPartition, TableId> dispatcher;
     private final Clock clock;
     private final MySqlTaskContext taskContext;
     private final MySqlStreamingChangeEventSourceMetrics streamingMetrics;
@@ -42,7 +43,7 @@ public class MySqlChangeEventSourceFactory implements ChangeEventSourceFactory<M
     private final ChangeEventQueue<DataChangeEvent> queue;
 
     public MySqlChangeEventSourceFactory(MySqlConnectorConfig configuration, MySqlConnection connection,
-                                         ErrorHandler errorHandler, EventDispatcher<TableId> dispatcher, Clock clock, MySqlDatabaseSchema schema,
+                                         ErrorHandler errorHandler, EventDispatcher<MySqlPartition, TableId> dispatcher, Clock clock, MySqlDatabaseSchema schema,
                                          MySqlTaskContext taskContext, MySqlStreamingChangeEventSourceMetrics streamingMetrics,
                                          ChangeEventQueue<DataChangeEvent> queue) {
         this.configuration = configuration;
@@ -57,9 +58,9 @@ public class MySqlChangeEventSourceFactory implements ChangeEventSourceFactory<M
     }
 
     @Override
-    public SnapshotChangeEventSource<MySqlOffsetContext> getSnapshotChangeEventSource(SnapshotProgressListener snapshotProgressListener) {
+    public SnapshotChangeEventSource<MySqlPartition, MySqlOffsetContext> getSnapshotChangeEventSource(SnapshotProgressListener<MySqlPartition> snapshotProgressListener) {
         return new MySqlSnapshotChangeEventSource(configuration, connection, taskContext.getSchema(), dispatcher, clock,
-                (MySqlSnapshotChangeEventSourceMetrics) snapshotProgressListener, record -> modifyAndFlushLastRecord(record));
+                (MySqlSnapshotChangeEventSourceMetrics) snapshotProgressListener, this::modifyAndFlushLastRecord);
     }
 
     private void modifyAndFlushLastRecord(Function<SourceRecord, SourceRecord> modify) throws InterruptedException {
@@ -68,7 +69,7 @@ public class MySqlChangeEventSourceFactory implements ChangeEventSourceFactory<M
     }
 
     @Override
-    public StreamingChangeEventSource<MySqlOffsetContext> getStreamingChangeEventSource() {
+    public StreamingChangeEventSource<MySqlPartition, MySqlOffsetContext> getStreamingChangeEventSource() {
         queue.disableBuffering();
         return new MySqlStreamingChangeEventSource(
                 configuration,
@@ -81,17 +82,35 @@ public class MySqlChangeEventSourceFactory implements ChangeEventSourceFactory<M
     }
 
     @Override
-    public Optional<IncrementalSnapshotChangeEventSource<? extends DataCollectionId>> getIncrementalSnapshotChangeEventSource(
-                                                                                                                              MySqlOffsetContext offsetContext,
-                                                                                                                              SnapshotProgressListener snapshotProgressListener,
-                                                                                                                              DataChangeEventListener dataChangeEventListener) {
-        final SignalBasedIncrementalSnapshotChangeEventSource<TableId> incrementalSnapshotChangeEventSource = new SignalBasedIncrementalSnapshotChangeEventSource<TableId>(
+    public Optional<IncrementalSnapshotChangeEventSource<MySqlPartition, ? extends DataCollectionId>> getIncrementalSnapshotChangeEventSource(
+                                                                                                                                              MySqlOffsetContext offsetContext,
+                                                                                                                                              SnapshotProgressListener<MySqlPartition> snapshotProgressListener,
+                                                                                                                                              DataChangeEventListener<MySqlPartition> dataChangeEventListener) {
+        if (configuration.isReadOnlyConnection()) {
+            if (connection.isGtidModeEnabled()) {
+                return Optional.of(new MySqlReadOnlyIncrementalSnapshotChangeEventSource<>(
+                        configuration,
+                        connection,
+                        dispatcher,
+                        schema,
+                        clock,
+                        snapshotProgressListener,
+                        dataChangeEventListener));
+            }
+            throw new UnsupportedOperationException("Read only connection requires GTID_MODE to be ON");
+        }
+        // If no data collection id is provided, don't return an instance as the implementation requires
+        // that a signal data collection id be provided to work.
+        if (Strings.isNullOrEmpty(configuration.getSignalingDataCollectionId())) {
+            return Optional.empty();
+        }
+        return Optional.of(new SignalBasedIncrementalSnapshotChangeEventSource<>(
                 configuration,
                 connection,
+                dispatcher,
                 schema,
                 clock,
                 snapshotProgressListener,
-                dataChangeEventListener);
-        return Optional.of(incrementalSnapshotChangeEventSource);
+                dataChangeEventListener));
     }
 }

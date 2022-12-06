@@ -36,7 +36,7 @@ public class TestConfigSource implements ConfigSource {
         integrationTest.put("debezium.source.connector.class", "io.debezium.connector.postgresql.PostgresConnector");
         integrationTest.put("debezium.source." + StandaloneConfig.OFFSET_STORAGE_FILE_FILENAME_CONFIG, OFFSET_STORE_PATH.toAbsolutePath().toString());
         integrationTest.put("debezium.source.offset.flush.interval.ms", "0");
-        integrationTest.put("debezium.source.database.server.name", "testc");
+        integrationTest.put("debezium.source.topic.prefix", "testc");
         integrationTest.put("debezium.source.schema.include.list", "inventory");
         integrationTest.put("debezium.source.table.include.list", "inventory.customers");
 
@@ -68,7 +68,10 @@ public class TestConfigSource implements ConfigSource {
         unitTest.put("debezium.transforms.hoist.field", "line");
 
         // DBZ-2622 For testing properties passed via smallrye/microprofile environment variables
-        unitTest.put("DEBEZIUM_SOURCE_TABLE_WHITELIST", "public.table_name");
+        unitTest.put("DEBEZIUM_SOURCE_TABLE_INCLUDE_LIST", "public.table_name");
+        unitTest.put("debezium_source_offset_flush_interval_ms_Test", "0");
+        unitTest.put("debezium.source.snapshot.select.statement.overrides.public.table_name", "SELECT * FROM table_name WHERE 1>2");
+        unitTest.put("debezium.source.database.allowPublicKeyRetrieval", "true");
 
         if (isItTest()) {
             config = integrationTest;

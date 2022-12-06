@@ -9,10 +9,10 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
-import java.util.HashSet;
+import java.time.ZoneOffset;
+import java.util.Arrays;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -24,18 +24,21 @@ import io.debezium.annotation.ThreadSafe;
 import io.debezium.annotation.VisibleForTesting;
 import io.debezium.connector.base.ChangeEventQueueMetrics;
 import io.debezium.connector.common.CdcSourceTaskContext;
-import io.debezium.pipeline.metrics.StreamingChangeEventSourceMetrics;
+import io.debezium.pipeline.metrics.DefaultStreamingChangeEventSourceMetrics;
 import io.debezium.pipeline.source.spi.EventMetadataProvider;
+import io.debezium.util.LRUCacheMap;
 
 /**
  * The metrics implementation for Oracle connector streaming phase.
  */
 @ThreadSafe
-public class OracleStreamingChangeEventSourceMetrics extends StreamingChangeEventSourceMetrics implements OracleStreamingChangeEventSourceMetricsMXBean {
+public class OracleStreamingChangeEventSourceMetrics extends DefaultStreamingChangeEventSourceMetrics<OraclePartition>
+        implements OracleStreamingChangeEventSourceMetricsMXBean {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(OracleStreamingChangeEventSourceMetrics.class);
 
     private static final long MILLIS_PER_SECOND = 1000L;
+    private static final int TRANSACTION_ID_SET_SIZE = 10;
 
     private final AtomicReference<Scn> currentScn = new AtomicReference<>();
     private final AtomicInteger logMinerQueryCount = new AtomicInteger();
@@ -48,7 +51,6 @@ public class OracleStreamingChangeEventSourceMetrics extends StreamingChangeEven
     private final AtomicReference<Duration> maxDurationOfFetchingQuery = new AtomicReference<>();
     private final AtomicReference<Duration> totalBatchProcessingDuration = new AtomicReference<>();
     private final AtomicReference<Duration> lastBatchProcessingDuration = new AtomicReference<>();
-    private final AtomicReference<Duration> maxBatchProcessingDuration = new AtomicReference<>();
     private final AtomicReference<Duration> totalParseTime = new AtomicReference<>();
     private final AtomicReference<Duration> totalStartLogMiningSessionDuration = new AtomicReference<>();
     private final AtomicReference<Duration> lastStartLogMiningSessionDuration = new AtomicReference<>();
@@ -67,7 +69,6 @@ public class OracleStreamingChangeEventSourceMetrics extends StreamingChangeEven
     private final AtomicInteger batchSize = new AtomicInteger();
     private final AtomicLong millisecondToSleepBetweenMiningQuery = new AtomicLong();
 
-    private final AtomicBoolean recordMiningHistory = new AtomicBoolean();
     private final AtomicInteger hoursToKeepTransaction = new AtomicInteger();
     private final AtomicLong networkConnectionProblemsCounter = new AtomicLong();
 
@@ -79,19 +80,24 @@ public class OracleStreamingChangeEventSourceMetrics extends StreamingChangeEven
     private final AtomicLong activeTransactions = new AtomicLong();
     private final AtomicLong rolledBackTransactions = new AtomicLong();
     private final AtomicLong committedTransactions = new AtomicLong();
-    private final AtomicReference<Set<String>> abandonedTransactionIds = new AtomicReference<>();
-    private final AtomicReference<Set<String>> rolledBackTransactionIds = new AtomicReference<>();
+    private final AtomicLong oversizedTransactions = new AtomicLong();
+    private final AtomicReference<LRUCacheMap<String, String>> abandonedTransactionIds = new AtomicReference<>();
+    private final AtomicReference<LRUCacheMap<String, String>> rolledBackTransactionIds = new AtomicReference<>();
     private final AtomicLong registeredDmlCount = new AtomicLong();
     private final AtomicLong committedDmlCount = new AtomicLong();
     private final AtomicInteger errorCount = new AtomicInteger();
     private final AtomicInteger warningCount = new AtomicInteger();
     private final AtomicInteger scnFreezeCount = new AtomicInteger();
     private final AtomicLong timeDifference = new AtomicLong();
-    private final AtomicInteger offsetSeconds = new AtomicInteger();
+    private final AtomicReference<ZoneOffset> zoneOffset = new AtomicReference<>();
     private final AtomicReference<Scn> oldestScn = new AtomicReference<>();
     private final AtomicReference<Scn> committedScn = new AtomicReference<>();
     private final AtomicReference<Scn> offsetScn = new AtomicReference<>();
     private final AtomicInteger unparsableDdlCount = new AtomicInteger();
+    private final AtomicLong miningSessionUserGlobalAreaMemory = new AtomicLong();
+    private final AtomicLong miningSessionUserGlobalAreaMaxMemory = new AtomicLong();
+    private final AtomicLong miningSessionProcessGlobalAreaMemory = new AtomicLong();
+    private final AtomicLong miningSessionProcessGlobalAreaMaxMemory = new AtomicLong();
 
     // Constants for sliding window algorithm
     private final int batchSizeMin;
@@ -127,20 +133,19 @@ public class OracleStreamingChangeEventSourceMetrics extends StreamingChangeEven
         this.clock = clock;
         startTime = clock.instant();
         timeDifference.set(0L);
-        offsetSeconds.set(0);
+        zoneOffset.set(ZoneOffset.UTC);
 
         currentScn.set(Scn.NULL);
         oldestScn.set(Scn.NULL);
         offsetScn.set(Scn.NULL);
         committedScn.set(Scn.NULL);
 
-        currentLogFileName = new AtomicReference<>();
+        currentLogFileName = new AtomicReference<>(new String[0]);
         minimumLogsMined.set(0L);
         maximumLogsMined.set(0L);
-        redoLogStatus = new AtomicReference<>();
+        redoLogStatus = new AtomicReference<>(new String[0]);
         switchCounter.set(0);
 
-        recordMiningHistory.set(connectorConfig.isLogMiningHistoryRecorded());
         batchSizeDefault = connectorConfig.getLogMiningBatchSizeDefault();
         batchSizeMin = connectorConfig.getLogMiningBatchSizeMin();
         batchSizeMax = connectorConfig.getLogMiningBatchSizeMax();
@@ -164,7 +169,6 @@ public class OracleStreamingChangeEventSourceMetrics extends StreamingChangeEven
         maxDurationOfFetchingQuery.set(Duration.ZERO);
         lastDurationOfFetchingQuery.set(Duration.ZERO);
         logMinerQueryCount.set(0);
-        maxBatchProcessingDuration.set(Duration.ZERO);
         totalDurationOfFetchingQuery.set(Duration.ZERO);
         lastCapturedDmlCount.set(0);
         maxCapturedDmlCount.set(0);
@@ -180,6 +184,10 @@ public class OracleStreamingChangeEventSourceMetrics extends StreamingChangeEven
         minBatchProcessingTime.set(Duration.ZERO);
         maxBatchProcessingTime.set(Duration.ZERO);
         totalResultSetNextTime.set(Duration.ZERO);
+        miningSessionUserGlobalAreaMemory.set(0L);
+        miningSessionUserGlobalAreaMaxMemory.set(0L);
+        miningSessionProcessGlobalAreaMemory.set(0L);
+        miningSessionProcessGlobalAreaMaxMemory.set(0L);
 
         // transactional buffer metrics
         lagFromTheSourceDuration.set(Duration.ZERO);
@@ -190,10 +198,11 @@ public class OracleStreamingChangeEventSourceMetrics extends StreamingChangeEven
         activeTransactions.set(0);
         rolledBackTransactions.set(0);
         committedTransactions.set(0);
+        oversizedTransactions.set(0);
         registeredDmlCount.set(0);
         committedDmlCount.set(0);
-        abandonedTransactionIds.set(new HashSet<>());
-        rolledBackTransactionIds.set(new HashSet<>());
+        abandonedTransactionIds.set(new LRUCacheMap<>(TRANSACTION_ID_SET_SIZE));
+        rolledBackTransactionIds.set(new LRUCacheMap<>(TRANSACTION_ID_SET_SIZE));
         errorCount.set(0);
         warningCount.set(0);
         scnFreezeCount.set(0);
@@ -206,6 +215,9 @@ public class OracleStreamingChangeEventSourceMetrics extends StreamingChangeEven
     public void setCurrentLogFileName(Set<String> names) {
         currentLogFileName.set(names.stream().toArray(String[]::new));
         if (names.size() < minimumLogsMined.get()) {
+            minimumLogsMined.set(names.size());
+        }
+        else if (minimumLogsMined.get() == 0) {
             minimumLogsMined.set(names.size());
         }
         if (names.size() > maximumLogsMined.get()) {
@@ -252,8 +264,14 @@ public class OracleStreamingChangeEventSourceMetrics extends StreamingChangeEven
     public void setLastDurationOfBatchProcessing(Duration lastDuration) {
         lastBatchProcessingDuration.set(lastDuration);
         totalBatchProcessingDuration.accumulateAndGet(lastDuration, Duration::plus);
-        if (maxBatchProcessingDuration.get().toMillis() < lastDuration.toMillis()) {
-            maxBatchProcessingDuration.set(lastDuration);
+        if (maxBatchProcessingTime.get().toMillis() < lastDuration.toMillis()) {
+            maxBatchProcessingTime.set(lastDuration);
+        }
+        if (minBatchProcessingTime.get().toMillis() > lastDuration.toMillis()) {
+            minBatchProcessingTime.set(lastDuration);
+        }
+        else if (minBatchProcessingTime.get().toMillis() == 0L) {
+            minBatchProcessingTime.set(lastDuration);
         }
         if (getLastBatchProcessingThroughput() > maxBatchProcessingThroughput.get()) {
             maxBatchProcessingThroughput.set(getLastBatchProcessingThroughput());
@@ -356,11 +374,6 @@ public class OracleStreamingChangeEventSourceMetrics extends StreamingChangeEven
     }
 
     @Override
-    public boolean getRecordMiningHistory() {
-        return recordMiningHistory.get();
-    }
-
-    @Override
     public int getHoursToKeepTransactionInBuffer() {
         return hoursToKeepTransaction.get();
     }
@@ -424,6 +437,7 @@ public class OracleStreamingChangeEventSourceMetrics extends StreamingChangeEven
 
     public void setCurrentBatchProcessingTime(Duration currentBatchProcessingTime) {
         totalProcessingTime.accumulateAndGet(currentBatchProcessingTime, Duration::plus);
+        setLastDurationOfBatchProcessing(currentBatchProcessingTime);
     }
 
     public void addCurrentResultSetNext(Duration currentNextTime) {
@@ -504,6 +518,11 @@ public class OracleStreamingChangeEventSourceMetrics extends StreamingChangeEven
     }
 
     @Override
+    public long getNumberOfOversizedTransactions() {
+        return oversizedTransactions.get();
+    }
+
+    @Override
     public long getCommitThroughput() {
         long timeSpent = Duration.between(startTime, clock.instant()).toMillis();
         return committedTransactions.get() * MILLIS_PER_SECOND / (timeSpent != 0 ? timeSpent : 1);
@@ -546,12 +565,12 @@ public class OracleStreamingChangeEventSourceMetrics extends StreamingChangeEven
 
     @Override
     public Set<String> getAbandonedTransactionIds() {
-        return abandonedTransactionIds.get();
+        return abandonedTransactionIds.get().keySet();
     }
 
     @Override
     public Set<String> getRolledBackTransactionIds() {
-        return rolledBackTransactionIds.get();
+        return rolledBackTransactionIds.get().keySet();
     }
 
     @Override
@@ -584,6 +603,26 @@ public class OracleStreamingChangeEventSourceMetrics extends StreamingChangeEven
         return unparsableDdlCount.get();
     }
 
+    @Override
+    public long getMiningSessionUserGlobalAreaMemoryInBytes() {
+        return miningSessionUserGlobalAreaMemory.get();
+    }
+
+    @Override
+    public long getMiningSessionUserGlobalAreaMaxMemoryInBytes() {
+        return miningSessionUserGlobalAreaMaxMemory.get();
+    }
+
+    @Override
+    public long getMiningSessionProcessGlobalAreaMemoryInBytes() {
+        return miningSessionProcessGlobalAreaMemory.get();
+    }
+
+    @Override
+    public long getMiningSessionProcessGlobalAreaMaxMemoryInBytes() {
+        return miningSessionProcessGlobalAreaMaxMemory.get();
+    }
+
     public void setOldestScn(Scn scn) {
         oldestScn.set(scn);
     }
@@ -608,6 +647,10 @@ public class OracleStreamingChangeEventSourceMetrics extends StreamingChangeEven
         committedTransactions.incrementAndGet();
     }
 
+    public void incrementOversizedTransactions() {
+        oversizedTransactions.incrementAndGet();
+    }
+
     public void incrementRegisteredDmlCount() {
         registeredDmlCount.incrementAndGet();
     }
@@ -630,13 +673,13 @@ public class OracleStreamingChangeEventSourceMetrics extends StreamingChangeEven
 
     public void addAbandonedTransactionId(String transactionId) {
         if (transactionId != null) {
-            abandonedTransactionIds.get().add(transactionId);
+            abandonedTransactionIds.get().put(transactionId, transactionId);
         }
     }
 
     public void addRolledBackTransactionId(String transactionId) {
         if (transactionId != null) {
-            rolledBackTransactionIds.get().add(transactionId);
+            rolledBackTransactionIds.get().put(transactionId, transactionId);
         }
     }
 
@@ -655,9 +698,8 @@ public class OracleStreamingChangeEventSourceMetrics extends StreamingChangeEven
      * @param databaseSystemTime the system time (<code>SYSTIMESTAMP</code>) of the database
      */
     public void calculateTimeDifference(OffsetDateTime databaseSystemTime) {
-        int offsetSeconds = databaseSystemTime.getOffset().getTotalSeconds();
-        this.offsetSeconds.set(offsetSeconds);
-        LOGGER.trace("Timezone offset of database system time is {} seconds", offsetSeconds);
+        this.zoneOffset.set(databaseSystemTime.getOffset());
+        LOGGER.trace("Timezone offset of database system time is {} seconds", zoneOffset.get().getTotalSeconds());
 
         Instant now = clock.instant();
         long timeDiffMillis = Duration.between(databaseSystemTime.toInstant(), now).toMillis();
@@ -665,9 +707,13 @@ public class OracleStreamingChangeEventSourceMetrics extends StreamingChangeEven
         LOGGER.trace("Current time {} ms, database difference {} ms", now.toEpochMilli(), timeDiffMillis);
     }
 
+    public ZoneOffset getDatabaseOffset() {
+        return zoneOffset.get();
+    }
+
     public void calculateLagMetrics(Instant changeTime) {
         if (changeTime != null) {
-            final Instant correctedChangeTime = changeTime.plusMillis(timeDifference.longValue()).minusSeconds(offsetSeconds.longValue());
+            final Instant correctedChangeTime = changeTime.plusMillis(timeDifference.longValue()).minusSeconds(zoneOffset.get().getTotalSeconds());
             final Duration lag = Duration.between(correctedChangeTime, clock.instant()).abs();
             lagFromTheSourceDuration.set(lag);
 
@@ -677,11 +723,28 @@ public class OracleStreamingChangeEventSourceMetrics extends StreamingChangeEven
             if (minLagFromTheSourceDuration.get().toMillis() > lag.toMillis()) {
                 minLagFromTheSourceDuration.set(lag);
             }
+            else if (minLagFromTheSourceDuration.get().toMillis() == 0) {
+                minLagFromTheSourceDuration.set(lag);
+            }
         }
     }
 
     public void incrementUnparsableDdlCount() {
         unparsableDdlCount.incrementAndGet();
+    }
+
+    public void setUserGlobalAreaMemory(long ugaMemory, long ugaMaxMemory) {
+        miningSessionUserGlobalAreaMemory.set(ugaMemory);
+        if (ugaMaxMemory > miningSessionUserGlobalAreaMaxMemory.get()) {
+            miningSessionUserGlobalAreaMaxMemory.set(ugaMaxMemory);
+        }
+    }
+
+    public void setProcessGlobalAreaMemory(long pgaMemory, long pgaMaxMemory) {
+        miningSessionProcessGlobalAreaMemory.set(pgaMemory);
+        if (pgaMemory > miningSessionProcessGlobalAreaMaxMemory.get()) {
+            miningSessionProcessGlobalAreaMaxMemory.set(pgaMemory);
+        }
     }
 
     @Override
@@ -701,16 +764,14 @@ public class OracleStreamingChangeEventSourceMetrics extends StreamingChangeEven
                 ", maxDurationOfFetchingQuery=" + maxDurationOfFetchingQuery +
                 ", totalBatchProcessingDuration=" + totalBatchProcessingDuration +
                 ", lastBatchProcessingDuration=" + lastBatchProcessingDuration +
-                ", maxBatchProcessingDuration=" + maxBatchProcessingDuration +
                 ", maxBatchProcessingThroughput=" + maxBatchProcessingThroughput +
-                ", currentLogFileName=" + currentLogFileName +
+                ", currentLogFileName=" + Arrays.asList(currentLogFileName.get()) +
                 ", minLogFilesMined=" + minimumLogsMined +
                 ", maxLogFilesMined=" + maximumLogsMined +
-                ", redoLogStatus=" + redoLogStatus +
+                ", redoLogStatus=" + Arrays.asList(redoLogStatus.get()) +
                 ", switchCounter=" + switchCounter +
                 ", batchSize=" + batchSize +
                 ", millisecondToSleepBetweenMiningQuery=" + millisecondToSleepBetweenMiningQuery +
-                ", recordMiningHistory=" + recordMiningHistory +
                 ", hoursToKeepTransaction=" + hoursToKeepTransaction +
                 ", networkConnectionProblemsCounter" + networkConnectionProblemsCounter +
                 ", batchSizeDefault=" + batchSizeDefault +
@@ -735,6 +796,7 @@ public class OracleStreamingChangeEventSourceMetrics extends StreamingChangeEven
                 ", maxCommitDuration=" + maxCommitDuration +
                 ", activeTransactions=" + activeTransactions.get() +
                 ", rolledBackTransactions=" + rolledBackTransactions.get() +
+                ", oversizedTransactions=" + oversizedTransactions.get() +
                 ", committedTransactions=" + committedTransactions.get() +
                 ", abandonedTransactionIds=" + abandonedTransactionIds.get() +
                 ", rolledbackTransactionIds=" + rolledBackTransactionIds.get() +
@@ -744,6 +806,10 @@ public class OracleStreamingChangeEventSourceMetrics extends StreamingChangeEven
                 ", warningCount=" + warningCount.get() +
                 ", scnFreezeCount=" + scnFreezeCount.get() +
                 ", unparsableDdlCount=" + unparsableDdlCount.get() +
+                ", miningSessionUserGlobalAreaMemory=" + miningSessionUserGlobalAreaMemory.get() +
+                ", miningSessionUserGlobalAreaMaxMemory=" + miningSessionUserGlobalAreaMaxMemory.get() +
+                ", miningSessionProcessGlobalAreaMemory=" + miningSessionProcessGlobalAreaMemory.get() +
+                ", miningSessionProcessGlobalAreaMaxMemory=" + miningSessionProcessGlobalAreaMaxMemory.get() +
                 '}';
     }
 }

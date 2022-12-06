@@ -8,16 +8,18 @@ package io.debezium.connector.mongodb;
 import java.time.Instant;
 import java.util.Collections;
 import java.util.Map;
-import java.util.OptionalLong;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.errors.ConnectException;
+import org.bson.BsonDocument;
 import org.bson.BsonTimestamp;
-import org.bson.Document;
 import org.bson.types.BSONTimestamp;
+
+import com.mongodb.client.model.changestream.ChangeStreamDocument;
 
 import io.debezium.annotation.Immutable;
 import io.debezium.annotation.NotThreadSafe;
@@ -66,6 +68,8 @@ import io.debezium.util.Collect;
 @NotThreadSafe
 public final class SourceInfo extends BaseSourceInfo {
 
+    private static final String RESUME_TOKEN = "resume_token";
+
     public static final int SCHEMA_VERSION = 1;
 
     public static final String SERVER_ID_KEY = "server_id";
@@ -73,14 +77,15 @@ public final class SourceInfo extends BaseSourceInfo {
     public static final String NAMESPACE = "ns";
     public static final String TIMESTAMP = "sec";
     public static final String ORDER = "ord";
-    public static final String OPERATION_ID = "h";
-    public static final String TX_ORD = "tord";
-    public static final String SESSION_TXN_ID = "stxnid";
     public static final String INITIAL_SYNC = "initsync";
     public static final String COLLECTION = "collection";
+    public static final String LSID = "lsid";
+    public static final String TXN_NUMBER = "txnNumber";
+
+    // Change Stream fields
 
     private static final BsonTimestamp INITIAL_TIMESTAMP = new BsonTimestamp();
-    private static final Position INITIAL_POSITION = new Position(INITIAL_TIMESTAMP, null, 0, null);
+    private static final Position INITIAL_POSITION = new Position(INITIAL_TIMESTAMP, null, null);
 
     private final ConcurrentMap<String, Map<String, String>> sourcePartitionsByReplicaSetName = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, Position> positionsByReplicaSetName = new ConcurrentHashMap<>();
@@ -93,25 +98,26 @@ public final class SourceInfo extends BaseSourceInfo {
      * after which the recorded offset may be retrieved but not the source struct.
      */
     private CollectionId collectionId;
-    private Position position;
+    private Position position = new Position(INITIAL_TIMESTAMP, null, null);
 
     @Immutable
     protected static final class Position {
-        private final Long opId;
         private final BsonTimestamp ts;
-        private final long txOrder;
-        private final String sessionTxnId;
+        private final SessionTransactionId changeStreamSessionTxnId;
+        private final String resumeToken;
 
-        public Position(int ts, int order, Long opId, long txOrder, String sessionTxnId) {
-            this(new BsonTimestamp(ts, order), opId, txOrder, sessionTxnId);
+        public Position(BsonTimestamp ts, SessionTransactionId changeStreamsSessionTxnId, String resumeToken) {
+            this.ts = ts;
+            this.changeStreamSessionTxnId = changeStreamsSessionTxnId;
+            this.resumeToken = resumeToken;
         }
 
-        public Position(BsonTimestamp ts, Long opId, long txOrder, String sessionTxnId) {
-            this.ts = ts;
-            this.opId = opId;
-            this.txOrder = txOrder;
-            this.sessionTxnId = sessionTxnId;
-            assert this.ts != null;
+        public static Position snapshotPosition(BsonTimestamp ts) {
+            return new Position(ts, null, null);
+        }
+
+        public static Position changeStreamPosition(BsonTimestamp ts, String resumeToken, SessionTransactionId sessionTxnId) {
+            return new Position(ts, sessionTxnId, resumeToken);
         }
 
         public BsonTimestamp getTimestamp() {
@@ -126,16 +132,30 @@ public final class SourceInfo extends BaseSourceInfo {
             return this.ts.getInc();
         }
 
-        public Long getOperationId() {
-            return this.opId;
+        public SessionTransactionId getChangeStreamSessionTxnId() {
+            return changeStreamSessionTxnId;
         }
 
-        public String getSessionTxnId() {
-            return sessionTxnId;
+        public Optional<String> getResumeToken() {
+            return Optional.ofNullable(resumeToken);
         }
 
-        public OptionalLong getTxOrder() {
-            return txOrder == 0 ? OptionalLong.empty() : OptionalLong.of(txOrder);
+        @Override
+        public String toString() {
+            return "Position [ts=" + ts + ", changeStreamSessionTxnId=" + changeStreamSessionTxnId + ", resumeToken="
+                    + resumeToken + "]";
+        }
+    }
+
+    static final class SessionTransactionId {
+
+        public final String lsid;
+        public final Long txnNumber;
+
+        public SessionTransactionId(String lsid, Long txnNumber) {
+            super();
+            this.txnNumber = txnNumber;
+            this.lsid = lsid;
         }
     }
 
@@ -160,6 +180,13 @@ public final class SourceInfo extends BaseSourceInfo {
 
     Position position() {
         return position;
+    }
+
+    /**
+     * @return server id
+     */
+    public String serverId() {
+        return serverName();
     }
 
     /**
@@ -189,15 +216,13 @@ public final class SourceInfo extends BaseSourceInfo {
         return existing != null ? existing.ts : INITIAL_TIMESTAMP;
     }
 
-    /**
-     * Get the MongoDB transaction order of the last offset position for the replica set.
-     *
-     * @param replicaSetName the name of the replica set name for which the new offset is to be obtained; may not be null
-     * @return the tx order of the transaction in progress or 0 in case of non-transactional event
-     */
-    public OptionalLong lastOffsetTxOrder(String replicaSetName) {
+    public String lastResumeToken(String replicaSetName) {
         Position existing = positionsByReplicaSetName.get(replicaSetName);
-        return existing != null ? existing.getTxOrder() : OptionalLong.empty();
+        return existing != null ? existing.resumeToken : null;
+    }
+
+    public Position lastPosition(String replicaSetName) {
+        return positionsByReplicaSetName.get(replicaSetName);
     }
 
     /**
@@ -214,19 +239,23 @@ public final class SourceInfo extends BaseSourceInfo {
             existing = INITIAL_POSITION;
         }
         if (isInitialSyncOngoing(replicaSetName)) {
-            return Collect.hashMapOf(TIMESTAMP, Integer.valueOf(existing.getTime()),
+            return addSessionTxnIdToOffset(existing, Collect.hashMapOf(TIMESTAMP, Integer.valueOf(existing.getTime()),
                     ORDER, Integer.valueOf(existing.getInc()),
-                    OPERATION_ID, existing.getOperationId(),
-                    SESSION_TXN_ID, existing.getSessionTxnId(),
-                    INITIAL_SYNC, true);
+                    INITIAL_SYNC, true));
         }
         Map<String, Object> offset = Collect.hashMapOf(TIMESTAMP, Integer.valueOf(existing.getTime()),
-                ORDER, Integer.valueOf(existing.getInc()),
-                OPERATION_ID, existing.getOperationId(),
-                SESSION_TXN_ID, existing.getSessionTxnId());
+                ORDER, Integer.valueOf(existing.getInc()));
 
-        existing.getTxOrder().ifPresent(txOrder -> offset.put(TX_ORD, txOrder));
+        existing.getResumeToken().ifPresent(resumeToken -> offset.put(RESUME_TOKEN, resumeToken));
 
+        return addSessionTxnIdToOffset(existing, offset);
+    }
+
+    private Map<String, ?> addSessionTxnIdToOffset(Position position, Map<String, Object> offset) {
+        if (position.getChangeStreamSessionTxnId() != null) {
+            offset.put(LSID, position.getChangeStreamSessionTxnId().lsid);
+            offset.put(TXN_NUMBER, position.getChangeStreamSessionTxnId().txnNumber);
+        }
         return offset;
     }
 
@@ -244,42 +273,40 @@ public final class SourceInfo extends BaseSourceInfo {
     }
 
     /**
-     * Get a {@link Struct} representation of the source {@link #partition(String) partition} and {@link #lastOffset(String)
+     * Initializes a {@link Struct} representation of the source {@link #partition(String) partition} and {@link #lastOffset(String)
      * offset} information. The Struct complies with the {@link #schema} for the MongoDB connector.
+     * The method usually sets the position in the oplog after which the capturing should start.
      *
      * @param replicaSetName the name of the replica set name for which the new offset is to be obtained; may not be null
      * @param oplogEvent the replica set oplog event that was last read; may be null if the position is the start of
      *            the oplog
-     * @param masterEvent the replica set oplog event that contains event metadata; same as oplogEvent for non-transactional changes
-     * @param orderInTx order in transaction batch, 0 for non-transactional events
      * @see #schema()
      */
-    public void opLogEvent(String replicaSetName, Document oplogEvent, Document masterEvent, long orderInTx) {
+    public void initialPosition(String replicaSetName, BsonDocument oplogEvent) {
         Position position = INITIAL_POSITION;
         String namespace = "";
         if (oplogEvent != null) {
-            BsonTimestamp ts = extractEventTimestamp(masterEvent);
-            Long opId = masterEvent.getLong("h");
-            String sessionTxnId = extractSessionTxnId(masterEvent);
-            position = new Position(ts, opId, orderInTx, sessionTxnId);
-            namespace = oplogEvent.getString("ns");
+            BsonTimestamp ts = extractEventTimestamp(oplogEvent);
+            position = Position.snapshotPosition(ts);
+            namespace = oplogEvent.getString("ns").getValue();
         }
         positionsByReplicaSetName.put(replicaSetName, position);
 
         onEvent(replicaSetName, CollectionId.parse(replicaSetName, namespace), position);
     }
 
-    /**
-     * Get a {@link Struct} representation of the source {@link #partition(String) partition} and {@link #lastOffset(String)
-     * offset} information. The Struct complies with the {@link #schema} for the MongoDB connector.
-     *
-     * @param replicaSetName the name of the replica set name for which the new offset is to be obtained; may not be null
-     * @param oplogEvent the replica set oplog event that was last read; may be null if the position is the start of
-     *            the oplog
-     * @see #schema()
-     */
-    public void opLogEvent(String replicaSetName, Document oplogEvent) {
-        opLogEvent(replicaSetName, oplogEvent, oplogEvent, 0);
+    public void changeStreamEvent(String replicaSetName, ChangeStreamDocument<BsonDocument> changeStreamEvent) {
+        Position position = INITIAL_POSITION;
+        String namespace = "";
+        if (changeStreamEvent != null) {
+            BsonTimestamp ts = changeStreamEvent.getClusterTime();
+            position = Position.changeStreamPosition(ts, changeStreamEvent.getResumeToken().getString("_data").getValue(),
+                    MongoUtil.getChangeStreamSessionTransactionId(changeStreamEvent));
+            namespace = changeStreamEvent.getNamespace().getFullName();
+        }
+        positionsByReplicaSetName.put(replicaSetName, position);
+
+        onEvent(replicaSetName, CollectionId.parse(replicaSetName, namespace), position);
     }
 
     /**
@@ -288,29 +315,8 @@ public final class SourceInfo extends BaseSourceInfo {
      * @param oplogEvent the event
      * @return the timestamp, or null if the event is null or there is no {@code ts} field
      */
-    protected static BsonTimestamp extractEventTimestamp(Document oplogEvent) {
-        return oplogEvent != null ? oplogEvent.get("ts", BsonTimestamp.class) : null;
-    }
-
-    /**
-     * Utility to extract the {@link String unique transaction id} value from the event.
-     *
-     * @param oplogEvent the event
-     * @return the session transaction id or null
-     */
-    protected static String extractSessionTxnId(Document oplogEvent) {
-        // In MongoDB prior to 4.2, the h field is populated.
-        // For backward compatibility if h is not present or contains a zero value, then proeeed to extract
-        // the session transaction unique identifier value.
-        Long opId = oplogEvent.getLong("h");
-        if (opId == null || opId == 0L) {
-            // For MongoDB 4.2+, the h field no longer has a non-zero value.
-            // In this case, the lsid and the associated txnNumber fields must be extracted and combined to
-            // represent a unique identifier for the individual operation. Therefore, the return value will
-            // carry the same semantics as h did for MongoDB platforms prior to 4.2.
-            return MongoUtil.getOplogSessionTransactionId(oplogEvent);
-        }
-        return null;
+    protected static BsonTimestamp extractEventTimestamp(BsonDocument oplogEvent) {
+        return oplogEvent != null ? oplogEvent.getTimestamp("ts") : null;
     }
 
     private void onEvent(String replicaSetName, CollectionId collectionId, Position position) {
@@ -353,10 +359,15 @@ public final class SourceInfo extends BaseSourceInfo {
         }
         int time = intOffsetValue(sourceOffset, TIMESTAMP);
         int order = intOffsetValue(sourceOffset, ORDER);
-        long operationId = longOffsetValue(sourceOffset, OPERATION_ID);
-        long txOrder = longOffsetValue(sourceOffset, TX_ORD);
-        String sessionTxnId = stringOffsetValue(sourceOffset, SESSION_TXN_ID);
-        positionsByReplicaSetName.put(replicaSetName, new Position(time, order, operationId, txOrder, sessionTxnId));
+        String changeStreamLsid = stringOffsetValue(sourceOffset, LSID);
+        Long changeStreamTxnNumber = longOffsetValue(sourceOffset, TXN_NUMBER);
+        SessionTransactionId changeStreamTxnId = null;
+        if (changeStreamLsid != null || changeStreamTxnNumber != null) {
+            changeStreamTxnId = new SessionTransactionId(changeStreamLsid, changeStreamTxnNumber);
+        }
+        String resumeToken = stringOffsetValue(sourceOffset, RESUME_TOKEN);
+        positionsByReplicaSetName.put(replicaSetName,
+                new Position(new BsonTimestamp(time, order), changeStreamTxnId, resumeToken));
         return true;
     }
 
@@ -465,7 +476,8 @@ public final class SourceInfo extends BaseSourceInfo {
 
     @Override
     protected SnapshotRecord snapshot() {
-        return isInitialSyncOngoing(replicaSetName) ? SnapshotRecord.TRUE : SnapshotRecord.FALSE;
+        return isInitialSyncOngoing(replicaSetName) ? SnapshotRecord.TRUE
+                : snapshotRecord == SnapshotRecord.INCREMENTAL ? SnapshotRecord.INCREMENTAL : SnapshotRecord.FALSE;
     }
 
     @Override
@@ -477,7 +489,11 @@ public final class SourceInfo extends BaseSourceInfo {
         return replicaSetName;
     }
 
-    protected OptionalLong transactionPosition() {
-        return position.getTxOrder();
+    @Override
+    public String toString() {
+        return "SourceInfo [sourcePartitionsByReplicaSetName=" + sourcePartitionsByReplicaSetName
+                + ", positionsByReplicaSetName=" + positionsByReplicaSetName + ", initialSyncReplicaSets="
+                + initialSyncReplicaSets + ", replicaSetName=" + replicaSetName + ", collectionId=" + collectionId
+                + ", position=" + position + "]";
     }
 }

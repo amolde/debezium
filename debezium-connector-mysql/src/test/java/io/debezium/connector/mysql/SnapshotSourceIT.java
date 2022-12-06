@@ -6,7 +6,7 @@
 package io.debezium.connector.mysql;
 
 import static io.debezium.junit.EqualityCheck.LESS_THAN;
-import static org.fest.assertions.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.Assert.assertArrayEquals;
 
 import java.nio.file.Path;
@@ -19,6 +19,7 @@ import java.util.Arrays;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -47,8 +48,9 @@ import io.debezium.jdbc.JdbcConnection;
 import io.debezium.junit.SkipTestRule;
 import io.debezium.junit.SkipWhenDatabaseVersion;
 import io.debezium.junit.logging.LogInterceptor;
-import io.debezium.relational.history.DatabaseHistory;
-import io.debezium.relational.history.MemoryDatabaseHistory;
+import io.debezium.relational.RelationalDatabaseConnectorConfig;
+import io.debezium.relational.history.MemorySchemaHistory;
+import io.debezium.relational.history.SchemaHistory;
 import io.debezium.util.Testing;
 
 /**
@@ -58,9 +60,9 @@ import io.debezium.util.Testing;
 @SkipWhenDatabaseVersion(check = LESS_THAN, major = 5, minor = 6, reason = "DDL uses fractional second data types, not supported until MySQL 5.6")
 public class SnapshotSourceIT extends AbstractConnectorTest {
 
-    private static final Path DB_HISTORY_PATH = Testing.Files.createTestingPath("file-db-history-snapshot.txt").toAbsolutePath();
+    private static final Path SCHEMA_HISTORY_PATH = Testing.Files.createTestingPath("file-schema-history-snapshot.txt").toAbsolutePath();
     private final UniqueDatabase DATABASE = new UniqueDatabase("logical_server_name", "connector_test_ro")
-            .withDbHistoryPath(DB_HISTORY_PATH);
+            .withDbHistoryPath(SCHEMA_HISTORY_PATH);
     private final UniqueDatabase OTHER_DATABASE = new UniqueDatabase("logical_server_name", "connector_test", DATABASE);
     private final UniqueDatabase BINARY_FIELD_DATABASE = new UniqueDatabase("logical_server_name", "connector_read_binary_field_test");
 
@@ -71,7 +73,7 @@ public class SnapshotSourceIT extends AbstractConnectorTest {
 
     @Before
     public void beforeEach() {
-        Testing.Files.delete(DB_HISTORY_PATH);
+        Testing.Files.delete(SCHEMA_HISTORY_PATH);
         DATABASE.createAndInitialize();
         OTHER_DATABASE.createAndInitialize();
         BINARY_FIELD_DATABASE.createAndInitialize();
@@ -83,7 +85,7 @@ public class SnapshotSourceIT extends AbstractConnectorTest {
             stopConnector();
         }
         finally {
-            Testing.Files.delete(DB_HISTORY_PATH);
+            Testing.Files.delete(SCHEMA_HISTORY_PATH);
         }
     }
 
@@ -93,8 +95,7 @@ public class SnapshotSourceIT extends AbstractConnectorTest {
                 .with(MySqlConnectorConfig.SNAPSHOT_LOCKING_MODE, MySqlConnectorConfig.SnapshotLockingMode.MINIMAL)
                 // Explicitly enable INCLUDE_SQL_QUERY connector option. For snapshots it should have no effect as
                 // source query should not included in snapshot events.
-                .with(MySqlConnectorConfig.INCLUDE_SQL_QUERY, true)
-                .with(MySqlConnector.IMPLEMENTATION_PROP, "new");
+                .with(MySqlConnectorConfig.INCLUDE_SQL_QUERY, true);
     }
 
     @Test
@@ -128,17 +129,17 @@ public class SnapshotSourceIT extends AbstractConnectorTest {
     }
 
     private void snapshotOfSingleDatabase(boolean useGlobalLock, boolean storeOnlyCapturedTables, boolean data) throws Exception {
-        final LogInterceptor logInterceptor = new LogInterceptor();
+        final LogInterceptor logInterceptor = new LogInterceptor(MySqlSnapshotChangeEventSource.class);
 
         final Builder builder = simpleConfig()
-                .with(MySqlConnectorConfig.TABLE_INCLUDE_LIST, DATABASE.qualifiedTableName("customers") + "," + DATABASE.qualifiedTableName("products"));
+                .with(MySqlConnectorConfig.TABLE_INCLUDE_LIST, DATABASE.qualifiedTableName("customers") + "," + DATABASE.qualifiedTableName("products"))
+                .with(MySqlConnectorConfig.INCLUDE_SCHEMA_CHANGES, true);
         if (!useGlobalLock) {
             builder
                     .with(MySqlConnectorConfig.USER, "cloud")
                     .with(MySqlConnectorConfig.PASSWORD, "cloudpass")
-                    .with(MySqlConnectorConfig.INCLUDE_SCHEMA_CHANGES, true)
                     .with(MySqlConnectorConfig.TEST_DISABLE_GLOBAL_LOCKING, "true")
-                    .with(DatabaseHistory.STORE_ONLY_CAPTURED_TABLES_DDL, storeOnlyCapturedTables);
+                    .with(SchemaHistory.STORE_ONLY_CAPTURED_TABLES_DDL, storeOnlyCapturedTables);
         }
         if (!data) {
             builder.with(MySqlConnectorConfig.SNAPSHOT_MODE, SnapshotMode.SCHEMA_ONLY);
@@ -153,8 +154,14 @@ public class SnapshotSourceIT extends AbstractConnectorTest {
         // Testing.Print.enable();
         KeyValueStore store = KeyValueStore.createForTopicsBeginningWith(DATABASE.getServerName() + ".");
         SchemaChangeHistory schemaChanges = new SchemaChangeHistory(DATABASE.getServerName());
-        final int schemaEventsCount = !useGlobalLock ? (storeOnlyCapturedTables ? 8 : 14) : 0;
-        SourceRecords sourceRecords = consumeRecordsByTopic(schemaEventsCount + (data ? 9 + 4 : 0));
+        final int schemaEventsCount = storeOnlyCapturedTables ? 8 : 14;
+
+        SourceRecords sourceRecords = consumeRecordsByTopicUntil(
+                (recordsConsumed, record) -> !record.sourceOffset().containsKey("snapshot"));
+
+        String previousRecordTable = null;
+        String previousSnapshotSourceField = null;
+
         for (Iterator<SourceRecord> i = sourceRecords.allRecordsInOrder().iterator(); i.hasNext();) {
             final SourceRecord record = i.next();
             VerifyRecord.isValid(record);
@@ -162,15 +169,48 @@ public class SnapshotSourceIT extends AbstractConnectorTest {
             store.add(record);
             schemaChanges.add(record);
             final String snapshotSourceField = ((Struct) record.value()).getStruct("source").getString("snapshot");
+            String currentRecordTable = ((Struct) record.value()).getStruct("source").getString("table");
             if (i.hasNext()) {
                 final Object snapshotOffsetField = record.sourceOffset().get("snapshot");
                 assertThat(snapshotOffsetField).isEqualTo(true);
-                assertThat(snapshotSourceField).isEqualTo("true");
+
+                if (Objects.equals(snapshotSourceField, "first")) {
+                    assertThat(previousRecordTable).isNull();
+                }
+                else if (Objects.equals(snapshotSourceField, "first_in_data_collection")) {
+                    assertThat(previousRecordTable).isNotEqualTo(currentRecordTable);
+                }
+                else if (Objects.equals(previousSnapshotSourceField, "last_in_data_collection")) {
+                    assertThat(previousRecordTable).isNotEqualTo(currentRecordTable);
+                }
             }
             else {
                 assertThat(record.sourceOffset().get("snapshot")).isNull();
                 assertThat(snapshotSourceField).isEqualTo("last");
             }
+
+            // When the topic is the server name, it is a DDL record and not data record
+            if (!record.topic().equals(DATABASE.getServerName())) {
+                previousRecordTable = currentRecordTable;
+                previousSnapshotSourceField = snapshotSourceField;
+            }
+        }
+
+        if (storeOnlyCapturedTables) {
+            assertThat(schemaChanges.ddlRecordsForDatabaseOrEmpty("").size()
+                    + schemaChanges.ddlRecordsForDatabaseOrEmpty(DATABASE.getDatabaseName()).size())
+                            .isEqualTo(schemaEventsCount);
+            assertThat(schemaChanges.ddlRecordsForDatabaseOrEmpty("").size()
+                    + schemaChanges.ddlRecordsForDatabaseOrEmpty(OTHER_DATABASE.getDatabaseName()).size())
+                            .isEqualTo(1);
+        }
+        else {
+            assertThat(schemaChanges.ddlRecordsForDatabaseOrEmpty("").size()
+                    + schemaChanges.ddlRecordsForDatabaseOrEmpty(DATABASE.getDatabaseName()).size())
+                            .isEqualTo(schemaEventsCount);
+            assertThat(schemaChanges.ddlRecordsForDatabaseOrEmpty("").size()
+                    + schemaChanges.ddlRecordsForDatabaseOrEmpty(OTHER_DATABASE.getDatabaseName()).size())
+                            .isEqualTo(useGlobalLock ? 1 : 5);
         }
 
         if (!useGlobalLock) {
@@ -179,8 +219,6 @@ public class SnapshotSourceIT extends AbstractConnectorTest {
         else {
             logInterceptor.containsMessage("Releasing global read lock to enable MySQL writes");
         }
-
-        assertThat(schemaChanges.recordCount()).isEqualTo(schemaEventsCount);
 
         if (!data) {
             return;
@@ -268,7 +306,7 @@ public class SnapshotSourceIT extends AbstractConnectorTest {
     public void shouldCreateSnapshotSelectively() throws Exception {
         config = simpleConfig()
                 .with(MySqlConnectorConfig.DATABASE_INCLUDE_LIST, "connector_(.*)_" + DATABASE.getIdentifier())
-                .with(CommonConnectorConfig.SNAPSHOT_MODE_TABLES, "connector_(.*).customers")
+                .with(CommonConnectorConfig.SNAPSHOT_MODE_TABLES, "connector_(.*).CUSTOMERS")
                 .build();
 
         // Start the connector ...
@@ -308,6 +346,56 @@ public class SnapshotSourceIT extends AbstractConnectorTest {
     }
 
     @Test
+    @FixFor("DBZ-3952")
+    public void shouldNotFailStreamingOnNonSnapshottedTable() throws Exception {
+        config = simpleConfig()
+                .with(MySqlConnectorConfig.DATABASE_INCLUDE_LIST, DATABASE.getDatabaseName())
+                .with(RelationalDatabaseConnectorConfig.TABLE_INCLUDE_LIST,
+                        DATABASE.qualifiedTableName("ORDERS") + "," + DATABASE.qualifiedTableName("CUSTOMERS"))
+                .with(CommonConnectorConfig.SNAPSHOT_MODE_TABLES, DATABASE.qualifiedTableName("ORDERS"))
+                .build();
+
+        // Start the connector ...
+        start(MySqlConnector.class, config);
+        waitForSnapshotToBeCompleted("mysql", DATABASE.getServerName());
+
+        // Poll for records ...
+        Testing.Print.enable();
+        KeyValueStore store = KeyValueStore.createForTopicsBeginningWith(DATABASE.getServerName() + ".");
+        SchemaChangeHistory schemaChanges = new SchemaChangeHistory(DATABASE.getServerName());
+        SourceRecords sourceRecords = consumeRecordsByTopic(5);
+        sourceRecords.allRecordsInOrder().forEach(record -> {
+            VerifyRecord.isValid(record);
+            VerifyRecord.hasNoSourceQuery(record);
+            store.add(record);
+            schemaChanges.add(record);
+        });
+
+        // There should be no schema changes ...
+        assertThat(schemaChanges.recordCount()).isEqualTo(0);
+
+        Collection customers = store.collection(DATABASE.getDatabaseName(), "customers");
+        assertThat(customers).isNull();
+
+        Collection orders = store.collection(DATABASE.getDatabaseName(), "orders");
+        assertThat(orders.numberOfReads()).isEqualTo(5);
+
+        try (
+                final MySqlTestConnection db = MySqlTestConnection.forTestDatabase(DATABASE.getDatabaseName());
+                final JdbcConnection connection = db.connect();
+                final Connection jdbc = connection.connection();
+                final Statement statement = jdbc.createStatement()) {
+            statement.executeUpdate("INSERT INTO customers VALUES (default,'John','Lazy','john.lazy@acme.com')");
+        }
+
+        // Testing.Print.enable();
+        final SourceRecords streamingRecords = consumeRecordsByTopic(1);
+        assertThat(streamingRecords.topics()).hasSize(1);
+        final SourceRecord insert = streamingRecords.recordsForTopic(DATABASE.topicForTable("customers")).get(0);
+        assertThat(((Struct) insert.value()).getStruct("after").getString("email")).isEqualTo("john.lazy@acme.com");
+    }
+
+    @Test
     @FixFor("DBZ-3238")
     public void shouldSnapshotCorrectlyReadFields() throws Exception {
         config = simpleConfig()
@@ -315,7 +403,6 @@ public class SnapshotSourceIT extends AbstractConnectorTest {
                 .with(MySqlConnectorConfig.TABLE_INCLUDE_LIST, BINARY_FIELD_DATABASE.qualifiedTableName("binary_field"))
                 .with(MySqlConnectorConfig.ROW_COUNT_FOR_STREAMING_RESULT_SETS, "0")
                 .with(MySqlConnectorConfig.SNAPSHOT_FETCH_SIZE, "101")
-                // .with("internal.implementation", "legacy")
                 .build();
 
         // Start the connector ...
@@ -540,7 +627,7 @@ public class SnapshotSourceIT extends AbstractConnectorTest {
         Configuration.Builder builder = simpleConfig()
                 .with(MySqlConnectorConfig.SNAPSHOT_MODE, MySqlConnectorConfig.SnapshotMode.INITIAL)
                 .with(MySqlConnectorConfig.TABLE_INCLUDE_LIST, DATABASE.qualifiedTableName("customers"))
-                .with(MySqlConnectorConfig.DATABASE_HISTORY, MemoryDatabaseHistory.class.getName());
+                .with(MySqlConnectorConfig.SCHEMA_HISTORY, MemorySchemaHistory.class.getName());
         config = builder.build();
         // Start the connector ...
         start(MySqlConnector.class, config);
@@ -594,9 +681,9 @@ public class SnapshotSourceIT extends AbstractConnectorTest {
     }
 
     @Test
-    public void shouldSnapshotTablesInOrderSpecifiedInTablesWhitelist() throws Exception {
+    public void shouldSnapshotTablesInOrderSpecifiedInTablesIncludeList() throws Exception {
         config = simpleConfig()
-                .with(MySqlConnectorConfig.TABLE_WHITELIST,
+                .with(MySqlConnectorConfig.TABLE_INCLUDE_LIST,
                         "connector_test_ro_(.*).orders,connector_test_ro_(.*).Products,connector_test_ro_(.*).products_on_hand,connector_test_ro_(.*).dbz_342_timetest")
                 .build();
 

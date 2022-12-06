@@ -6,6 +6,7 @@
 package io.debezium.embedded;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.Properties;
 import java.util.function.Consumer;
@@ -16,6 +17,8 @@ import org.apache.kafka.connect.source.SourceRecord;
 import org.apache.kafka.connect.storage.Converter;
 
 import io.debezium.DebeziumException;
+import io.debezium.config.CommonConnectorConfig;
+import io.debezium.config.CommonConnectorConfig.SchemaNameAdjustmentMode;
 import io.debezium.config.Configuration;
 import io.debezium.engine.DebeziumEngine;
 import io.debezium.engine.DebeziumEngine.Builder;
@@ -164,13 +167,17 @@ public class ConvertingEngineBuilder<R> implements Builder<R> {
             keyConverter = createConverter(formatKey, true);
             valueConverter = createConverter(formatValue, false);
             toFormat = (record) -> {
-                final byte[] key = keyConverter.fromConnectData(TOPIC_NAME, record.keySchema(), record.key());
-                final byte[] value = valueConverter.fromConnectData(TOPIC_NAME, record.valueSchema(), record.value());
+                String topicName = record.topic();
+                if (topicName == null) {
+                    topicName = TOPIC_NAME;
+                }
+                final byte[] key = keyConverter.fromConnectData(topicName, record.keySchema(), record.key());
+                final byte[] value = valueConverter.fromConnectData(topicName, record.valueSchema(), record.value());
                 return isFormat(formatKey, Json.class) && isFormat(formatValue, Json.class)
                         || isFormat(formatValue, CloudEvents.class)
                                 ? (R) new EmbeddedEngineChangeEvent<String, String>(
-                                        key != null ? new String(key) : null,
-                                        value != null ? new String(value) : null,
+                                        key != null ? new String(key, StandardCharsets.UTF_8) : null,
+                                        value != null ? new String(value, StandardCharsets.UTF_8) : null,
                                         record)
                                 : (R) new EmbeddedEngineChangeEvent<byte[], byte[]>(
                                         key,
@@ -221,6 +228,9 @@ public class ConvertingEngineBuilder<R> implements Builder<R> {
             else {
                 converterConfig = converterConfig.edit().withDefault(FIELD_CLASS, "io.confluent.connect.avro.AvroConverter").build();
             }
+            converterConfig = converterConfig.edit()
+                    .withDefault(CommonConnectorConfig.SCHEMA_NAME_ADJUSTMENT_MODE, SchemaNameAdjustmentMode.AVRO)
+                    .build();
         }
         else if (isFormat(format, Protobuf.class)) {
             converterConfig = converterConfig.edit().withDefault(FIELD_CLASS, "io.confluent.connect.protobuf.ProtobufConverter").build();

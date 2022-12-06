@@ -14,11 +14,12 @@ import java.util.Properties;
 import javax.enterprise.event.Observes;
 import javax.inject.Inject;
 
+import org.assertj.core.api.Assertions;
 import org.awaitility.Awaitility;
-import org.fest.assertions.Assertions;
 import org.junit.jupiter.api.Test;
 
 import io.debezium.DebeziumException;
+import io.debezium.relational.RelationalDatabaseConnectorConfig;
 import io.debezium.server.events.ConnectorStartedEvent;
 import io.debezium.util.Collect;
 import io.debezium.util.Testing;
@@ -51,8 +52,17 @@ public class DebeziumServerTest {
     @Test
     public void testProps() {
         Properties properties = server.getProps();
-        Assertions.assertThat(properties.getProperty("table.whitelist")).isNotNull();
-        Assertions.assertThat(properties.getProperty("table.whitelist")).isEqualTo("public.table_name");
+        Assertions.assertThat(properties.getProperty(RelationalDatabaseConnectorConfig.TABLE_INCLUDE_LIST.name())).isNotNull();
+        Assertions.assertThat(properties.getProperty(RelationalDatabaseConnectorConfig.TABLE_INCLUDE_LIST.name())).isEqualTo("public.table_name");
+
+        Assertions.assertThat(properties.getProperty("offset.flush.interval.ms.test")).isNotNull();
+        Assertions.assertThat(properties.getProperty("offset.flush.interval.ms.test")).isEqualTo("0");
+
+        Assertions.assertThat(properties.getProperty("snapshot.select.statement.overrides.public.table_name")).isNotNull();
+        Assertions.assertThat(properties.getProperty("snapshot.select.statement.overrides.public.table_name")).isEqualTo("SELECT * FROM table_name WHERE 1>2");
+
+        Assertions.assertThat(properties.getProperty("database.allowPublicKeyRetrieval")).isNotNull();
+        Assertions.assertThat(properties.getProperty("database.allowPublicKeyRetrieval")).isEqualTo("true");
     }
 
     @Test

@@ -10,6 +10,8 @@ select 'afdf' "erwhg" "ads" 'dgs' "rter" as tstDiffQuoteConcat;
 select 'some string' COLLATE latin1_danish_ci as tstCollate;
 select _latin1'some string' COLLATE latin1_danish_ci as tstCollate;
 select '\'' as c1, '\"' as c2, '\b' as c3, '\n' as c4, '\r' as c5, '\t' as c6, '\Z' as c7, '\\' as c8, '\%' as c9, '\_' as c10;
+select * from t1 for update skip locked;
+select * from t1 lock in share mode nowait;
 #end
 #begin
 -- -- -- String literal spec symbols
@@ -169,3 +171,57 @@ SELECT * FROM test LIMIT LIMIT1,LIMIT2;
 -- Functions
 SELECT mod(3,2);
 SELECT SCHEMA();
+-- Non Aggregate Functions
+SELECT pk, LEAD(pk) OVER (ORDER BY pk) AS l;
+SELECT COALESCE(LAG(last_eq.end_variation) OVER (PARTITION BY eq.account_id, eq.execution_name_id, eq.currency ORDER BY eq.start_date), 0) AS start_variation FROM t1;
+-- Window Functions
+SELECT
+    e.id,
+    SUM(e.bin_volume) AS bin_volume,
+    SUM(e.bin_volume) OVER(PARTITION BY id, e.bin_volume ORDER BY id) AS bin_volume_o,
+    COALESCE(bin_volume, 0) AS bin_volume2,
+    COALESCE(LAG(e.bin_volume) OVER(PARTITION BY id ORDER BY e.id), 0) AS bin_volume3,
+    FIRST_VALUE(id) OVER() AS fv,
+    DENSE_RANK() OVER(PARTITION BY bin_name ORDER BY id) AS drk,
+    RANK() OVER(PARTITION BY bin_name) AS rk,
+    ROW_NUMBER ( ) OVER(PARTITION BY bin_name) AS rn,
+    NTILE(2) OVER() AS nt
+FROM table1 e;
+SELECT
+    id,
+    SUM(bin_volume) OVER w AS bin_volume_o,
+    LAG(bin_volume) OVER w AS bin_volume_l,
+    LAG(bin_volume, 2) OVER w AS bin_volume_l2,
+    FIRST_VALUE(id) OVER w2 AS fv,
+    GROUP_CONCAT(bin_volume order by id) AS `rank`
+FROM table2
+    WINDOW w AS (PARTITION BY id, bin_volume ORDER BY id ROWS UNBOUNDED PRECEDING),
+           w2 AS (PARTITION BY id, bin_volume ORDER BY id DESC ROWS 10 PRECEDING);
+
+#begin
+-- https://dev.mysql.com/doc/refman/8.0/en/lateral-derived-tables.html
+SELECT
+  salesperson.name,
+  max_sale.amount,
+  max_sale.customer_name
+FROM
+  salesperson,
+  LATERAL
+  (SELECT amount, customer_name
+    FROM all_sales
+    WHERE all_sales.salesperson_id = salesperson.id
+    ORDER BY amount DESC LIMIT 1)
+  AS max_sale;
+#end
+
+#begin
+-- From MariaDB 10.1.2, pre-query variables are supported
+-- src: https://mariadb.com/kb/en/set-statement/
+SET STATEMENT some_statement=60 FOR SELECT a FROM some_table;
+#end
+
+-- Index hints: https://dev.mysql.com/doc/refman/8.0/en/index-hints.html
+SELECT * FROM table1 USE INDEX (col1_index,col2_index) WHERE col1=1 AND col2=2 AND col3=3;
+SELECT * FROM table1 FORCE INDEX (col1_index,col2_index) WHERE col1=1 AND col2=2 AND col3=3;
+SELECT * FROM t1 USE INDEX (PRIMARY) ORDER BY a;
+SELECT * FROM t1 FORCE INDEX (PRIMARY) ORDER BY a;

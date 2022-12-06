@@ -6,14 +6,18 @@
 package io.debezium.connector.mysql.zzz;
 
 import static io.debezium.junit.EqualityCheck.LESS_THAN;
-import static org.fest.assertions.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import java.nio.file.Path;
 import java.sql.SQLException;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import org.fest.assertions.Assertions;
+import org.assertj.core.api.Assertions;
+import org.awaitility.Awaitility;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -24,7 +28,6 @@ import io.debezium.connector.mysql.MySqlConnectorConfig;
 import io.debezium.connector.mysql.MySqlConnectorConfig.SnapshotMode;
 import io.debezium.connector.mysql.MySqlTestConnection;
 import io.debezium.connector.mysql.UniqueDatabase;
-import io.debezium.connector.mysql.legacy.BinlogReaderIT;
 import io.debezium.doc.FixFor;
 import io.debezium.embedded.AbstractConnectorTest;
 import io.debezium.jdbc.JdbcConnection;
@@ -32,19 +35,18 @@ import io.debezium.junit.SkipWhenDatabaseVersion;
 import io.debezium.util.Testing;
 
 /**
- * The test is named to make sure it runs alphabetically last as it can influence execution
- * of for example {@link BinlogReaderIT}
+ * The test is named to make sure it runs alphabetically last as it can influence execution of other tests.
  *
  * @author Jiri Pechanec
  */
 @SkipWhenDatabaseVersion(check = LESS_THAN, major = 5, minor = 6, reason = "DDL uses fractional second data types, not supported until MySQL 5.6")
 public class ZZZGtidSetIT extends AbstractConnectorTest {
 
-    private static final Path DB_HISTORY_PATH = Testing.Files.createTestingPath("file-db-history-connect.txt").toAbsolutePath();
+    private static final Path SCHEMA_HISTORY_PATH = Testing.Files.createTestingPath("file-schema-history-connect.txt").toAbsolutePath();
     private final UniqueDatabase DATABASE = new UniqueDatabase("myServer1", "connector_test")
-            .withDbHistoryPath(DB_HISTORY_PATH);
+            .withDbHistoryPath(SCHEMA_HISTORY_PATH);
     private final UniqueDatabase RO_DATABASE = new UniqueDatabase("myServer2", "connector_test_ro", DATABASE)
-            .withDbHistoryPath(DB_HISTORY_PATH);
+            .withDbHistoryPath(SCHEMA_HISTORY_PATH);
 
     private Configuration config;
 
@@ -54,7 +56,7 @@ public class ZZZGtidSetIT extends AbstractConnectorTest {
         DATABASE.createAndInitialize();
         RO_DATABASE.createAndInitialize();
         initializeConnectorTestFramework();
-        Testing.Files.delete(DB_HISTORY_PATH);
+        Testing.Files.delete(SCHEMA_HISTORY_PATH);
     }
 
     @After
@@ -63,7 +65,7 @@ public class ZZZGtidSetIT extends AbstractConnectorTest {
             stopConnector();
         }
         finally {
-            Testing.Files.delete(DB_HISTORY_PATH);
+            Testing.Files.delete(SCHEMA_HISTORY_PATH);
         }
     }
 
@@ -83,7 +85,7 @@ public class ZZZGtidSetIT extends AbstractConnectorTest {
     @Test
     @FixFor("DBZ-1184")
     public void shouldProcessPurgedGtidSet() throws SQLException, InterruptedException {
-        Testing.Files.delete(DB_HISTORY_PATH);
+        Testing.Files.delete(SCHEMA_HISTORY_PATH);
 
         if (!isGtidModeEnabled()) {
             logger.warn("GTID is not enabled, skipping shouldProcessPurgedGtidSet");
@@ -92,9 +94,9 @@ public class ZZZGtidSetIT extends AbstractConnectorTest {
 
         purgeDatabaseLogs();
         final UniqueDatabase database = new UniqueDatabase("myServer1", "connector_test")
-                .withDbHistoryPath(DB_HISTORY_PATH);
+                .withDbHistoryPath(SCHEMA_HISTORY_PATH);
         final UniqueDatabase ro_database = new UniqueDatabase("myServer2", "connector_test_ro", database)
-                .withDbHistoryPath(DB_HISTORY_PATH);
+                .withDbHistoryPath(SCHEMA_HISTORY_PATH);
         ro_database.createAndInitialize();
 
         // Use the DB configuration to define the connector's configuration ...
@@ -120,10 +122,12 @@ public class ZZZGtidSetIT extends AbstractConnectorTest {
         // Check that records have GTID that does not contain purged interval
         records.recordsForTopic(ro_database.topicForTable("customers")).forEach(record -> {
             final String gtids = (String) record.sourceOffset().get("gtids");
-            final Pattern p = Pattern.compile(".*(.*):(.*)-(.*).*");
+
+            // the format is <uuid:<start-tx>-<end-tx>; we don't expect any offsets with start tx = 1 due to the flush
+            final Pattern p = Pattern.compile(".*:(.*)-.*");
             final Matcher m = p.matcher(gtids);
             m.matches();
-            Assertions.assertThat(m.group(2)).isNotEqualTo("1");
+            Assertions.assertThat(m.group(1)).isNotEqualTo("1");
         });
 
         stopConnector();
@@ -132,25 +136,45 @@ public class ZZZGtidSetIT extends AbstractConnectorTest {
     private void purgeDatabaseLogs() throws SQLException {
         try (MySqlTestConnection db = MySqlTestConnection.forTestDatabase(DATABASE.getDatabaseName());) {
             try (JdbcConnection connection = db.connect()) {
-                connection.execute(
-                        "FLUSH LOGS");
-                final String lastBinlogName = connection.queryAndMap("SHOW BINARY LOGS", rs -> {
-                    String binlog = null;
-                    while (rs.next()) {
-                        binlog = rs.getString(1);
+                // make sure there's a new log file
+                connection.execute("FLUSH LOGS");
+
+                // purge all log files other than the last one
+                List<String> binlogs = getBinlogs(connection);
+                String lastBinlogName = binlogs.get(binlogs.size() - 1);
+                connection.execute("PURGE BINARY LOGS TO '" + lastBinlogName + "'");
+
+                // apparently, PURGE is async, as occasionally we saw the first log file still to be active
+                // after that call, causing the GTID 1 (which is in the first log file) to be part of offsets
+                // which is not what we expect
+                Awaitility.await().atMost(Duration.ofSeconds(10)).until(() -> {
+                    List<String> binlogsAfterPurge = getBinlogs(connection);
+
+                    if (binlogsAfterPurge.size() != 1) {
+                        Testing.print("Binlogs before purging: " + binlogs);
+                        Testing.print("Binlogs after purging: " + binlogsAfterPurge);
                     }
-                    return binlog;
+
+                    return binlogsAfterPurge.size() == 1;
                 });
-                connection.execute(
-                        "PURGE BINARY LOGS TO '" + lastBinlogName + "'");
             }
         }
+    }
+
+    private List<String> getBinlogs(JdbcConnection connection) throws SQLException {
+        return connection.queryAndMap("SHOW BINARY LOGS", rs -> {
+            List<String> binlogs = new ArrayList<>();
+            while (rs.next()) {
+                binlogs.add(rs.getString(1));
+            }
+            return binlogs;
+        });
     }
 
     @Test
     @FixFor("DBZ-1244")
     public void shouldProcessPurgedLogsWhenDownAndSnapshotNeeded() throws SQLException, InterruptedException {
-        Testing.Files.delete(DB_HISTORY_PATH);
+        Testing.Files.delete(SCHEMA_HISTORY_PATH);
 
         if (!isGtidModeEnabled()) {
             logger.warn("GTID is not enabled, skipping shouldProcessPurgedLogsWhenDownAndSnapshotNeeded");
@@ -159,7 +183,7 @@ public class ZZZGtidSetIT extends AbstractConnectorTest {
 
         purgeDatabaseLogs();
         final UniqueDatabase database = new UniqueDatabase("myServer1", "connector_test")
-                .withDbHistoryPath(DB_HISTORY_PATH);
+                .withDbHistoryPath(SCHEMA_HISTORY_PATH);
         database.createAndInitialize();
 
         // Use the DB configuration to define the connector's configuration ...

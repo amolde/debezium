@@ -7,7 +7,6 @@ package io.debezium.connector.mysql;
 
 import java.math.BigDecimal;
 import java.time.Duration;
-import java.util.Random;
 import java.util.Set;
 import java.util.function.Predicate;
 
@@ -18,7 +17,6 @@ import org.apache.kafka.common.config.ConfigDef.Width;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import io.debezium.config.CommonConnectorConfig;
 import io.debezium.config.ConfigDefinition;
 import io.debezium.config.Configuration;
 import io.debezium.config.EnumeratedValue;
@@ -30,15 +28,14 @@ import io.debezium.function.Predicates;
 import io.debezium.jdbc.JdbcValueConverters.BigIntUnsignedMode;
 import io.debezium.jdbc.TemporalPrecisionMode;
 import io.debezium.relational.ColumnFilterMode;
-import io.debezium.relational.ColumnId;
 import io.debezium.relational.HistorizedRelationalDatabaseConnectorConfig;
 import io.debezium.relational.RelationalDatabaseConnectorConfig;
 import io.debezium.relational.TableId;
-import io.debezium.relational.Tables.ColumnNameFilter;
 import io.debezium.relational.Tables.TableFilter;
-import io.debezium.relational.history.DatabaseHistory;
 import io.debezium.relational.history.HistoryRecordComparator;
-import io.debezium.relational.history.KafkaDatabaseHistory;
+import io.debezium.relational.history.SchemaHistory;
+import io.debezium.schema.DefaultTopicNamingStrategy;
+import io.debezium.storage.kafka.history.KafkaSchemaHistory;
 import io.debezium.util.Collect;
 
 /**
@@ -151,7 +148,7 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
 
         /**
          * Perform a snapshot of only the database schemas (without data) and then begin reading the binlog at the current binlog position.
-         * This can be used for recovery only if the connector has existing offsets and the database.history.kafka.topic does not exist (deleted).
+         * This can be used for recovery only if the connector has existing offsets and the schema.history.internal.kafka.topic does not exist (deleted).
          * This recovery option should be used with care as it assumes there have been no schema changes since the connector last stopped,
          * otherwise some events during the gap may be processed with an incorrect schema and corrupted.
          */
@@ -213,7 +210,7 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
         }
 
         /**
-         * Whether the schema can be recovered if database history is corrupted.
+         * Whether the schema can be recovered if database schema history is corrupted.
          */
         public boolean shouldSnapshotOnSchemaError() {
             return shouldSnapshotOnSchemaError;
@@ -381,6 +378,10 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
             return !value.equals(NONE.value);
         }
 
+        public boolean flushResetsIsolationLevel() {
+            return !value.equals(MINIMAL_PERCONA.value);
+        }
+
         /**
         * Determine which flavour of MySQL locking to use.
         *
@@ -507,68 +508,6 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
     }
 
     /**
-     * The set of predefined Gtid New Channel Position options.
-     */
-    public static enum GtidNewChannelPosition implements EnumeratedValue {
-
-        /**
-         * This mode will start reading new gtid channel from mysql servers last_executed position
-         */
-        LATEST("latest"),
-
-        /**
-         * This mode will start reading new gtid channel from earliest available position in server.
-         * This is needed when during active-passive failover the new gtid channel becomes active and receiving writes. #DBZ-923
-         */
-        EARLIEST("earliest");
-
-        private final String value;
-
-        private GtidNewChannelPosition(String value) {
-            this.value = value;
-        }
-
-        @Override
-        public String getValue() {
-            return value;
-        }
-
-        /**
-         * Determine if the supplied value is one of the predefined options.
-         *
-         * @param value the configuration property value; may not be null
-         * @return the matching option, or null if no match is found
-         */
-        public static GtidNewChannelPosition parse(String value) {
-            if (value == null) {
-                return null;
-            }
-            value = value.trim();
-            for (GtidNewChannelPosition option : GtidNewChannelPosition.values()) {
-                if (option.getValue().equalsIgnoreCase(value)) {
-                    return option;
-                }
-            }
-            return null;
-        }
-
-        /**
-         * Determine if the supplied value is one of the predefined options.
-         *
-         * @param value the configuration property value; may not be null
-         * @param defaultValue the default value; may be null
-         * @return the matching option, or null if no match is found and the non-null default is invalid
-         */
-        public static GtidNewChannelPosition parse(String value, String defaultValue) {
-            GtidNewChannelPosition mode = parse(value);
-            if (mode == null && defaultValue != null) {
-                mode = parse(defaultValue);
-            }
-            return mode;
-        }
-    }
-
-    /**
      * {@link Integer#MIN_VALUE Minimum value} used for fetch size hint.
      * See <a href="https://issues.jboss.org/browse/DBZ-94">DBZ-94</a> for details.
      */
@@ -590,31 +529,31 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
     public static final Field ON_CONNECT_STATEMENTS = Field.create("database.initial.statements")
             .withDisplayName("Initial statements")
             .withType(Type.STRING)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED, 4))
             .withWidth(Width.LONG)
             .withImportance(Importance.LOW)
             .withDescription(
                     "A semicolon separated list of SQL statements to be executed when a JDBC connection (not binlog reading connection) to the database is established. "
-                            + "Note that the connector may establish JDBC connections at its own discretion, so this should typically be used for configuration of session parameters only,"
+                            + "Note that the connector may establish JDBC connections at its own discretion, so this should typically be used for configuration of session parameters only, "
                             + "but not for executing DML statements. Use doubled semicolon (';;') to use a semicolon as a character and not as a delimiter.");
-
-    public static final Field SERVER_NAME = RelationalDatabaseConnectorConfig.SERVER_NAME
-            .withValidation(CommonConnectorConfig::validateServerNameIsDifferentFromHistoryTopicName);
 
     public static final Field SERVER_ID = Field.create("database.server.id")
             .withDisplayName("Cluster ID")
             .withType(Type.LONG)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION, 1))
             .withWidth(Width.LONG)
             .withImportance(Importance.HIGH)
-            .withDefault(MySqlConnectorConfig::randomServerId)
-            .withValidation(Field::isRequired, Field::isPositiveLong)
+            .required()
+            .withValidation(Field::isPositiveLong)
             .withDescription("A numeric ID of this database client, which must be unique across all "
                     + "currently-running database processes in the cluster. This connector joins the "
                     + "MySQL database cluster as another server (with this unique ID) so it can read "
-                    + "the binlog. By default, a random number is generated between 5400 and 6400.");
+                    + "the binlog.");
 
     public static final Field SERVER_ID_OFFSET = Field.create("database.server.id.offset")
             .withDisplayName("Cluster ID offset")
             .withType(Type.LONG)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED, 0))
             .withWidth(Width.LONG)
             .withImportance(Importance.HIGH)
             .withDefault(10000L)
@@ -626,9 +565,10 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
     public static final Field SSL_MODE = Field.create("database.ssl.mode")
             .withDisplayName("SSL mode")
             .withEnum(SecureConnectionMode.class, SecureConnectionMode.DISABLED)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED_SSL, 0))
             .withWidth(Width.MEDIUM)
             .withImportance(Importance.MEDIUM)
-            .withDescription("Whether to use an encrypted connection to MySQL. Options include"
+            .withDescription("Whether to use an encrypted connection to MySQL. Options include: "
                     + "'disabled' (the default) to use an unencrypted connection; "
                     + "'preferred' to establish a secure (encrypted) connection if the server supports secure connections, "
                     + "but fall back to an unencrypted connection otherwise; "
@@ -640,33 +580,37 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
     public static final Field SSL_KEYSTORE = Field.create("database.ssl.keystore")
             .withDisplayName("SSL Keystore")
             .withType(Type.STRING)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED_SSL, 1))
             .withWidth(Width.LONG)
             .withImportance(Importance.MEDIUM)
-            .withDescription("Location of the Java keystore file containing an application process's own certificate and private key.");
+            .withDescription("The location of the key store file. "
+                    + "This is optional and can be used for two-way authentication between the client and the MySQL Server.");
 
     public static final Field SSL_KEYSTORE_PASSWORD = Field.create("database.ssl.keystore.password")
             .withDisplayName("SSL Keystore Password")
             .withType(Type.PASSWORD)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED_SSL, 2))
             .withWidth(Width.MEDIUM)
             .withImportance(Importance.MEDIUM)
-            .withDescription(
-                    "Password to access the private key from the keystore file specified by 'ssl.keystore' configuration property or the 'javax.net.ssl.keyStore' system or JVM property. "
-                            + "This password is used to unlock the keystore file (store password), and to decrypt the private key stored in the keystore (key password).");
+            .withDescription("The password for the key store file. "
+                    + "This is optional and only needed if 'database.ssl.keystore' is configured.");
 
     public static final Field SSL_TRUSTSTORE = Field.create("database.ssl.truststore")
             .withDisplayName("SSL Truststore")
             .withType(Type.STRING)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED_SSL, 3))
             .withWidth(Width.LONG)
             .withImportance(Importance.MEDIUM)
-            .withDescription("Location of the Java truststore file containing the collection of CA certificates trusted by this application process (trust store).");
+            .withDescription("The location of the trust store file for the server certificate verification.");
 
     public static final Field SSL_TRUSTSTORE_PASSWORD = Field.create("database.ssl.truststore.password")
             .withDisplayName("SSL Truststore Password")
             .withType(Type.PASSWORD)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED_SSL, 4))
             .withWidth(Width.MEDIUM)
             .withImportance(Importance.MEDIUM)
-            .withDescription(
-                    "Password to unlock the keystore file (store password) specified by 'ssl.trustore' configuration property or the 'javax.net.ssl.trustStore' system or JVM property.");
+            .withDescription("The password for the trust store file. "
+                    + "Used to check the integrity of the truststore, and unlock the truststore.");
 
     public static final Field TABLES_IGNORE_BUILTIN = RelationalDatabaseConnectorConfig.TABLE_IGNORE_BUILTIN
             .withDependents(DATABASE_INCLUDE_LIST_NAME);
@@ -674,6 +618,7 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
     public static final Field JDBC_DRIVER = Field.create("database.jdbc.driver")
             .withDisplayName("Jdbc Driver Class Name")
             .withType(Type.CLASS)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION, 41))
             .withWidth(Width.MEDIUM)
             .withDefault(com.mysql.cj.jdbc.Driver.class.getName())
             .withImportance(Importance.LOW)
@@ -689,9 +634,10 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
     public static final Field GTID_SOURCE_INCLUDES = Field.create("gtid.source.includes")
             .withDisplayName("Include GTID sources")
             .withType(Type.LIST)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR, 24))
             .withWidth(Width.LONG)
             .withImportance(Importance.HIGH)
-            .withDependents(TABLE_INCLUDE_LIST_NAME, TABLE_WHITELIST_NAME)
+            .withDependents(TABLE_INCLUDE_LIST_NAME)
             .withDescription("The source UUIDs used to include GTID ranges when determine the starting position in the MySQL server's binlog.");
 
     /**
@@ -703,6 +649,7 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
     public static final Field GTID_SOURCE_EXCLUDES = Field.create("gtid.source.excludes")
             .withDisplayName("Exclude GTID sources")
             .withType(Type.STRING)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR, 25))
             .withWidth(Width.LONG)
             .withImportance(Importance.MEDIUM)
             .withValidation(MySqlConnectorConfig::validateGtidSetExcludes)
@@ -721,31 +668,17 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
     public static final Field GTID_SOURCE_FILTER_DML_EVENTS = Field.create("gtid.source.filter.dml.events")
             .withDisplayName("Filter DML events")
             .withType(Type.BOOLEAN)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR, 23))
             .withWidth(Width.SHORT)
             .withImportance(Importance.MEDIUM)
             .withDefault(true)
             .withDescription(
                     "If set to true, we will only produce DML events into Kafka for transactions that were written on mysql servers with UUIDs matching the filters defined by the gtid.source.includes or gtid.source.excludes configuration options, if they are specified.");
 
-    /**
-     * If set to 'latest', connector when encountering new GTID channel after job restart will start reading it from the
-     * latest executed position (default). When set to 'earliest' the connector will start reading new GTID channels from the first available position.
-     * This is useful when in active-passive mysql setup during failover new GTID channel starts receiving writes, see DBZ-923.
-     *
-     * Defaults to latest.
-     */
-    public static final Field GTID_NEW_CHANNEL_POSITION = Field.create("gtid.new.channel.position")
-            .withDisplayName("GTID start position")
-            .withEnum(GtidNewChannelPosition.class, GtidNewChannelPosition.EARLIEST)
-            .withWidth(Width.SHORT)
-            .withImportance(Importance.MEDIUM)
-            .withValidation(MySqlConnectorConfig::validateGtidNewChannelPositionNotSet)
-            .withDescription(
-                    "If set to 'latest', when connector sees new GTID, it will start consuming gtid channel from the server latest executed gtid position. If 'earliest' (the default) connector starts reading channel from first available (not purged) gtid position on the server.");
-
     public static final Field CONNECTION_TIMEOUT_MS = Field.create("connect.timeout.ms")
             .withDisplayName("Connection Timeout (ms)")
             .withType(Type.INT)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED, 1))
             .withWidth(Width.SHORT)
             .withImportance(Importance.MEDIUM)
             .withDescription(
@@ -756,6 +689,7 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
     public static final Field KEEP_ALIVE = Field.create("connect.keep.alive")
             .withDisplayName("Keep connection alive (true/false)")
             .withType(Type.BOOLEAN)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED, 2))
             .withWidth(Width.SHORT)
             .withImportance(Importance.LOW)
             .withDescription("Whether a separate thread should be used to ensure the connection is kept alive.")
@@ -765,6 +699,7 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
     public static final Field KEEP_ALIVE_INTERVAL_MS = Field.create("connect.keep.alive.interval.ms")
             .withDisplayName("Keep alive interval (ms)")
             .withType(Type.LONG)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED, 3))
             .withWidth(Width.SHORT)
             .withImportance(Importance.LOW)
             .withDescription("Interval for connection checking if keep alive thread is used, given in milliseconds Defaults to 1 minute (60,000 ms).")
@@ -773,7 +708,8 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
 
     public static final Field ROW_COUNT_FOR_STREAMING_RESULT_SETS = Field.create("min.row.count.to.stream.results")
             .withDisplayName("Stream result set of size")
-            .withType(Type.LONG)
+            .withType(Type.INT)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 2))
             .withWidth(Width.MEDIUM)
             .withImportance(Importance.LOW)
             .withDescription("The number of rows a table must contain to stream results rather than pull "
@@ -785,6 +721,7 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
     public static final Field BUFFER_SIZE_FOR_BINLOG_READER = Field.create("binlog.buffer.size")
             .withDisplayName("Binlog reader buffer size")
             .withType(Type.INT)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 3))
             .withWidth(Width.MEDIUM)
             .withImportance(Importance.MEDIUM)
             .withDescription("The size of a look-ahead buffer used by the  binlog reader to decide whether "
@@ -795,34 +732,45 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
             .withValidation(Field::isNonNegativeInteger);
 
     /**
-     * The database history class is hidden in the {@link #configDef()} since that is designed to work with a user interface,
+     * The database schema history class is hidden in the {@link #configDef()} since that is designed to work with a user interface,
      * and in these situations using Kafka is the only way to go.
      */
-    public static final Field DATABASE_HISTORY = Field.create("database.history")
-            .withDisplayName("Database history class")
+    public static final Field SCHEMA_HISTORY = Field.create("schema.history.internal")
+            .withDisplayName("Database schema history class")
             .withType(Type.CLASS)
             .withWidth(Width.LONG)
             .withImportance(Importance.LOW)
             .withInvisibleRecommender()
-            .withDescription("The name of the DatabaseHistory class that should be used to store and recover database schema changes. "
+            .withDescription("The name of the SchemaHistory class that should be used to store and recover database schema changes. "
                     + "The configuration properties for the history are prefixed with the '"
-                    + DatabaseHistory.CONFIGURATION_FIELD_PREFIX_STRING + "' string.")
-            .withDefault(KafkaDatabaseHistory.class.getName());
+                    + SchemaHistory.CONFIGURATION_FIELD_PREFIX_STRING + "' string.")
+            .withDefault(KafkaSchemaHistory.class.getName());
+
+    public static final Field TOPIC_NAMING_STRATEGY = Field.create("topic.naming.strategy")
+            .withDisplayName("Topic naming strategy class")
+            .withType(Type.CLASS)
+            .withWidth(Width.MEDIUM)
+            .withImportance(Importance.MEDIUM)
+            .withDescription("The name of the TopicNamingStrategy class that should be used to determine the topic name " +
+                    "for data change, schema change, transaction, heartbeat event etc.")
+            .withDefault(DefaultTopicNamingStrategy.class.getName());
 
     public static final Field INCLUDE_SQL_QUERY = Field.create("include.query")
             .withDisplayName("Include original SQL query with in change events")
             .withType(Type.BOOLEAN)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 0))
             .withWidth(Width.SHORT)
             .withImportance(Importance.MEDIUM)
             .withDescription("Whether the connector should include the original SQL query that generated the change event. "
                     + "Note: This option requires MySQL be configured with the binlog_rows_query_log_events option set to ON. Query will not be present for events generated from snapshot. "
-                    + "WARNING: Enabling this option may expose tables or fields explicitly blacklisted or masked by including the original SQL statement in the change event. "
+                    + "WARNING: Enabling this option may expose tables or fields explicitly excluded or masked by including the original SQL statement in the change event. "
                     + "For this reason the default value is 'false'.")
             .withDefault(false);
 
     public static final Field SNAPSHOT_MODE = Field.create("snapshot.mode")
             .withDisplayName("Snapshot mode")
             .withEnum(SnapshotMode.class, SnapshotMode.INITIAL)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_SNAPSHOT, 0))
             .withWidth(Width.SHORT)
             .withImportance(Importance.LOW)
             .withDescription("The criteria for running a snapshot upon startup of the connector. "
@@ -837,6 +785,7 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
     public static final Field SNAPSHOT_LOCKING_MODE = Field.create("snapshot.locking.mode")
             .withDisplayName("Snapshot locking mode")
             .withEnum(SnapshotLockingMode.class, SnapshotLockingMode.MINIMAL)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_SNAPSHOT, 1))
             .withWidth(Width.SHORT)
             .withImportance(Importance.LOW)
             .withDescription("Controls how long the connector holds onto the global read lock while it is performing a snapshot. The default is 'minimal', "
@@ -852,11 +801,12 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
     public static final Field SNAPSHOT_NEW_TABLES = Field.create("snapshot.new.tables")
             .withDisplayName("Snapshot newly added tables")
             .withEnum(SnapshotNewTables.class, SnapshotNewTables.OFF)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_SNAPSHOT, 4))
             .withWidth(Width.SHORT)
             .withImportance(Importance.LOW)
             .withDescription("BETA FEATURE: On connector restart, the connector will check if there have been any new tables added to the configuration, "
-                    + "and snapshot them. There is presently only two options:"
-                    + "'off': Default behavior. Do not snapshot new tables."
+                    + "and snapshot them. There is presently only two options: "
+                    + "'off': Default behavior. Do not snapshot new tables. "
                     + "'parallel': The snapshot of the new tables will occur in parallel to the continued binlog reading of the old tables. When the snapshot "
                     + "completes, an independent binlog reader will begin reading the events for the new tables until it catches up to present time. At this "
                     + "point, both old and new binlog readers will be momentarily halted and new binlog reader will start that will read the binlog for all "
@@ -864,47 +814,51 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
 
     public static final Field TIME_PRECISION_MODE = RelationalDatabaseConnectorConfig.TIME_PRECISION_MODE
             .withEnum(TemporalPrecisionMode.class, TemporalPrecisionMode.ADAPTIVE_TIME_MICROSECONDS)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR, 26))
             .withValidation(MySqlConnectorConfig::validateTimePrecisionMode)
-            .withDescription("Time, date and timestamps can be represented with different kinds of precisions, including:"
-                    + "'adaptive_time_microseconds': the precision of date and timestamp values is based the database column's precision; but time fields always use microseconds precision;"
+            .withDescription("Time, date and timestamps can be represented with different kinds of precisions, including: "
+                    + "'adaptive_time_microseconds': the precision of date and timestamp values is based the database column's precision; but time fields always use microseconds precision; "
                     + "'connect': always represents time, date and timestamp values using Kafka Connect's built-in representations for Time, Date, and Timestamp, "
                     + "which uses millisecond precision regardless of the database columns' precision.");
 
     public static final Field BIGINT_UNSIGNED_HANDLING_MODE = Field.create("bigint.unsigned.handling.mode")
             .withDisplayName("BIGINT UNSIGNED Handling")
             .withEnum(BigIntUnsignedHandlingMode.class, BigIntUnsignedHandlingMode.LONG)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR, 27))
             .withWidth(Width.SHORT)
             .withImportance(Importance.MEDIUM)
-            .withDescription("Specify how BIGINT UNSIGNED columns should be represented in change events, including:"
+            .withDescription("Specify how BIGINT UNSIGNED columns should be represented in change events, including: "
                     + "'precise' uses java.math.BigDecimal to represent values, which are encoded in the change events using a binary representation and Kafka Connect's 'org.apache.kafka.connect.data.Decimal' type; "
                     + "'long' (the default) represents values using Java's 'long', which may not offer the precision but will be far easier to use in consumers.");
 
     public static final Field EVENT_DESERIALIZATION_FAILURE_HANDLING_MODE = Field.create("event.deserialization.failure.handling.mode")
             .withDisplayName("Event deserialization failure handling")
             .withEnum(EventProcessingFailureHandlingMode.class, EventProcessingFailureHandlingMode.FAIL)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR, 21))
             .withValidation(MySqlConnectorConfig::validateEventDeserializationFailureHandlingModeNotSet)
             .withWidth(Width.SHORT)
             .withImportance(Importance.MEDIUM)
-            .withDescription("Specify how failures during deserialization of binlog events (i.e. when encountering a corrupted event) should be handled, including:"
+            .withDescription("Specify how failures during deserialization of binlog events (i.e. when encountering a corrupted event) should be handled, including: "
                     + "'fail' (the default) an exception indicating the problematic event and its binlog position is raised, causing the connector to be stopped; "
-                    + "'warn' the problematic event and its binlog position will be logged and the event will be skipped;"
+                    + "'warn' the problematic event and its binlog position will be logged and the event will be skipped; "
                     + "'ignore' the problematic event will be skipped.");
 
     public static final Field INCONSISTENT_SCHEMA_HANDLING_MODE = Field.create("inconsistent.schema.handling.mode")
             .withDisplayName("Inconsistent schema failure handling")
             .withEnum(EventProcessingFailureHandlingMode.class, EventProcessingFailureHandlingMode.FAIL)
-            .withValidation(MySqlConnectorConfig::validateInconsistentSchemaHandlingModeNotIgnore)
+            .withGroup(Field.createGroupEntry(Field.Group.ADVANCED, 2))
             .withWidth(Width.SHORT)
             .withImportance(Importance.MEDIUM)
             .withDescription(
-                    "Specify how binlog events that belong to a table missing from internal schema representation (i.e. internal representation is not consistent with database) should be handled, including:"
+                    "Specify how binlog events that belong to a table missing from internal schema representation (i.e. internal representation is not consistent with database) should be handled, including: "
                             + "'fail' (the default) an exception indicating the problematic event and its binlog position is raised, causing the connector to be stopped; "
-                            + "'warn' the problematic event and its binlog position will be logged and the event will be skipped;"
+                            + "'warn' the problematic event and its binlog position will be logged and the event will be skipped; "
                             + "'skip' the problematic event will be skipped.");
 
     public static final Field ENABLE_TIME_ADJUSTER = Field.create("enable.time.adjuster")
             .withDisplayName("Enable Time Adjuster")
             .withType(Type.BOOLEAN)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR, 22))
             .withDefault(true)
             .withWidth(Width.SHORT)
             .withImportance(Importance.LOW)
@@ -913,14 +867,19 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
                             "false - delegates the implicit conversion to the database" +
                             "true - (the default) Debezium makes the conversion");
 
+    public static final Field READ_ONLY_CONNECTION = Field.create("read.only")
+            .withDisplayName("Read only connection")
+            .withType(Type.BOOLEAN)
+            .withDefault(false)
+            .withWidth(Width.SHORT)
+            .withImportance(Importance.LOW)
+            .withDescription("Switched connector to use alternative methods to deliver signals to Debezium instead of writing to signaling table");
+
     private static final ConfigDefinition CONFIG_DEFINITION = HistorizedRelationalDatabaseConnectorConfig.CONFIG_DEFINITION.edit()
             .name("MySQL")
             .excluding(
-                    SCHEMA_WHITELIST,
                     SCHEMA_INCLUDE_LIST,
-                    SCHEMA_BLACKLIST,
                     SCHEMA_EXCLUDE_LIST,
-                    RelationalDatabaseConnectorConfig.SERVER_NAME,
                     RelationalDatabaseConnectorConfig.TIME_PRECISION_MODE,
                     RelationalDatabaseConnectorConfig.TABLE_IGNORE_BUILTIN)
             .type(
@@ -928,7 +887,6 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
                     PORT,
                     USER,
                     PASSWORD,
-                    SERVER_NAME,
                     ON_CONNECT_STATEMENTS,
                     SERVER_ID,
                     SERVER_ID_OFFSET,
@@ -948,7 +906,11 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
                     BIGINT_UNSIGNED_HANDLING_MODE,
                     TIME_PRECISION_MODE,
                     ENABLE_TIME_ADJUSTER,
-                    INCREMENTAL_SNAPSHOT_CHUNK_SIZE)
+                    BINARY_HANDLING_MODE,
+                    SCHEMA_NAME_ADJUSTMENT_MODE,
+                    ROW_COUNT_FOR_STREAMING_RESULT_SETS,
+                    INCREMENTAL_SNAPSHOT_CHUNK_SIZE,
+                    INCREMENTAL_SNAPSHOT_ALLOW_SCHEMA_CHANGES)
             .events(
                     INCLUDE_SQL_QUERY,
                     TABLE_IGNORE_BUILTIN,
@@ -980,37 +942,36 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
         return true;
     }
 
+    @Override
+    protected boolean supportsSchemaChangesDuringIncrementalSnapshot() {
+        return true;
+    }
+
     private final Configuration config;
     private final SnapshotMode snapshotMode;
     private final SnapshotLockingMode snapshotLockingMode;
-    private final GtidNewChannelPosition gitIdNewChannelPosition;
     private final SnapshotNewTables snapshotNewTables;
     private final TemporalPrecisionMode temporalPrecisionMode;
     private final Duration connectionTimeout;
     private final Predicate<String> gtidSourceFilter;
     private final EventProcessingFailureHandlingMode inconsistentSchemaFailureHandlingMode;
-    private final Predicate<String> ddlFilter;
-    private final boolean legacy;
-    private final SourceInfoStructMaker<? extends AbstractSourceInfo> sourceInfoStructMaker;
+    private final boolean readOnlyConnection;
 
     public MySqlConnectorConfig(Configuration config) {
         super(
                 MySqlConnector.class,
                 config,
-                config.getString(SERVER_NAME),
                 TableFilter.fromPredicate(MySqlConnectorConfig::isNotBuiltInTable),
                 true,
                 DEFAULT_SNAPSHOT_FETCH_SIZE,
-                ColumnFilterMode.CATALOG);
+                ColumnFilterMode.CATALOG,
+                false);
 
         this.config = config;
-        this.legacy = MySqlConnector.isLegacy(config.getString(io.debezium.connector.mysql.MySqlConnector.IMPLEMENTATION_PROP));
         this.temporalPrecisionMode = TemporalPrecisionMode.parse(config.getString(TIME_PRECISION_MODE));
         this.snapshotMode = SnapshotMode.parse(config.getString(SNAPSHOT_MODE), SNAPSHOT_MODE.defaultValueAsString());
         this.snapshotLockingMode = SnapshotLockingMode.parse(config.getString(SNAPSHOT_LOCKING_MODE), SNAPSHOT_LOCKING_MODE.defaultValueAsString());
-
-        final String gitIdNewChannelPosition = config.getString(MySqlConnectorConfig.GTID_NEW_CHANNEL_POSITION);
-        this.gitIdNewChannelPosition = GtidNewChannelPosition.parse(gitIdNewChannelPosition, MySqlConnectorConfig.GTID_NEW_CHANNEL_POSITION.defaultValueAsString());
+        this.readOnlyConnection = config.getBoolean(READ_ONLY_CONNECTION);
 
         final String snapshotNewTables = config.getString(MySqlConnectorConfig.SNAPSHOT_NEW_TABLES);
         this.snapshotNewTables = SnapshotNewTables.parse(snapshotNewTables, MySqlConnectorConfig.SNAPSHOT_NEW_TABLES.defaultValueAsString());
@@ -1025,12 +986,6 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
         final String gtidSetExcludes = config.getString(MySqlConnectorConfig.GTID_SOURCE_EXCLUDES);
         this.gtidSourceFilter = gtidSetIncludes != null ? Predicates.includesUuids(gtidSetIncludes)
                 : (gtidSetExcludes != null ? Predicates.excludesUuids(gtidSetExcludes) : null);
-
-        // Set up the DDL filter
-        final String ddlFilter = config.getString(DatabaseHistory.DDL_FILTER);
-        this.ddlFilter = (ddlFilter != null) ? Predicates.includes(ddlFilter) : (x -> false);
-
-        this.sourceInfoStructMaker = getSourceInfoStructMaker(Version.parse(config.getString(SOURCE_STRUCT_MAKER_VERSION)));
     }
 
     public boolean useCursorFetch() {
@@ -1041,19 +996,8 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
         return this.snapshotLockingMode;
     }
 
-    public GtidNewChannelPosition gtidNewChannelPosition() {
-        return gitIdNewChannelPosition;
-    }
-
     public SnapshotNewTables getSnapshotNewTables() {
         return snapshotNewTables;
-    }
-
-    private static int validateGtidNewChannelPositionNotSet(Configuration config, Field field, ValidationOutput problems) {
-        if (config.getString(GTID_NEW_CHANNEL_POSITION.name()) != null) {
-            LOGGER.warn("Configuration option '{}' is deprecated and scheduled for removal", GTID_NEW_CHANNEL_POSITION.name());
-        }
-        return 0;
     }
 
     private static int validateEventDeserializationFailureHandlingModeNotSet(Configuration config, Field field, ValidationOutput problems) {
@@ -1061,23 +1005,6 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
         if (modeName != null) {
             LOGGER.warn("Configuration option '{}' is renamed to '{}'", EVENT_DESERIALIZATION_FAILURE_HANDLING_MODE.name(),
                     EVENT_PROCESSING_FAILURE_HANDLING_MODE.name());
-            if (EventProcessingFailureHandlingMode.OBSOLETE_NAME_FOR_SKIP_FAILURE_HANDLING.equals(modeName)) {
-                LOGGER.warn("Value '{}' of configuration option '{}' is deprecated and should be replaced with '{}'",
-                        EventProcessingFailureHandlingMode.OBSOLETE_NAME_FOR_SKIP_FAILURE_HANDLING,
-                        EVENT_DESERIALIZATION_FAILURE_HANDLING_MODE.name(),
-                        EventProcessingFailureHandlingMode.SKIP.getValue());
-            }
-        }
-        return 0;
-    }
-
-    private static int validateInconsistentSchemaHandlingModeNotIgnore(Configuration config, Field field, ValidationOutput problems) {
-        final String modeName = config.getString(INCONSISTENT_SCHEMA_HANDLING_MODE);
-        if (EventProcessingFailureHandlingMode.OBSOLETE_NAME_FOR_SKIP_FAILURE_HANDLING.equals(modeName)) {
-            LOGGER.warn("Value '{}' of configuration option '{}' is deprecated and should be replaced with '{}'",
-                    EventProcessingFailureHandlingMode.OBSOLETE_NAME_FOR_SKIP_FAILURE_HANDLING,
-                    INCONSISTENT_SCHEMA_HANDLING_MODE.name(),
-                    EventProcessingFailureHandlingMode.SKIP.getValue());
         }
         return 0;
     }
@@ -1140,22 +1067,9 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
         return 0;
     }
 
-    private static int randomServerId() {
-        int lowestServerId = 5400;
-        int highestServerId = 6400;
-        return lowestServerId + new Random().nextInt(highestServerId - lowestServerId);
-    }
-
     @Override
     protected SourceInfoStructMaker<? extends AbstractSourceInfo> getSourceInfoStructMaker(Version version) {
-        switch (version) {
-            case V1:
-                return legacy ? new io.debezium.connector.mysql.legacy.LegacyV1MySqlSourceInfoStructMaker(Module.name(), Module.version(), this)
-                        : new LegacyV1MySqlSourceInfoStructMaker(Module.name(), Module.version(), this);
-            default:
-                return legacy ? new io.debezium.connector.mysql.legacy.MySqlSourceInfoStructMaker(Module.name(), Module.version(), this)
-                        : new MySqlSourceInfoStructMaker(Module.name(), Module.version(), this);
-        }
+        return new MySqlSourceInfoStructMaker(Module.name(), Module.version(), this);
     }
 
     @Override
@@ -1245,32 +1159,6 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
         return new MySqlHistoryRecordComparator(gtidSourceFilter());
     }
 
-    private static ColumnNameFilter getColumnExcludeNameFilter(String excludedColumnPatterns) {
-        return new ColumnNameFilter() {
-
-            Predicate<ColumnId> delegate = Predicates.excludes(excludedColumnPatterns, ColumnId::toString);
-
-            @Override
-            public boolean matches(String catalogName, String schemaName, String tableName, String columnName) {
-                // ignore database name as it's not relevant here
-                return delegate.test(new ColumnId(new TableId(catalogName, null, tableName), columnName));
-            }
-        };
-    }
-
-    private static ColumnNameFilter getColumnIncludeNameFilter(String excludedColumnPatterns) {
-        return new ColumnNameFilter() {
-
-            Predicate<ColumnId> delegate = Predicates.includes(excludedColumnPatterns, ColumnId::toString);
-
-            @Override
-            public boolean matches(String catalogName, String schemaName, String tableName, String columnName) {
-                // ignore database name as it's not relevant here
-                return delegate.test(new ColumnId(new TableId(catalogName, null, tableName), columnName));
-            }
-        };
-    }
-
     public static boolean isBuiltInDatabase(String databaseName) {
         if (databaseName == null) {
             return false;
@@ -1282,12 +1170,8 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
         return !isBuiltInDatabase(id.catalog());
     }
 
-    public Predicate<String> getDdlFilter() {
-        return ddlFilter;
-    }
-
-    boolean legacy() {
-        return legacy;
+    public boolean isReadOnlyConnection() {
+        return readOnlyConnection;
     }
 
     /**
@@ -1295,11 +1179,5 @@ public class MySqlConnectorConfig extends HistorizedRelationalDatabaseConnectorC
      */
     boolean useGlobalLock() {
         return !"true".equals(config.getString(TEST_DISABLE_GLOBAL_LOCKING));
-    }
-
-    @SuppressWarnings("unchecked")
-    @Override
-    public SourceInfoStructMaker<? extends AbstractSourceInfo> getSourceInfoStructMaker() {
-        return sourceInfoStructMaker;
     }
 }

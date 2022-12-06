@@ -22,15 +22,27 @@ import io.debezium.text.TokenStream.Tokens;
 class TableIdParser {
 
     private static final char SEPARATOR = '.';
+    private static final String SINGLE_QUOTES = "''";
+    private static final String DOUBLE_QUOTES = "\"\"";
+    private static final String BACKTICKS = "``";
 
     public static List<String> parse(String identifier) {
-        TokenStream stream = new TokenStream(identifier, new TableIdTokenizer(identifier), true);
+        return parse(identifier, new TableIdPredicates() {
+        });
+    }
+
+    public static List<String> parse(String identifier, TableIdPredicates predicates) {
+        TokenStream stream = new TokenStream(identifier, new TableIdTokenizer(identifier, predicates), true);
         stream.start();
 
-        List<String> parts = new ArrayList<>();
+        // at max three parts - catalog.schema.table
+        List<String> parts = new ArrayList<>(3);
 
         while (stream.hasNext()) {
-            parts.add(stream.consume().replaceAll("''", "'").replaceAll("\"\"", "\"").replaceAll("``", "`"));
+            parts.add(stream.consume()
+                    .replace(SINGLE_QUOTES, "'")
+                    .replace(DOUBLE_QUOTES, "\"")
+                    .replace(BACKTICKS, "`"));
         }
 
         return parts;
@@ -39,16 +51,18 @@ class TableIdParser {
     private static class TableIdTokenizer implements Tokenizer {
 
         private final String identifier;
+        private final TableIdPredicates predicates;
 
-        public TableIdTokenizer(String identifier) {
+        public TableIdTokenizer(String identifier, TableIdPredicates predicates) {
             this.identifier = identifier;
+            this.predicates = predicates;
         }
 
         @Override
         public void tokenize(CharacterStream input, Tokens tokens) throws ParsingException {
             ParsingState previousState = null;
             ParsingState currentState = ParsingState.INITIAL;
-            ParsingContext parsingContext = new ParsingContext(input, tokens);
+            ParsingContext parsingContext = new ParsingContext(input, tokens, predicates);
 
             currentState.onEntry(parsingContext);
 
@@ -82,9 +96,12 @@ class TableIdParser {
                 else if (c == TableIdParser.SEPARATOR) {
                     throw new IllegalArgumentException("Unexpected input: " + c);
                 }
-                else if (isQuotingChar(c)) {
+                else if (context.predicates.isQuotingChar(c)) {
                     context.quotingChar = c;
                     return IN_QUOTED_IDENTIFIER;
+                }
+                else if (context.predicates.isStartDelimiter(c)) {
+                    return IN_DELIMITED_IDENTIFIER;
                 }
                 else {
                     return IN_IDENTIFIER;
@@ -149,9 +166,12 @@ class TableIdParser {
                 else if (c == TableIdParser.SEPARATOR) {
                     throw new IllegalArgumentException("Unexpected input: " + c);
                 }
-                else if (isQuotingChar(c)) {
+                else if (context.predicates.isQuotingChar(c)) {
                     context.quotingChar = c;
                     return IN_QUOTED_IDENTIFIER;
+                }
+                else if (context.predicates.isStartDelimiter(c)) {
+                    return IN_DELIMITED_IDENTIFIER;
                 }
                 else {
                     return IN_IDENTIFIER;
@@ -194,6 +214,32 @@ class TableIdParser {
                         context.startOfLastToken + 1,
                         context.lastIdentifierEnd);
             }
+        },
+
+        IN_DELIMITED_IDENTIFIER {
+
+            @Override
+            ParsingState handleCharacter(char c, ParsingContext context) {
+                if (context.predicates.isEndDelimiter(c)) {
+                    context.lastIdentifierEnd = context.input.index();
+                    return BEFORE_SEPARATOR;
+                }
+
+                return IN_DELIMITED_IDENTIFIER;
+            }
+
+            @Override
+            void doOnEntry(ParsingContext context) {
+                context.startOfLastToken = context.input.index();
+            }
+
+            @Override
+            void doOnExit(ParsingContext context) {
+                context.tokens.addToken(
+                        context.input.position(context.startOfLastToken + 1),
+                        context.startOfLastToken + 1,
+                        context.lastIdentifierEnd);
+            }
         };
 
         abstract ParsingState handleCharacter(char c, ParsingContext context);
@@ -211,24 +257,22 @@ class TableIdParser {
 
         void doOnExit(ParsingContext context) {
         }
-
-        private static boolean isQuotingChar(char c) {
-            return c == '"' || c == '\'' || c == '`';
-        }
     }
 
     private static class ParsingContext {
         final CharacterStream input;
         final Tokens tokens;
+        final TableIdPredicates predicates;
 
         int startOfLastToken;
         int lastIdentifierEnd;
         boolean escaped;
         char quotingChar;
 
-        public ParsingContext(CharacterStream input, Tokens tokens) {
+        public ParsingContext(CharacterStream input, Tokens tokens, TableIdPredicates predicates) {
             this.input = input;
             this.tokens = tokens;
+            this.predicates = predicates;
         }
     }
 }

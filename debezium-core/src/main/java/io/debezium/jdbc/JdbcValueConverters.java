@@ -706,6 +706,8 @@ public class JdbcValueConverters implements ValueConverterProvider {
         switch (mode) {
             case BASE64:
                 return convertBinaryToBase64(column, fieldDefn, data);
+            case BASE64_URL_SAFE:
+                return convertBinaryToBase64UrlSafe(column, fieldDefn, data);
             case HEX:
                 return convertBinaryToHex(column, fieldDefn, data);
             case BYTES:
@@ -763,7 +765,37 @@ public class JdbcValueConverters implements ValueConverterProvider {
                 r.deliver(new String(base64Encoder.encode(toByteArray((char[]) data)), StandardCharsets.UTF_8));
             }
             else if (data instanceof byte[]) {
-                r.deliver(new String(base64Encoder.encode((byte[]) data), StandardCharsets.UTF_8));
+                r.deliver(new String(base64Encoder.encode(normalizeBinaryData(column, (byte[]) data)), StandardCharsets.UTF_8));
+            }
+            else {
+                // An unexpected value
+                r.deliver(unexpectedBinary(data, fieldDefn));
+            }
+        });
+    }
+
+    /**
+     * Converts a value object for an expected JDBC type of {@link Types#BLOB}, {@link Types#BINARY},
+     * {@link Types#VARBINARY}, {@link Types#LONGVARBINARY}.
+     *
+     * @param column the column definition describing the {@code data} value; never null
+     * @param fieldDefn the field definition; never null
+     * @param data the data object to be converted into a {@link Date Kafka Connect date} type; never null
+     * @return the converted value, or null if the conversion could not be made and the column allows nulls
+     * @throws IllegalArgumentException if the value could not be converted but the column does not allow nulls
+     */
+    protected Object convertBinaryToBase64UrlSafe(Column column, Field fieldDefn, Object data) {
+        return convertValue(column, fieldDefn, data, "", (r) -> {
+            Encoder base64UrlSafeEncoder = Base64.getUrlEncoder();
+
+            if (data instanceof String) {
+                r.deliver(new String(base64UrlSafeEncoder.encode(((String) data).getBytes(StandardCharsets.UTF_8))));
+            }
+            else if (data instanceof char[]) {
+                r.deliver(new String(base64UrlSafeEncoder.encode(toByteArray((char[]) data)), StandardCharsets.UTF_8));
+            }
+            else if (data instanceof byte[]) {
+                r.deliver(new String(base64UrlSafeEncoder.encode(normalizeBinaryData(column, (byte[]) data)), StandardCharsets.UTF_8));
             }
             else {
                 // An unexpected value
@@ -792,7 +824,7 @@ public class JdbcValueConverters implements ValueConverterProvider {
                 r.deliver(HexConverter.convertToHexString(toByteArray((char[]) data)));
             }
             else if (data instanceof byte[]) {
-                r.deliver(HexConverter.convertToHexString((byte[]) data));
+                r.deliver(HexConverter.convertToHexString(normalizeBinaryData(column, (byte[]) data)));
             }
             else {
                 // An unexpected value
@@ -808,7 +840,16 @@ public class JdbcValueConverters implements ValueConverterProvider {
      */
     protected ByteBuffer toByteBuffer(Column column, byte[] data) {
         // Kafka Connect would support raw byte arrays, too, but byte buffers are recommended
-        return ByteBuffer.wrap(data);
+        return ByteBuffer.wrap(normalizeBinaryData(column, data));
+    }
+
+    /**
+     * Converts the given byte array value into a normalized byte array. Specific connectors
+     * can perform value adjustments based on the column definition, e.g. right-pad with 0x00 bytes in case of
+     * fixed length BINARY in MySQL.
+     */
+    protected byte[] normalizeBinaryData(Column column, byte[] data) {
+        return data;
     }
 
     /**

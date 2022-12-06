@@ -3,8 +3,8 @@
     <parent>
         <groupId>io.debezium</groupId>
         <artifactId>debezium-parent</artifactId>
-        <version>1.6.0-SNAPSHOT</version>
-	<relativePath>../debezium-parent/pom.xml</relativePath>
+        <version>2.1.0-SNAPSHOT</version>
+        <relativePath>../debezium-parent/pom.xml</relativePath>
     </parent>
     <modelVersion>4.0.0</modelVersion>
     <artifactId>debezium-connector-oracle</artifactId>
@@ -15,6 +15,14 @@
         <dependency>
             <groupId>io.debezium</groupId>
             <artifactId>debezium-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.debezium</groupId>
+            <artifactId>debezium-storage-kafka</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.debezium</groupId>
+            <artifactId>debezium-storage-file</artifactId>
         </dependency>
         <dependency>
             <groupId>io.debezium</groupId>
@@ -36,12 +44,20 @@
             <scope>provided</scope>
         </dependency>
         <dependency>
-              <groupId>org.antlr</groupId>
-              <artifactId>antlr4-runtime</artifactId>
+            <groupId>org.antlr</groupId>
+            <artifactId>antlr4-runtime</artifactId>
         </dependency>
         <dependency>
-            <groupId>com.github.jsqlparser</groupId>
-            <artifactId>jsqlparser</artifactId>
+            <groupId>org.infinispan</groupId>
+            <artifactId>infinispan-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.infinispan</groupId>
+            <artifactId>infinispan-client-hotrod</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.infinispan.protostream</groupId>
+            <artifactId>protostream-processor</artifactId>
         </dependency>
 
         <!-- Testing -->
@@ -63,13 +79,8 @@
             <scope>test</scope>
         </dependency>
         <dependency>
-            <groupId>org.slf4j</groupId>
-            <artifactId>slf4j-log4j12</artifactId>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>log4j</groupId>
-            <artifactId>log4j</artifactId>
+            <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-classic</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>
@@ -78,8 +89,8 @@
             <scope>test</scope>
         </dependency>
         <dependency>
-            <groupId>org.easytesting</groupId>
-            <artifactId>fest-assert</artifactId>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>
@@ -99,10 +110,47 @@
             <artifactId>kafka-connect-avro-converter</artifactId>
             <scope>test</scope>
         </dependency>
+
+        <!-- Used for unit testing with Kafka -->
+        <dependency>
+            <groupId>org.apache.kafka</groupId>
+            <artifactId>kafka_${version.kafka.scala}</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <properties>
         <adapter.name>logminer</adapter.name>
+        <log.mining.buffer.type.name>memory</log.mining.buffer.type.name>
+        <version.oracle.server>19.3.0</version.oracle.server>
+
+        <!--
+        By default, the Oracle module's tests are not executed but only compiled.
+        In order to execute tests, the profile "oracle-tests" must be explicitly toggled.
+        -->
+        <skipITs>true</skipITs>
+
+        <!--
+        Specify properties that will be used for setting up the integration tests' Docker container.
+        Note that the `dockerhost.ip` property is computed from the IP addrses of DOCKER_HOST, which will
+        work on all platforms.  We'll set some of these system properties during integration testing.
+        -->
+
+        <!-- This should be kept in sync with the infinispan dependencies used -->
+        <version.infinispan.server>14.0.2.Final</version.infinispan.server>
+        <oracle.infinispan.host>${docker.host.address}</oracle.infinispan.host>
+        <oracle.infinispan.image>infinispan/server:${version.infinispan.server}</oracle.infinispan.image>
+        <oracle.infinispan.port>11222</oracle.infinispan.port>
+        <oracle.infinispan.user>admin</oracle.infinispan.user>
+        <oracle.infinispan.password>admin</oracle.infinispan.password>
+        <docker.skip>false</docker.skip>
+        <docker.showLogs>true</docker.showLogs>
+        <docker.dbs>quay.io/rh_integration/dbz-oracle:${version.oracle.server}</docker.dbs>
+        <docker.filter>${docker.dbs}</docker.filter>
+        <connector.assembly.ref>connector-distribution</connector.assembly.ref>
+        <!-- Apicurion container properties -->
+        <apicurio.port>8080</apicurio.port>
+        <apicurio.init.timeout>60000</apicurio.init.timeout> <!-- 60 seconds -->
     </properties>
 
     <build>
@@ -131,12 +179,29 @@
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <!--
+                    By default we exclude the Xstream sources.
+                    To enable Xstream support, use the "oracle-xstream" profile
+                     -->
+                    <excludes>
+                        <exclude>**/io/debezium/connector/oracle/xstream/**</exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
                     <systemProperties combine.children="append">
                         <property>
                             <name>database.connection.adapter</name>
                             <value>${adapter.name}</value>
+                        </property>
+                        <property>
+                            <name>log.mining.buffer.type</name>
+                            <value>${log.mining.buffer.type.name}</value>
                         </property>
                     </systemProperties>
                 </configuration>
@@ -165,8 +230,23 @@
                     <argLine>-Djava.library.path=${instantclient.dir} -Ddebezium.embedded.shutdown.pause.before.interrupt.ms=20000</argLine>
                     <systemPropertyVariables>
                         <database.connection.adapter>${adapter.name}</database.connection.adapter>
+                        <log.mining.buffer.type>${log.mining.buffer.type.name}</log.mining.buffer.type>
                     </systemPropertyVariables>
                 </configuration>
+            </plugin>
+            <plugin>
+                <groupId>io.debezium</groupId>
+                <artifactId>debezium-schema-generator</artifactId>
+                <version>${project.version}</version>
+                <executions>
+                    <execution>
+                        <id>generate-connector-metadata</id>
+                        <goals>
+                            <goal>generate-api-spec</goal>
+                        </goals>
+                        <phase>prepare-package</phase>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>
@@ -175,10 +255,64 @@
     Define several useful profiles
     -->
     <profiles>
+        <!--
+        Profile: oracle-tests
+        This specifically enables the execution of all integration tests.
+        By default, integration tests are only compiled but are not executed.
+        -->
         <profile>
-            <id>xstream-dependency</id>
+            <id>oracle-tests</id>
             <activation>
-                <activeByDefault>true</activeByDefault>
+                <activeByDefault>false</activeByDefault>
+            </activation>
+            <properties>
+                <skipITs>false</skipITs>
+            </properties>
+        </profile>
+        <!--
+        Profile: oracle-xstream
+        This is a multi-faceted profile that controls several key points:
+            1. Adds the Oracle Instant Client & Xstream dependencies to the module
+            2. Includes the Xstream sources into the build, which are otherwise excluded
+            3. Enables the ability to execute the test suite for the Xstream adapter
+        -->
+        <profile>
+            <id>oracle-xstream</id>
+            <properties>
+                <!-- Point (3) enables the xstream adapter for tests -->
+                <adapter.name>xstream</adapter.name>
+            </properties>
+            <activation>
+                <activeByDefault>false</activeByDefault>
+            </activation>
+            <!-- Point (1) add the Xstream dependencies -->
+            <dependencies>
+                <dependency>
+                    <groupId>com.oracle.instantclient</groupId>
+                    <artifactId>xstreams</artifactId>
+                    <scope>provided</scope>
+                </dependency>
+            </dependencies>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-compiler-plugin</artifactId>
+                        <configuration combine.self="override">
+                            <!-- Point (2) add the Xstream sources back into the module -->
+                            <includes>
+                                <include>**</include>
+                            </includes>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <!-- Enables all sources, useful for IDE build or releases -->
+        <profile>
+            <id>oracle-all</id>
+            <activation>
+                <activeByDefault>false</activeByDefault>
             </activation>
             <dependencies>
                 <dependency>
@@ -187,6 +321,19 @@
                     <scope>provided</scope>
                 </dependency>
             </dependencies>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-compiler-plugin</artifactId>
+                        <configuration combine.self="override">
+                            <includes>
+                                <include>**</include>
+                            </includes>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
         </profile>
         <profile>
             <id>assembly</id>
@@ -204,63 +351,12 @@
                 <plugins>
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
-                        <artifactId>maven-assembly-plugin</artifactId>
-                        <dependencies>
-                            <dependency>
-                                <groupId>io.debezium</groupId>
-                                <artifactId>debezium-assembly-descriptors</artifactId>
-                                <version>${project.version}</version>
-                            </dependency>
-                        </dependencies>
-                        <executions>
-                            <execution>
-                                <id>default</id>
-                                <phase>package</phase>
-                                <goals>
-                                    <goal>single</goal>
-                                </goals>
-                                <configuration>
-                                    <finalName>${project.artifactId}-${project.version}</finalName>
-                                    <attach>true</attach>  <!-- we want attach & deploy these to Maven -->
-                                    <descriptorRefs>
-                                        <descriptorRef>connector-distribution</descriptorRef>
-                                    </descriptorRefs>
-                                    <tarLongFileMode>posix</tarLongFileMode>
-                                </configuration>
-                            </execution>
-                        </executions>
-                    </plugin>
-                </plugins>
-            </build>
-        </profile>
-        <profile>
-            <id>quick</id>
-            <activation>
-                <activeByDefault>false</activeByDefault>
-                <property>
-                    <name>quick</name>
-                </property>
-            </activation>
-            <properties>
-                <skipITs>true</skipITs>
-                <docker.skip>true</docker.skip>
-            </properties>
-        </profile>
-        <profile>
-            <!-- Allows CI to build Oracle without the xstream.jar dependency -->
-            <id>oracle-ci</id>
-            <activation>
-                <activeByDefault>false</activeByDefault>
-            </activation>
-            <build>
-                <plugins>
-                    <plugin>
-                        <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-compiler-plugin</artifactId>
                         <configuration combine.self="override">
-                            <excludes>
-                                <exclude>**/io/debezium/connector/oracle/xstream/**</exclude>
-                            </excludes>
+                            <!-- include xstream back into the module on assembly builds -->
+                            <includes>
+                                <include>**</include>
+                            </includes>
                         </configuration>
                     </plugin>
                     <plugin>
@@ -284,7 +380,7 @@
                                     <finalName>${project.artifactId}-${project.version}</finalName>
                                     <attach>true</attach>  <!-- we want attach & deploy these to Maven -->
                                     <descriptorRefs>
-                                        <descriptorRef>connector-distribution</descriptorRef>
+                                        <descriptorRef>${connector.assembly.ref}</descriptorRef>
                                     </descriptorRefs>
                                     <tarLongFileMode>posix</tarLongFileMode>
                                 </configuration>
@@ -295,17 +391,210 @@
             </build>
         </profile>
         <profile>
-            <id>xstream</id>
+            <id>quick</id>
+            <activation>
+                <activeByDefault>false</activeByDefault>
+                <property>
+                    <name>quick</name>
+                </property>
+            </activation>
             <properties>
-                <adapter.name>xstream</adapter.name>
+                <skipITs>true</skipITs>
+                <docker.skip>true</docker.skip>
             </properties>
-            <dependencies>
-                <dependency>
-                    <groupId>com.oracle.instantclient</groupId>
-                    <artifactId>xstreams</artifactId>
-                    <scope>provided</scope>
-                </dependency>
-            </dependencies>
+        </profile>
+        <profile>
+            <id>oracle-docker</id>
+            <activation>
+                <activeByDefault>false</activeByDefault>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>io.fabric8</groupId>
+                        <artifactId>docker-maven-plugin</artifactId>
+                        <configuration>
+                            <watchInterval>500</watchInterval>
+                            <logDate>default</logDate>
+                            <verbose>true</verbose>
+                            <!--autoPull>always</autoPull-->
+                            <images>
+                                <!-- A container for the data server replica set -->
+                                <image>
+                                    <name>quay.io/rh_integration/dbz-oracle:${version.oracle.server}</name>
+                                    <alias>oracle1</alias>
+                                    <run>
+                                        <namingStrategy>alias</namingStrategy>
+                                        <ports>
+                                            <port>1521:1521</port>
+                                        </ports>
+                                        <log>
+                                            <prefix>oracle1</prefix>
+                                            <enabled>true</enabled>
+                                            <color>yellow</color>
+                                        </log>
+                                        <wait>
+                                            <log>DONE: Executing user defined scripts</log>
+                                            <time>120000</time> <!-- 2 minutes max -->
+                                        </wait>
+                                    </run>
+                                    <external>
+                                        <type>properties</type>
+                                        <mode>override</mode>
+                                    </external>
+                                </image>
+                                <image>
+                                    <name>apicurio/apicurio-registry-mem:${version.apicurio}</name>
+                                    <run>
+                                        <namingStrategy>none</namingStrategy>
+                                        <ports>
+                                            <port>${apicurio.port}:8080</port>
+                                        </ports>
+                                        <log>
+                                            <prefix>apicurio</prefix>
+                                            <enabled>true</enabled>
+                                            <color>blue</color>
+                                        </log>
+                                        <wait>
+                                            <log>.*apicurio-registry-app.*started in.*</log>
+                                            <time>${apicurio.init.timeout}</time>
+                                        </wait>
+                                    </run>
+                                </image>
+                            </images>
+                        </configuration>
+                        <!--
+                        Connect this plugin to the maven lifecycle around the integration-test phase:
+                        start the container in pre-integration-test and stop it in post-integration-test.
+                        -->
+                        <executions>
+                            <execution>
+                                <id>start</id>
+                                <phase>pre-integration-test</phase>
+                                <goals>
+                                    <goal>build</goal>
+                                    <goal>start</goal>
+                                </goals>
+                            </execution>
+                            <execution>
+                                <id>stop</id>
+                                <phase>post-integration-test</phase>
+                                <goals>
+                                    <goal>stop</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <!-- This profile should be used for testing connector with Infinispan only -->
+        <profile>
+            <id>infinispan-buffer</id>
+            <activation>
+                <activeByDefault>false</activeByDefault>
+            </activation>
+            <properties>
+                <log.mining.buffer.type.name>infinispan_embedded</log.mining.buffer.type.name>
+            </properties>
+            <!-- todo: when using this profile, enforce oracle-xstream being mutually exclusive -->
+        </profile>
+        <profile>
+            <id>infinispan-buffer-remote</id>
+            <activation>
+                <activeByDefault>false</activeByDefault>
+            </activation>
+            <properties>
+                <log.mining.buffer.type.name>infinispan_remote</log.mining.buffer.type.name>
+            </properties>
+            <!-- todo: when using this profile, enforce oracle-xstream being mutually exclusive -->
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>io.fabric8</groupId>
+                        <artifactId>docker-maven-plugin</artifactId>
+                        <configuration>
+                            <watchInterval>500</watchInterval>
+                            <logDate>default</logDate>
+                            <verbose>true</verbose>
+                            <images>
+                                <image>
+                                    <!-- A docker image using Infinispan -->
+                                    <name>${oracle.infinispan.image}</name>
+                                    <run>
+                                        <namingStrategy>none</namingStrategy>
+                                        <env>
+                                            <USER>${oracle.infinispan.user}</USER>
+                                            <PASS>${oracle.infinispan.password}</PASS>
+                                        </env>
+                                        <ports>
+                                            <port>${oracle.infinispan.port}:11222</port>
+                                        </ports>
+                                        <log>
+                                            <prefix>infinispan</prefix>
+                                            <enabled>${docker.showLogs}</enabled>
+                                            <color>green</color>
+                                        </log>
+                                        <wait>
+                                            <time>60000</time> <!-- 60 seconds max -->
+                                            <log>Infinispan Server [0-9a-zA-z.]* started</log>
+                                        </wait>
+                                    </run>
+                                    <external>
+                                        <type>properties</type>
+                                        <mode>override</mode>
+                                    </external>
+                                </image>
+                            </images>
+                        </configuration>
+                        <!--
+                        Connect this plugin to the maven lifecycle around the integration-test phase:
+                        start the container in pre-integration-test and stop it in post-integration-test.
+                        -->
+                        <executions>
+                            <execution>
+                                <id>start</id>
+                                <phase>pre-integration-test</phase>
+                                <goals>
+                                    <goal>start</goal>
+                                </goals>
+                            </execution>
+                            <execution>
+                                <id>stop</id>
+                                <phase>post-integration-test</phase>
+                                <goals>
+                                    <goal>stop</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
+            <id>apicurio</id>
+            <activation>
+                <activeByDefault>false</activeByDefault>
+                <property>
+                    <name>apicurio</name>
+                </property>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <configuration>
+                            <systemPropertyVariables>
+                                <use.apicurio>true</use.apicurio>
+                            </systemPropertyVariables>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+            <properties>
+                <docker.filter>${docker.dbs},apicurio/apicurio-registry-mem:${version.apicurio}</docker.filter>
+            </properties>
         </profile>
     </profiles>
 </project>

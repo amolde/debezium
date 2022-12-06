@@ -30,7 +30,7 @@ import org.slf4j.LoggerFactory;
 
 import io.debezium.DebeziumException;
 import io.debezium.connector.SnapshotRecord;
-import io.debezium.connector.mysql.legacy.MySqlJdbcContext.DatabaseLocales;
+import io.debezium.connector.mysql.MySqlConnection.DatabaseLocales;
 import io.debezium.data.Envelope;
 import io.debezium.function.BlockingConsumer;
 import io.debezium.pipeline.EventDispatcher;
@@ -39,12 +39,11 @@ import io.debezium.relational.RelationalTableFilters;
 import io.debezium.relational.Table;
 import io.debezium.relational.TableId;
 import io.debezium.schema.SchemaChangeEvent;
-import io.debezium.schema.SchemaChangeEvent.SchemaChangeEventType;
 import io.debezium.util.Clock;
 import io.debezium.util.Collect;
 import io.debezium.util.Strings;
 
-public class MySqlSnapshotChangeEventSource extends RelationalSnapshotChangeEventSource<MySqlOffsetContext> {
+public class MySqlSnapshotChangeEventSource extends RelationalSnapshotChangeEventSource<MySqlPartition, MySqlOffsetContext> {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(MySqlSnapshotChangeEventSource.class);
 
@@ -60,7 +59,7 @@ public class MySqlSnapshotChangeEventSource extends RelationalSnapshotChangeEven
     private final BlockingConsumer<Function<SourceRecord, SourceRecord>> lastEventProcessor;
 
     public MySqlSnapshotChangeEventSource(MySqlConnectorConfig connectorConfig, MySqlConnection connection,
-                                          MySqlDatabaseSchema schema, EventDispatcher<TableId> dispatcher, Clock clock,
+                                          MySqlDatabaseSchema schema, EventDispatcher<MySqlPartition, TableId> dispatcher, Clock clock,
                                           MySqlSnapshotChangeEventSourceMetrics metrics,
                                           BlockingConsumer<Function<SourceRecord, SourceRecord>> lastEventProcessor) {
         super(connectorConfig, connection, schema, dispatcher, clock, metrics);
@@ -73,7 +72,7 @@ public class MySqlSnapshotChangeEventSource extends RelationalSnapshotChangeEven
     }
 
     @Override
-    protected SnapshottingTask getSnapshottingTask(MySqlOffsetContext previousOffset) {
+    protected SnapshottingTask getSnapshottingTask(MySqlPartition partition, MySqlOffsetContext previousOffset) {
         boolean snapshotSchema = true;
         boolean snapshotData = true;
 
@@ -99,16 +98,18 @@ public class MySqlSnapshotChangeEventSource extends RelationalSnapshotChangeEven
     }
 
     @Override
-    protected SnapshotContext<MySqlOffsetContext> prepare(ChangeEventSourceContext context) throws Exception {
-        return new MySqlSnapshotContext();
+    protected SnapshotContext<MySqlPartition, MySqlOffsetContext> prepare(MySqlPartition partition) throws Exception {
+        return new MySqlSnapshotContext(partition);
     }
 
     @Override
-    protected void connectionCreated(RelationalSnapshotContext<MySqlOffsetContext> snapshotContext) throws Exception {
+    protected void connectionCreated(RelationalSnapshotContext<MySqlPartition, MySqlOffsetContext> snapshotContext)
+            throws Exception {
     }
 
     @Override
-    protected Set<TableId> getAllTableIds(RelationalSnapshotContext<MySqlOffsetContext> ctx) throws Exception {
+    protected Set<TableId> getAllTableIds(RelationalSnapshotContext<MySqlPartition, MySqlOffsetContext> ctx)
+            throws Exception {
         // -------------------
         // READ DATABASE NAMES
         // -------------------
@@ -154,7 +155,8 @@ public class MySqlSnapshotChangeEventSource extends RelationalSnapshotChangeEven
     }
 
     @Override
-    protected void lockTablesForSchemaSnapshot(ChangeEventSourceContext sourceContext, RelationalSnapshotContext<MySqlOffsetContext> snapshotContext)
+    protected void lockTablesForSchemaSnapshot(ChangeEventSourceContext sourceContext,
+                                               RelationalSnapshotContext<MySqlPartition, MySqlOffsetContext> snapshotContext)
             throws SQLException, InterruptedException {
         // Set the transaction isolation level to REPEATABLE READ. This is the default, but the default can be changed
         // which is why we explicitly set it here.
@@ -191,13 +193,16 @@ public class MySqlSnapshotChangeEventSource extends RelationalSnapshotChangeEven
                 // Continue anyway, since RDS (among others) don't allow setting a global lock
                 assert !isGloballyLocked();
             }
-            // FLUSH TABLES resets TX and isolation level
-            connection.executeWithoutCommitting("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+            if (connectorConfig.getSnapshotLockingMode().flushResetsIsolationLevel()) {
+                // FLUSH TABLES resets TX and isolation level
+                connection.executeWithoutCommitting("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+            }
         }
     }
 
     @Override
-    protected void releaseSchemaSnapshotLocks(RelationalSnapshotContext<MySqlOffsetContext> snapshotContext) throws SQLException {
+    protected void releaseSchemaSnapshotLocks(RelationalSnapshotContext<MySqlPartition, MySqlOffsetContext> snapshotContext)
+            throws SQLException {
         if (connectorConfig.getSnapshotLockingMode().usesMinimalLocking()) {
             if (isGloballyLocked()) {
                 globalUnlock();
@@ -214,7 +219,8 @@ public class MySqlSnapshotChangeEventSource extends RelationalSnapshotChangeEven
     }
 
     @Override
-    protected void releaseDataSnapshotLocks(RelationalSnapshotContext<MySqlOffsetContext> snapshotContext) throws Exception {
+    protected void releaseDataSnapshotLocks(RelationalSnapshotContext<MySqlPartition, MySqlOffsetContext> snapshotContext)
+            throws Exception {
         if (isGloballyLocked()) {
             globalUnlock();
         }
@@ -237,12 +243,7 @@ public class MySqlSnapshotChangeEventSource extends RelationalSnapshotChangeEven
 
                     final TableId tableId = event.getTables().isEmpty() ? null : event.getTables().iterator().next().id();
                     snapshotContext.offset.event(tableId, getClock().currentTime());
-
-                    if (!i.hasNext()) {
-                        super.lastSnapshotRecord(snapshotContext);
-                    }
-
-                    dispatcher.dispatchSchemaChangeEvent(tableId, (receiver) -> receiver.schemaChangeEvent(event));
+                    dispatcher.dispatchSchemaChangeEvent(snapshotContext.partition, tableId, (receiver) -> receiver.schemaChangeEvent(event));
                 }
 
                 // Make schema available for snapshot source
@@ -252,7 +253,9 @@ public class MySqlSnapshotChangeEventSource extends RelationalSnapshotChangeEven
     }
 
     @Override
-    protected void determineSnapshotOffset(RelationalSnapshotContext<MySqlOffsetContext> ctx, MySqlOffsetContext previousOffset) throws Exception {
+    protected void determineSnapshotOffset(RelationalSnapshotContext<MySqlPartition, MySqlOffsetContext> ctx,
+                                           MySqlOffsetContext previousOffset)
+            throws Exception {
         if (!isGloballyLocked() && !isTablesLocked() && connectorConfig.getSnapshotLockingMode().usesLocking()) {
             return;
         }
@@ -289,13 +292,15 @@ public class MySqlSnapshotChangeEventSource extends RelationalSnapshotChangeEven
         tryStartingSnapshot(ctx);
     }
 
-    private void addSchemaEvent(RelationalSnapshotContext<MySqlOffsetContext> snapshotContext, String database, String ddl) {
-        schemaEvents.addAll(databaseSchema.parseSnapshotDdl(ddl, database, snapshotContext.offset,
-                clock.currentTimeAsInstant()));
+    private void addSchemaEvent(RelationalSnapshotContext<MySqlPartition, MySqlOffsetContext> snapshotContext,
+                                String database, String ddl) {
+        schemaEvents.addAll(databaseSchema.parseSnapshotDdl(snapshotContext.partition, ddl, database,
+                snapshotContext.offset, clock.currentTimeAsInstant()));
     }
 
     @Override
-    protected void readTableStructure(ChangeEventSourceContext sourceContext, RelationalSnapshotContext<MySqlOffsetContext> snapshotContext,
+    protected void readTableStructure(ChangeEventSourceContext sourceContext,
+                                      RelationalSnapshotContext<MySqlPartition, MySqlOffsetContext> snapshotContext,
                                       MySqlOffsetContext offsetContext)
             throws Exception {
         Set<TableId> capturedSchemaTables;
@@ -310,7 +315,7 @@ public class MySqlSnapshotChangeEventSource extends RelationalSnapshotChangeEven
         }
         if (databaseSchema.storeOnlyCapturedTables()) {
             capturedSchemaTables = snapshotContext.capturedTables;
-            LOGGER.info("Only monitored tables schema should be captured, capturing: {}", capturedSchemaTables);
+            LOGGER.info("Only captured tables schema should be captured, capturing: {}", capturedSchemaTables);
         }
         else {
             capturedSchemaTables = snapshotContext.capturedSchemaTables;
@@ -350,7 +355,8 @@ public class MySqlSnapshotChangeEventSource extends RelationalSnapshotChangeEven
         }
     }
 
-    void createSchemaEventsForTables(RelationalSnapshotContext<MySqlOffsetContext> snapshotContext, final Collection<TableId> tablesToRead, final boolean firstPhase)
+    void createSchemaEventsForTables(RelationalSnapshotContext<MySqlPartition, MySqlOffsetContext> snapshotContext,
+                                     final Collection<TableId> tablesToRead, final boolean firstPhase)
             throws SQLException {
         for (TableId tableId : tablesToRead) {
             if (firstPhase && delayedSchemaSnapshotTables.contains(tableId)) {
@@ -369,32 +375,29 @@ public class MySqlSnapshotChangeEventSource extends RelationalSnapshotChangeEven
     }
 
     @Override
-    protected SchemaChangeEvent getCreateTableEvent(RelationalSnapshotContext<MySqlOffsetContext> snapshotContext, Table table) throws SQLException {
-        return new SchemaChangeEvent(
-                snapshotContext.offset.getPartition(),
-                snapshotContext.offset.getOffset(),
-                snapshotContext.offset.getSourceInfo(),
-                snapshotContext.catalogName,
-                table.id().schema(),
-                null,
-                table,
-                SchemaChangeEventType.CREATE,
-                true);
+    protected SchemaChangeEvent getCreateTableEvent(RelationalSnapshotContext<MySqlPartition, MySqlOffsetContext> snapshotContext,
+                                                    Table table)
+            throws SQLException {
+        return SchemaChangeEvent.ofSnapshotCreate(snapshotContext.partition, snapshotContext.offset, snapshotContext.catalogName, table);
     }
 
     @Override
-    protected void complete(SnapshotContext<MySqlOffsetContext> snapshotContext) {
+    protected void complete(SnapshotContext<MySqlPartition, MySqlOffsetContext> snapshotContext) {
     }
 
     /**
-     * Generate a valid sqlserver query string for the specified table
+     * Generate a valid MySQL query string for the specified table and columns
      *
      * @param tableId the table to generate a query for
      * @return a valid query string
      */
     @Override
-    protected Optional<String> getSnapshotSelect(RelationalSnapshotContext<MySqlOffsetContext> snapshotContext, TableId tableId) {
-        return Optional.of(String.format("SELECT * FROM `%s`.`%s`", tableId.catalog(), tableId.table()));
+    protected Optional<String> getSnapshotSelect(RelationalSnapshotContext<MySqlPartition, MySqlOffsetContext> snapshotContext,
+                                                 TableId tableId, List<String> columns) {
+        String snapshotSelectColumns = columns.stream()
+                .collect(Collectors.joining(", "));
+
+        return Optional.of(String.format("SELECT %s FROM `%s`.`%s`", snapshotSelectColumns, tableId.catalog(), tableId.table()));
     }
 
     private boolean isGloballyLocked() {
@@ -420,7 +423,8 @@ public class MySqlSnapshotChangeEventSource extends RelationalSnapshotChangeEven
         globalLockAcquiredAt = -1;
     }
 
-    private void tableLock(RelationalSnapshotContext<MySqlOffsetContext> snapshotContext) throws SQLException {
+    private void tableLock(RelationalSnapshotContext<MySqlPartition, MySqlOffsetContext> snapshotContext)
+            throws SQLException {
         // ------------------------------------
         // LOCK TABLES and READ BINLOG POSITION
         // ------------------------------------
@@ -503,16 +507,16 @@ public class MySqlSnapshotChangeEventSource extends RelationalSnapshotChangeEven
     /**
      * Mutable context which is populated in the course of snapshotting.
      */
-    private static class MySqlSnapshotContext extends RelationalSnapshotContext<MySqlOffsetContext> {
+    private static class MySqlSnapshotContext extends RelationalSnapshotContext<MySqlPartition, MySqlOffsetContext> {
 
-        public MySqlSnapshotContext() throws SQLException {
-            super("");
+        public MySqlSnapshotContext(MySqlPartition partition) throws SQLException {
+            super(partition, "");
         }
     }
 
     @Override
     protected void createSchemaChangeEventsForTables(ChangeEventSourceContext sourceContext,
-                                                     RelationalSnapshotContext<MySqlOffsetContext> snapshotContext,
+                                                     RelationalSnapshotContext<MySqlPartition, MySqlOffsetContext> snapshotContext,
                                                      SnapshottingTask snapshottingTask)
             throws Exception {
         tryStartingSnapshot(snapshotContext);
@@ -531,23 +535,11 @@ public class MySqlSnapshotChangeEventSource extends RelationalSnapshotChangeEven
 
             final TableId tableId = event.getTables().isEmpty() ? null : event.getTables().iterator().next().id();
             snapshotContext.offset.event(tableId, getClock().currentTime());
-
-            // If data are not snapshotted then the last schema change must set last snapshot flag
-            if (!snapshottingTask.snapshotData() && !i.hasNext()) {
-                lastSnapshotRecord(snapshotContext);
-            }
-            dispatcher.dispatchSchemaChangeEvent(tableId, (receiver) -> receiver.schemaChangeEvent(event));
+            dispatcher.dispatchSchemaChangeEvent(snapshotContext.partition, tableId, (receiver) -> receiver.schemaChangeEvent(event));
         }
 
         // Make schema available for snapshot source
         databaseSchema.tableIds().forEach(x -> snapshotContext.tables.overwriteTable(databaseSchema.tableFor(x)));
-    }
-
-    @Override
-    protected void lastSnapshotRecord(RelationalSnapshotContext<MySqlOffsetContext> snapshotContext) {
-        if (delayedSchemaSnapshotTables.isEmpty()) {
-            super.lastSnapshotRecord(snapshotContext);
-        }
     }
 
     @Override

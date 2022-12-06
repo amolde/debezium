@@ -1,10 +1,14 @@
+The *MBean* is `debezium.{mbean-name}:type=connector-metrics,context=schema-history,server=_<{context}.server.name>_`.
+
+The following table lists the schema history metrics that are available.
+
 [cols="45%a,25%a,30%a",options="header"]
 |===
 |Attributes |Type |Description
 
 |[[connectors-shist-metric-status_{context}]]<<connectors-shist-metric-status_{context}, `Status`>>
 |`string`
-|One of `STOPPED`, `RECOVERING` (recovering history from the storage), `RUNNING` describing the state of the database history.
+|One of `STOPPED`, `RECOVERING` (recovering history from the storage), `RUNNING` describing the state of the database schema history.
 
 |[[connectors-shist-metric-recoverystarttime_{context}]]<<connectors-shist-metric-recoverystarttime_{context}, `RecoveryStartTime`>>
 |`long`

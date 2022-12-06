@@ -22,10 +22,17 @@ public class PubSubTestConfigSource extends TestConfigSource {
         pubsubTest.put("debezium.source." + StandaloneConfig.OFFSET_STORAGE_FILE_FILENAME_CONFIG,
                 OFFSET_STORE_PATH.toAbsolutePath().toString());
         pubsubTest.put("debezium.source.offset.flush.interval.ms", "0");
-        pubsubTest.put("debezium.source.database.server.name", "testc");
+        pubsubTest.put("debezium.source.topic.prefix", "testc");
         pubsubTest.put("debezium.source.schema.include.list", "inventory");
         pubsubTest.put("debezium.source.table.include.list", "inventory.customers");
 
         config = pubsubTest;
+    }
+
+    @Override
+    public int getOrdinal() {
+        // Configuration property precedence is based on ordinal values and since we override the
+        // properties in TestConfigSource, we should give this a higher priority.
+        return super.getOrdinal() + 1;
     }
 }

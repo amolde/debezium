@@ -8,6 +8,7 @@ package io.debezium.connector.postgresql.connection;
 
 import java.nio.ByteBuffer;
 import java.sql.SQLException;
+import java.util.function.Function;
 
 import org.postgresql.replication.fluent.logical.ChainedLogicalStreamBuilder;
 
@@ -34,30 +35,12 @@ public interface MessageDecoder {
 
     /**
      * Allows MessageDecoder to configure options with which the replication stream is started.
-     * The messages CAN contain type metadata.
      * See PostgreSQL command START_REPLICATION SLOT for more details.
      *
      * @param builder
      * @return the builder instance
      */
-    ChainedLogicalStreamBuilder optionsWithMetadata(ChainedLogicalStreamBuilder builder);
-
-    /**
-     * Allows MessageDecoder to configure options with which the replication stream is started.
-     * The messages MUST NOT contain type metadata.
-     * See PostgreSQL command START_REPLICATION SLOT for more details.
-     *
-     * @param builder
-     * @return the builder instance
-     */
-    ChainedLogicalStreamBuilder optionsWithoutMetadata(ChainedLogicalStreamBuilder builder);
-
-    /**
-     * Signals to this decoder whether messages contain type metadata or not.
-     */
-    // TODO DBZ-508 Remove once we only support LD plug-ins always sending the metadata
-    default void setContainsMetadata(boolean flag) {
-    }
+    ChainedLogicalStreamBuilder defaultOptions(ChainedLogicalStreamBuilder builder, Function<Integer, Boolean> hasMinimumServerVersion);
 
     /**
      * A callback into the decoder allowing it to decide whether the supplied message should be processed

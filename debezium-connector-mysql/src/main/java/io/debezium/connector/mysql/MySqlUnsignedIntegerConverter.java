@@ -17,7 +17,7 @@ import java.math.BigDecimal;
 public class MySqlUnsignedIntegerConverter {
     /**
      * Maximum values for Unsigned Integer Types. Needed in order to calculate actual value of an Unsigned Integer Types from binlog value.
-     * Reference to {@link https://dev.mysql.com/doc/refman/5.7/en/integer-types.html}
+     * Reference to {@see https://dev.mysql.com/doc/refman/5.7/en/integer-types.html}
      */
     private static final short TINYINT_MAX_VALUE = 255;
     private static final int SMALLINT_MAX_VALUE = 65535;
@@ -71,7 +71,7 @@ public class MySqlUnsignedIntegerConverter {
 
     /**
      * Convert original value insertion of type 'MEDIUMINT' into the correct MEDIUMINT UNSIGNED representation
-     * Note: Unsigned MEDIUMINT (32-bit) is represented in 'Integer' 32-bit data type since the MAX value of Unsigned MEDIUMINT 16777215 < Max value of Integer 2147483647
+     * Note: Unsigned MEDIUMINT (24-bit) is represented in 'Integer' 32-bit data type since the MAX value of Unsigned MEDIUMINT 16777215 < Max value of Integer 2147483647
      *
      * @param originalNumber {@link Integer} the original insertion value
      * @return {@link Integer} the correct representation of the original insertion value
@@ -103,7 +103,7 @@ public class MySqlUnsignedIntegerConverter {
 
     /**
      * Convert original value insertion of type 'BIGINT' into the correct BIGINT UNSIGNED representation
-     * Note: Unsigned BIGINT (16-bit) is represented in 'BigDecimal' data type. Reference: https://kafka.apache.org/0102/javadoc/org/apache/kafka/connect/data/Schema.Type.html
+     * Note: Unsigned BIGINT (64-bit) is represented in 'BigDecimal' data type. Reference: https://kafka.apache.org/0102/javadoc/org/apache/kafka/connect/data/Schema.Type.html
      *
      * @param originalNumber {@link BigDecimal} the original insertion value
      * @return {@link BigDecimal} the correct representation of the original insertion value

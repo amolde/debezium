@@ -5,7 +5,7 @@
  */
 package io.debezium.testing.testcontainers;
 
-import static org.fest.assertions.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
@@ -25,9 +26,9 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
-import org.junit.AfterClass;
-import org.junit.BeforeClass;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
 import org.rnorth.ducttape.unreliables.Unreliables;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -36,7 +37,6 @@ import org.testcontainers.containers.Network;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.containers.output.Slf4jLogConsumer;
 import org.testcontainers.lifecycle.Startables;
-import org.testcontainers.shaded.com.google.common.collect.ImmutableMap;
 
 import com.jayway.jsonpath.JsonPath;
 
@@ -60,14 +60,14 @@ public class ApicurioRegistryTest {
             .withNetwork(network)
             .withNetworkAliases("postgres");
 
-    public static DebeziumContainer debeziumContainer = DebeziumContainer.latestStable()
+    public static DebeziumContainer debeziumContainer = DebeziumContainer.nightly()
             .withNetwork(network)
             .withKafka(kafkaContainer)
             .withLogConsumer(new Slf4jLogConsumer(LOGGER))
             .enableApicurioConverters()
             .dependsOn(kafkaContainer);
 
-    @BeforeClass
+    @BeforeAll
     public static void startContainers() {
         Startables.deepStart(Stream.of(
                 apicurioContainer, kafkaContainer, postgresContainer, debeziumContainer)).join();
@@ -127,7 +127,8 @@ public class ApicurioRegistryTest {
             statement.execute("insert into todo.Todo values (1, 'Be Awesome')");
 
             debeziumContainer.registerConnector("my-connector-avro", getConfiguration(
-                    2, "io.apicurio.registry.utils.converter.AvroConverter"));
+                    2, "io.apicurio.registry.utils.converter.AvroConverter",
+                    "schema.name.adjustment.mode", "avro"));
 
             consumer.subscribe(Arrays.asList("dbserver2.todo.todo"));
 
@@ -158,7 +159,7 @@ public class ApicurioRegistryTest {
 
             // host, database, user etc. are obtained from the container
             final ConnectorConfiguration config = ConnectorConfiguration.forJdbcContainer(postgresContainer)
-                    .with("database.server.name", "dbserver" + id)
+                    .with("topic.prefix", "dbserver" + id)
                     .with("slot.name", "debezium_" + id)
                     .with("key.converter", "org.apache.kafka.connect.json.JsonConverter")
                     .with("value.converter", "io.debezium.converters.CloudEventsConverter")
@@ -194,7 +195,7 @@ public class ApicurioRegistryTest {
 
     private KafkaConsumer<String, String> getConsumerString(KafkaContainer kafkaContainer) {
         return new KafkaConsumer<>(
-                ImmutableMap.of(
+                Map.of(
                         ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, kafkaContainer.getBootstrapServers(),
                         ConsumerConfig.GROUP_ID_CONFIG, "tc-" + UUID.randomUUID(),
                         ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest"),
@@ -204,7 +205,7 @@ public class ApicurioRegistryTest {
 
     private KafkaConsumer<byte[], byte[]> getConsumerBytes(KafkaContainer kafkaContainer) {
         return new KafkaConsumer<>(
-                ImmutableMap.of(
+                Map.of(
                         ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, kafkaContainer.getBootstrapServers(),
                         ConsumerConfig.GROUP_ID_CONFIG, "tc-" + UUID.randomUUID(),
                         ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest"),
@@ -231,7 +232,7 @@ public class ApicurioRegistryTest {
 
         // host, database, user etc. are obtained from the container
         final ConnectorConfiguration config = ConnectorConfiguration.forJdbcContainer(postgresContainer)
-                .with("database.server.name", "dbserver" + id)
+                .with("topic.prefix", "dbserver" + id)
                 .with("slot.name", "debezium_" + id)
                 .with("key.converter", converter)
                 .with("key.converter.apicurio.registry.url", apicurioUrl)
@@ -257,7 +258,7 @@ public class ApicurioRegistryTest {
         return apicurioUrl;
     }
 
-    @AfterClass
+    @AfterAll
     public static void stopContainers() {
         try {
             if (postgresContainer != null) {

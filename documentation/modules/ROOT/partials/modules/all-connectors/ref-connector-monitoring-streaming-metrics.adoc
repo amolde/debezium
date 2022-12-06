@@ -1,3 +1,5 @@
+The following table lists the streaming metrics that are available.
+
 [cols="45%a,25%a,30%a",options="header"]
 |===
 |Attributes |Type |Description
@@ -12,16 +14,23 @@
 
 |[[connectors-strm-metric-totalnumberofeventsseen_{context}]]<<connectors-strm-metric-totalnumberofeventsseen_{context}, `TotalNumberOfEventsSeen`>>
 |`long`
-|The total number of events that this connector has seen since last started or reset.
+|The total number of events that this connector has seen since the last start or metrics reset.
+
+|[[connectors-strm-metric-totalnumberofcreateeventsseen_{context}]]<<connectors-strm-metric-totalnumberofcreateeventsseen_{context}, `TotalNumberOfCreateEventsSeen`>>
+|`long`
+|The total number of create events that this connector has seen since the last start or metrics reset.
+
+|[[connectors-strm-metric-totalnumberofupdateeventsseen_{context}]]<<connectors-strm-metric-totalnumberofupdateeventsseen_{context}, `TotalNumberOfUpdateEventsSeen`>>
+|`long`
+|The total number of update events that this connector has seen since the last start or metrics reset.
+
+|[[connectors-strm-metric-totalnumberofdeleteeventsseen_{context}]]<<connectors-strm-metric-totalnumberofdeleteeventsseen_{context}, `TotalNumberOfDeleteEventsSeen`>>
+|`long`
+|The total number of delete events that this connector has seen since the last start or metrics reset.
 
 |[[connectors-strm-metric-numberofeventsfiltered_{context}]]<<connectors-strm-metric-numberofeventsfiltered_{context}, `NumberOfEventsFiltered`>>
 |`long`
 |The number of events that have been filtered by include/exclude list filtering rules configured on the connector.
-
-|[[connectors-strm-metric-monitoredtables_{context}]]<<connectors-strm-metric-monitoredtables_{context}, `MonitoredTables`>> +
-_Deprecated and scheduled for removal in a future release; use the 'CapturedTables' metric instead_
-|`string[]`
-|The list of tables that are monitored by the connector.
 
 |[[connectors-strm-metric-capturedtables_{context}]]<<connectors-strm-metric-capturedtables_{context}, `CapturedTables`>>
 |`string[]`
@@ -58,10 +67,10 @@ The values will incoporate any differences between the clocks on the machines wh
 
 |[[connectors-strm-metric-maxqueuesizeinbytes_{context}]]<<connectors-strm-metric-maxqueuesizeinbytes_{context}, `MaxQueueSizeInBytes`>>
 |`long`
-|The maximum buffer of the queue in bytes.
+|The maximum buffer of the queue in bytes. This metric is available if xref:{context}-property-max-queue-size-in-bytes[`max.queue.size.in.bytes`] is set to a positive long value.
 
 |[[connectors-strm-metric-currentqueuesizeinbytes_{context}]]<<connectors-strm-metric-currentqueuesizeinbytes_{context}, `CurrentQueueSizeInBytes`>>
 |`long`
-|The current data of records in the queue in bytes.
+|The current volume, in bytes, of records in the queue.
 
 |===

@@ -26,8 +26,8 @@ import io.debezium.text.ParsingException;
  */
 public abstract class AbstractDdlParser implements DdlParser {
 
-    private final String terminator;
     protected final boolean skipViews;
+    protected final boolean skipComments;
     protected DdlChanges ddlChanges;
     protected SystemVariables systemVariables;
 
@@ -35,24 +35,15 @@ public abstract class AbstractDdlParser implements DdlParser {
     private String currentSchema = null;
 
     /**
-     * Create a new parser that uses the supplied {@link DataTypeParser}, but that does not include view definitions.
+     * Create a new parser.
      *
-     * @param terminator the terminator character sequence; may be null if the default terminator ({@code ;}) should be used
-     */
-    public AbstractDdlParser(String terminator) {
-        this(terminator, false);
-    }
-
-    /**
-     * Create a new parser that uses the supplied {@link DataTypeParser}.
-     *
-     * @param terminator   the terminator character sequence; may be null if the default terminator ({@code ;}) should be used
      * @param includeViews {@code true} if view definitions should be included, or {@code false} if they should be skipped
+     * @param includeComments {@code true} if table and column's comment definitions should be included, or {@code false} if they should be skipped
      */
-    public AbstractDdlParser(String terminator, boolean includeViews) {
-        this.terminator = terminator != null ? terminator : ";";
+    public AbstractDdlParser(boolean includeViews, boolean includeComments) {
         this.skipViews = !includeViews;
-        this.ddlChanges = new DdlChanges(terminator);
+        this.skipComments = !includeComments;
+        this.ddlChanges = new DdlChanges();
         this.systemVariables = createNewSystemVariablesInstance();
     }
 
@@ -66,11 +57,6 @@ public abstract class AbstractDdlParser implements DdlParser {
     @Override
     public void setCurrentDatabase(String databaseName) {
         this.currentSchema = databaseName;
-    }
-
-    @Override
-    public final String terminator() {
-        return terminator;
     }
 
     @Override

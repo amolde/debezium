@@ -30,6 +30,7 @@ import io.debezium.embedded.EmbeddedEngine;
 import io.debezium.heartbeat.DatabaseHeartbeatImpl;
 import io.debezium.heartbeat.Heartbeat;
 import io.debezium.jdbc.JdbcConfiguration;
+import io.debezium.util.ContainerImageVersions;
 import io.debezium.util.Testing;
 
 /**
@@ -44,7 +45,7 @@ public class PostgresShutdownIT extends AbstractConnectorTest {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(PostgresShutdownIT.class);
 
-    private static final String POSTGRES_IMAGE = "debezium/example-postgres:1.3";
+    private static final String POSTGRES_IMAGE = ContainerImageVersions.getStableImage("debezium/example-postgres");
 
     private static final String INSERT_STMT = "INSERT INTO s1.a (aa) VALUES (1);" +
             "INSERT INTO s2.a (aa) VALUES (1);";
@@ -87,8 +88,6 @@ public class PostgresShutdownIT extends AbstractConnectorTest {
     @After
     public void tearDown() {
         stopConnector();
-        TestHelper.dropDefaultReplicationSlot();
-        TestHelper.dropPublication();
         postgresContainer.stop();
         System.setProperty("database.port", oldContainerPort);
     }
@@ -135,7 +134,7 @@ public class PostgresShutdownIT extends AbstractConnectorTest {
 
         logger.info("Execute Postgres shutdown...");
         Container.ExecResult result = postgresContainer
-                .execInContainer("su", "-", "postgres", "-c", "/usr/lib/postgresql/11/bin/pg_ctl -m fast -D /var/lib/postgresql/data stop");
+                .execInContainer("su", "-", "postgres", "-c", "/usr/lib/postgresql/*/bin/pg_ctl -m fast -D /var/lib/postgresql/data stop");
         logger.info(result.toString());
 
         logger.info("Waiting for Postgres to shut down...");

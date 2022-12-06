@@ -5,38 +5,33 @@
  */
 package io.debezium.connector.mongodb.transforms;
 
-import static org.fest.assertions.Assertions.assertThat;
-import static org.junit.Assert.fail;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import java.util.Collections;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.BiConsumer;
 
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.junit.After;
 import org.junit.Before;
 
+import io.debezium.config.CommonConnectorConfig;
 import io.debezium.config.Configuration;
-import io.debezium.connector.mongodb.ConnectionContext.MongoPrimary;
+import io.debezium.connector.mongodb.AbstractMongoConnectorIT;
 import io.debezium.connector.mongodb.MongoDbConnector;
 import io.debezium.connector.mongodb.MongoDbConnectorConfig;
 import io.debezium.connector.mongodb.MongoDbTaskContext;
-import io.debezium.connector.mongodb.ReplicaSet;
 import io.debezium.connector.mongodb.TestHelper;
 import io.debezium.data.Envelope;
-import io.debezium.embedded.AbstractConnectorTest;
 
 /**
  * Baseline for all integrations tests regarding MongoDB Update Operations
  *
  * @author Renato Mefi
  */
-public abstract class AbstractExtractNewDocumentStateTestIT extends AbstractConnectorTest {
+public abstract class AbstractExtractNewDocumentStateTestIT extends AbstractMongoConnectorIT {
 
     protected static final String DB_NAME = "transform_operations";
     protected static final String SERVER_NAME = "mongo";
-    private MongoDbTaskContext context;
 
     protected ExtractNewDocumentState<SourceRecord> transformation;
 
@@ -52,17 +47,14 @@ public abstract class AbstractExtractNewDocumentStateTestIT extends AbstractConn
         Configuration config = TestHelper.getConfiguration().edit()
                 .with(MongoDbConnectorConfig.POLL_INTERVAL_MS, 10)
                 .with(MongoDbConnectorConfig.COLLECTION_INCLUDE_LIST, DB_NAME + "." + this.getCollectionName())
-                .with(MongoDbConnectorConfig.LOGICAL_NAME, SERVER_NAME)
+                .with(CommonConnectorConfig.TOPIC_PREFIX, SERVER_NAME)
                 .build();
 
         beforeEach(config);
     }
 
     public void beforeEach(Configuration config) {
-        Debug.disable();
-        Print.disable();
-        stopConnector();
-        initializeConnectorTestFramework();
+        super.beforeEach();
 
         transformation = new ExtractNewDocumentState<>();
         transformation.configure(Collections.emptyMap());
@@ -79,14 +71,7 @@ public abstract class AbstractExtractNewDocumentStateTestIT extends AbstractConn
 
     @After
     public void afterEach() {
-        try {
-            stopConnector();
-        }
-        finally {
-            if (context != null) {
-                context.getConnectionContext().shutdown();
-            }
-        }
+        super.afterEach();
         transformation.close();
     }
 
@@ -98,7 +83,7 @@ public abstract class AbstractExtractNewDocumentStateTestIT extends AbstractConn
         Configuration config = TestHelper.getConfiguration().edit()
                 .with(MongoDbConnectorConfig.POLL_INTERVAL_MS, 10)
                 .with(MongoDbConnectorConfig.COLLECTION_INCLUDE_LIST, DB_NAME + "." + this.getCollectionName())
-                .with(MongoDbConnectorConfig.LOGICAL_NAME, SERVER_NAME)
+                .with(CommonConnectorConfig.TOPIC_PREFIX, SERVER_NAME)
                 .with(MongoDbConnectorConfig.TOMBSTONES_ON_DELETE, false)
                 .build();
 
@@ -127,21 +112,5 @@ public abstract class AbstractExtractNewDocumentStateTestIT extends AbstractConn
 
     protected SourceRecord getUpdateRecord() throws InterruptedException {
         return getRecordByOperation(Envelope.Operation.UPDATE);
-    }
-
-    protected MongoPrimary primary() {
-        ReplicaSet replicaSet = ReplicaSet.parse(context.getConnectionContext().hosts());
-        return context.getConnectionContext().primaryFor(
-                replicaSet, context.filters(), connectionErrorHandler(3));
-    }
-
-    private BiConsumer<String, Throwable> connectionErrorHandler(int numErrorsBeforeFailing) {
-        AtomicInteger attempts = new AtomicInteger();
-        return (desc, error) -> {
-            if (attempts.incrementAndGet() > numErrorsBeforeFailing) {
-                fail("Unable to connect to primary after " + numErrorsBeforeFailing + " errors trying to " + desc + ": " + error);
-            }
-            logger.error("Error while attempting to {}: {}", desc, error.getMessage(), error);
-        };
     }
 }

@@ -19,9 +19,11 @@ import java.sql.SQLException;
 import java.time.Duration;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 import org.awaitility.Awaitility;
@@ -30,13 +32,17 @@ import org.postgresql.jdbc.PgConnection;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.debezium.config.CommonConnectorConfig;
 import io.debezium.config.Configuration;
 import io.debezium.connector.postgresql.PostgresConnectorConfig.SecureConnectionMode;
 import io.debezium.connector.postgresql.connection.PostgresConnection;
 import io.debezium.connector.postgresql.connection.PostgresConnection.PostgresValueConverterBuilder;
+import io.debezium.connector.postgresql.connection.PostgresDefaultValueConverter;
 import io.debezium.connector.postgresql.connection.ReplicationConnection;
 import io.debezium.jdbc.JdbcConfiguration;
-import io.debezium.relational.RelationalDatabaseConnectorConfig;
+import io.debezium.schema.SchemaTopicNamingStrategy;
+import io.debezium.spi.topic.TopicNamingStrategy;
+import io.debezium.util.Throwables;
 
 /**
  * A utility for integration test cases to connect the PostgreSQL server running in the Docker container created by this module's
@@ -46,6 +52,7 @@ import io.debezium.relational.RelationalDatabaseConnectorConfig;
  */
 public final class TestHelper {
 
+    private static final String CONNECTION_TEST = "Debezium Test";
     protected static final String TEST_SERVER = "test_server";
     protected static final String TEST_DATABASE = "postgres";
     protected static final String PK_FIELD = "pk";
@@ -80,12 +87,14 @@ public final class TestHelper {
      *
      * @param slotName the name of the logical decoding slot
      * @param dropOnClose true if the slot should be dropped upon close
+     * @param config customized connector configuration
      * @return the PostgresConnection instance; never null
      * @throws SQLException if there is a problem obtaining a replication connection
      */
-    public static ReplicationConnection createForReplication(String slotName, boolean dropOnClose) throws SQLException {
+    public static ReplicationConnection createForReplication(String slotName, boolean dropOnClose,
+                                                             PostgresConnectorConfig config)
+            throws SQLException {
         final PostgresConnectorConfig.LogicalDecoder plugin = decoderPlugin();
-        final PostgresConnectorConfig config = new PostgresConnectorConfig(defaultConfig().build());
         return ReplicationConnection.builder(config)
                 .withPlugin(plugin)
                 .withSlot(slotName)
@@ -93,7 +102,20 @@ public final class TestHelper {
                 .dropSlotOnClose(dropOnClose)
                 .statusUpdateInterval(Duration.ofSeconds(10))
                 .withSchema(getSchema(config))
+                .jdbcMetadataConnection(TestHelper.createWithTypeRegistry())
                 .build();
+    }
+
+    /**
+     * Obtain a replication connection instance for the given slot name.
+     *
+     * @param slotName the name of the logical decoding slot
+     * @param dropOnClose true if the slot should be dropped upon close
+     * @return the PostgresConnection instance; never null
+     * @throws SQLException if there is a problem obtaining a replication connection
+     */
+    public static ReplicationConnection createForReplication(String slotName, boolean dropOnClose) throws SQLException {
+        return createForReplication(slotName, dropOnClose, new PostgresConnectorConfig(defaultConfig().build()));
     }
 
     /**
@@ -110,7 +132,7 @@ public final class TestHelper {
      * @return the PostgresConnection instance; never null
      */
     public static PostgresConnection create() {
-        return new PostgresConnection(defaultJdbcConfig());
+        return new PostgresConnection(defaultJdbcConfig(), CONNECTION_TEST);
     }
 
     /**
@@ -122,8 +144,9 @@ public final class TestHelper {
         final PostgresConnectorConfig config = new PostgresConnectorConfig(defaultConfig().build());
 
         return new PostgresConnection(
-                config.jdbcConfig(),
-                getPostgresValueConverterBuilder(config));
+                config.getJdbcConfig(),
+                getPostgresValueConverterBuilder(config),
+                CONNECTION_TEST);
     }
 
     /**
@@ -134,7 +157,7 @@ public final class TestHelper {
      * @return the PostgresConnection instance; never null
      */
     public static PostgresConnection create(String appName) {
-        return new PostgresConnection(defaultJdbcConfig().edit().with("ApplicationName", appName).build());
+        return new PostgresConnection(JdbcConfiguration.adapt(defaultJdbcConfig().edit().with("ApplicationName", appName).build()), CONNECTION_TEST);
     }
 
     /**
@@ -160,6 +183,9 @@ public final class TestHelper {
             else {
                 jdbcConn.rollback();
             }
+        }
+        catch (RuntimeException e) {
+            throw e;
         }
         catch (Exception e) {
             throw new RuntimeException(e);
@@ -192,8 +218,22 @@ public final class TestHelper {
 
     public static TypeRegistry getTypeRegistry() {
         final PostgresConnectorConfig config = new PostgresConnectorConfig(defaultConfig().build());
-        try (final PostgresConnection connection = new PostgresConnection(config.jdbcConfig(), getPostgresValueConverterBuilder(config))) {
+        try (final PostgresConnection connection = new PostgresConnection(config.getJdbcConfig(), getPostgresValueConverterBuilder(config), CONNECTION_TEST)) {
             return connection.getTypeRegistry();
+        }
+    }
+
+    public static PostgresDefaultValueConverter getDefaultValueConverter() {
+        final PostgresConnectorConfig config = new PostgresConnectorConfig(defaultConfig().build());
+        try (final PostgresConnection connection = new PostgresConnection(config.getJdbcConfig(), getPostgresValueConverterBuilder(config), CONNECTION_TEST)) {
+            return connection.getDefaultValueConverter();
+        }
+    }
+
+    public static Charset getDatabaseCharset() {
+        final PostgresConnectorConfig config = new PostgresConnectorConfig(defaultConfig().build());
+        try (final PostgresConnection connection = new PostgresConnection(config.getJdbcConfig(), getPostgresValueConverterBuilder(config), CONNECTION_TEST)) {
+            return connection.getDatabaseCharset();
         }
     }
 
@@ -204,38 +244,39 @@ public final class TestHelper {
     public static PostgresSchema getSchema(PostgresConnectorConfig config, TypeRegistry typeRegistry) {
         return new PostgresSchema(
                 config,
-                typeRegistry,
-                PostgresTopicSelector.create(config),
+                TestHelper.getDefaultValueConverter(),
+                (TopicNamingStrategy) SchemaTopicNamingStrategy.create(config),
                 getPostgresValueConverter(typeRegistry, config));
     }
 
     protected static Set<String> schemaNames() throws SQLException {
         try (PostgresConnection connection = create()) {
-            return connection.readAllSchemaNames(Filters.IS_SYSTEM_SCHEMA.negate());
+            return connection.readAllSchemaNames(((Predicate<String>) Arrays.asList("pg_catalog", "information_schema")::contains).negate());
         }
     }
 
     public static JdbcConfiguration defaultJdbcConfig() {
         return JdbcConfiguration.copy(Configuration.fromSystemProperties("database."))
+                .with(CommonConnectorConfig.TOPIC_PREFIX, "dbserver1")
                 .withDefault(JdbcConfiguration.DATABASE, "postgres")
                 .withDefault(JdbcConfiguration.HOSTNAME, "localhost")
                 .withDefault(JdbcConfiguration.PORT, 5432)
                 .withDefault(JdbcConfiguration.USER, "postgres")
                 .withDefault(JdbcConfiguration.PASSWORD, "postgres")
-                .with(PostgresConnectorConfig.MAX_RETRIES, 2)
-                .with(PostgresConnectorConfig.RETRY_DELAY_MS, 2000)
                 .build();
     }
 
-    protected static Configuration.Builder defaultConfig() {
+    public static Configuration.Builder defaultConfig() {
         JdbcConfiguration jdbcConfiguration = defaultJdbcConfig();
         Configuration.Builder builder = Configuration.create();
         jdbcConfiguration.forEach((field, value) -> builder.with(PostgresConnectorConfig.DATABASE_CONFIG_PREFIX + field, value));
-        builder.with(RelationalDatabaseConnectorConfig.SERVER_NAME, TEST_SERVER)
+        builder.with(CommonConnectorConfig.TOPIC_PREFIX, TEST_SERVER)
                 .with(PostgresConnectorConfig.DROP_SLOT_ON_STOP, true)
                 .with(PostgresConnectorConfig.STATUS_UPDATE_INTERVAL_MS, 100)
                 .with(PostgresConnectorConfig.PLUGIN_NAME, decoderPlugin())
-                .with(PostgresConnectorConfig.SSL_MODE, SecureConnectionMode.DISABLED);
+                .with(PostgresConnectorConfig.SSL_MODE, SecureConnectionMode.DISABLED)
+                .with(PostgresConnectorConfig.MAX_RETRIES, 2)
+                .with(PostgresConnectorConfig.RETRY_DELAY_MS, 2000);
         final String testNetworkTimeout = System.getProperty(TEST_PROPERTY_PREFIX + "network.timeout");
         if (testNetworkTimeout != null && testNetworkTimeout.length() != 0) {
             builder.with(PostgresConnectorConfig.STATUS_UPDATE_INTERVAL_MS, Integer.parseInt(testNetworkTimeout));
@@ -250,7 +291,7 @@ public final class TestHelper {
                 .stream()
                 .collect(Collectors.joining(System.lineSeparator()));
         try (PostgresConnection connection = create()) {
-            connection.executeWithoutCommitting(statements);
+            connection.execute(statements);
         }
     }
 
@@ -269,7 +310,7 @@ public final class TestHelper {
     protected static SourceInfo sourceInfo() {
         return new SourceInfo(new PostgresConnectorConfig(
                 Configuration.create()
-                        .with(PostgresConnectorConfig.SERVER_NAME, TEST_SERVER)
+                        .with(CommonConnectorConfig.TOPIC_PREFIX, TEST_SERVER)
                         .with(PostgresConnectorConfig.DATABASE_NAME, TEST_DATABASE)
                         .build()));
     }
@@ -291,7 +332,9 @@ public final class TestHelper {
             execute("SELECT pg_drop_replication_slot('" + ReplicationConnection.Builder.DEFAULT_SLOT_NAME + "')");
         }
         catch (Exception e) {
-            LOGGER.debug("Error while dropping default replication slot", e);
+            if (!Throwables.getRootCause(e).getMessage().equals("ERROR: replication slot \"debezium\" does not exist")) {
+                throw e;
+            }
         }
     }
 
@@ -385,6 +428,7 @@ public final class TestHelper {
                 config.hStoreHandlingMode(),
                 config.binaryHandlingMode(),
                 config.intervalHandlingMode(),
-                config.toastedValuePlaceholder());
+                config.getUnavailableValuePlaceholder(),
+                config.moneyFractionDigits());
     }
 }

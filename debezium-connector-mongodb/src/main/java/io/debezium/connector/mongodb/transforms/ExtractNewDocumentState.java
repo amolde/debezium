@@ -19,7 +19,6 @@ import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.config.ConfigDef.Importance;
 import org.apache.kafka.common.config.ConfigDef.Type;
 import org.apache.kafka.common.config.ConfigDef.Width;
-import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.connect.connector.ConnectRecord;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaBuilder;
@@ -153,26 +152,6 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> implements Tran
             .withDescription("Whether field names will be sanitized to Avro naming conventions")
             .withDefault(Boolean.FALSE);
 
-    public static final Field ADD_SOURCE_FIELDS = Field.create("add.source.fields")
-            .withDisplayName("Adds the specified fields from the 'source' field from the payload if they exist.")
-            .withType(ConfigDef.Type.LIST)
-            .withWidth(ConfigDef.Width.LONG)
-            .withImportance(ConfigDef.Importance.LOW)
-            .withDefault("")
-            .withDescription("DEPRECATED. Please use the 'add.fields' option instead. "
-                    + "Adds each field listed from the 'source' element of the payload, prefixed with __ "
-                    + "Example: 'version,connector' would add __version and __connector fields");
-
-    public static final Field OPERATION_HEADER = Field.create("operation.header")
-            .withDisplayName("Adds a message header representing the applied operation")
-            .withType(Type.BOOLEAN)
-            .withWidth(Width.SHORT)
-            .withImportance(ConfigDef.Importance.LOW)
-            .withDefault(false)
-            .withDescription("DEPRECATED. Please use the 'add.fields' option instead. "
-                    + "Adds the operation type of the change event as a header."
-                    + "Its key is '" + ExtractNewRecordStateConfigDefinition.DEBEZIUM_OPERATION_HEADER_KEY + "'");
-
     private final ExtractField<R> afterExtractor = new ExtractField.Value<>();
     private final ExtractField<R> patchExtractor = new ExtractField.Value<>();
     private final ExtractField<R> keyExtractor = new ExtractField.Key<>();
@@ -180,8 +159,6 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> implements Tran
     private MongoDataConverter converter;
     private final Flatten<R> recordFlattener = new Flatten.Value<>();
 
-    private boolean addOperationHeader;
-    private List<String> addSourceFields;
     private List<FieldReference> additionalHeaders;
     private List<FieldReference> additionalFields;
     private boolean flattenStruct;
@@ -213,10 +190,6 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> implements Tran
                 Headers headersToAdd = makeHeaders(additionalHeaders, (Struct) record.value());
                 headersToAdd.forEach(h -> record.headers().add(h));
             }
-            else if (addOperationHeader) {
-                LOGGER.warn("operation.header has been deprecated and is scheduled for removal.  Use add.headers instead.");
-                record.headers().addString(ExtractNewRecordStateConfigDefinition.DEBEZIUM_OPERATION_HEADER_KEY, Operation.DELETE.code());
-            }
             return newRecord(record, keyDocument, valueDocument);
         }
 
@@ -230,10 +203,6 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> implements Tran
         if (!additionalHeaders.isEmpty()) {
             Headers headersToAdd = makeHeaders(additionalHeaders, (Struct) record.value());
             headersToAdd.forEach(h -> record.headers().add(h));
-        }
-        else if (addOperationHeader) {
-            LOGGER.warn("operation.header has been deprecated and is scheduled for removal.  Use add.headers instead.");
-            record.headers().addString(ExtractNewRecordStateConfigDefinition.DEBEZIUM_OPERATION_HEADER_KEY, ((Struct) record.value()).get("op").toString());
         }
 
         // insert
@@ -302,10 +271,6 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> implements Tran
                 }
             }
 
-            if (addSourceFields != null) {
-                addSourceFieldsSchema(addFieldsPrefix, addSourceFields, record, valueSchemaBuilder);
-            }
-
             if (!additionalFields.isEmpty()) {
                 addAdditionalFieldsSchema(additionalFields, record, valueSchemaBuilder);
             }
@@ -325,10 +290,6 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> implements Tran
                 }
             }
 
-            if (addSourceFields != null) {
-                addSourceFieldsValue(addSourceFields, record, finalValueStruct);
-            }
-
             if (!additionalFields.isEmpty()) {
                 addFields(additionalFields, record, finalValueStruct);
             }
@@ -344,29 +305,10 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> implements Tran
         return newRecord;
     }
 
-    private void addSourceFieldsSchema(String fieldPrefix, List<String> addSourceFields, R originalRecord, SchemaBuilder valueSchemaBuilder) {
-        Schema sourceSchema = originalRecord.valueSchema().field("source").schema();
-        for (String sourceField : addSourceFields) {
-            if (sourceSchema.field(sourceField) == null) {
-                throw new ConfigException("Source field specified in 'add.source.fields' does not exist: " + sourceField);
-            }
-            valueSchemaBuilder.field(fieldPrefix + sourceField,
-                    sourceSchema.field(sourceField).schema());
-        }
-    }
-
     private void addAdditionalFieldsSchema(List<FieldReference> additionalFields, R originalRecord, SchemaBuilder valueSchemaBuilder) {
         Schema sourceSchema = originalRecord.valueSchema();
         for (FieldReference fieldReference : additionalFields) {
             valueSchemaBuilder.field(fieldReference.newFieldName, fieldReference.getSchema(sourceSchema));
-        }
-    }
-
-    private void addSourceFieldsValue(List<String> addSourceFields, R originalRecord, Struct valueStruct) {
-        Struct sourceValue = ((Struct) originalRecord.value()).getStruct("source");
-        for (String sourceField : addSourceFields) {
-            valueStruct.put(ExtractNewRecordStateConfigDefinition.METADATA_FIELD_PREFIX + sourceField,
-                    sourceValue.get(sourceField));
         }
     }
 
@@ -408,11 +350,10 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> implements Tran
             // In case of a full update we can use the whole Document as it is
             // see https://docs.mongodb.com/manual/reference/method/db.collection.update/#replace-a-document-entirely
             valueDocument = document;
-            valueDocument.remove("_id");
         }
 
-        if (!valueDocument.containsKey("id")) {
-            valueDocument.append("id", keyDocument.get("id"));
+        if (!valueDocument.containsKey("_id")) {
+            valueDocument.append("_id", keyDocument.get("id"));
         }
 
         if (flattenStruct) {
@@ -425,11 +366,7 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> implements Tran
     }
 
     private BsonDocument getInsertDocument(R record, BsonDocument key) {
-        BsonDocument valueDocument = BsonDocument.parse(record.value().toString());
-        valueDocument.remove("_id");
-        valueDocument.append("id", key.get("id"));
-
-        return valueDocument;
+        return BsonDocument.parse(record.value().toString());
     }
 
     private Headers makeHeaders(List<FieldReference> additionalHeaders, Struct originalRecordValue) {
@@ -471,8 +408,6 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> implements Tran
         smtManager = new SmtManager<>(config);
 
         final Field.Set configFields = Field.setOf(ARRAY_ENCODING, FLATTEN_STRUCT, DELIMITER,
-                OPERATION_HEADER,
-                ADD_SOURCE_FIELDS,
                 ExtractNewRecordStateConfigDefinition.HANDLE_DELETES,
                 ExtractNewRecordStateConfigDefinition.DROP_TOMBSTONES,
                 ExtractNewRecordStateConfigDefinition.ADD_HEADERS,
@@ -486,10 +421,6 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> implements Tran
         converter = new MongoDataConverter(
                 ArrayEncoding.parse(config.getString(ARRAY_ENCODING)),
                 FieldNameSelector.defaultNonRelationalSelector(config.getBoolean(SANITIZE_FIELD_NAMES)), config.getBoolean(SANITIZE_FIELD_NAMES));
-
-        addOperationHeader = config.getBoolean(OPERATION_HEADER);
-
-        addSourceFields = determineAdditionalSourceField(config.getString(ADD_SOURCE_FIELDS));
 
         addFieldsPrefix = config.getString(ExtractNewRecordStateConfigDefinition.ADD_FIELDS_PREFIX);
         String addHeadersPrefix = config.getString(ExtractNewRecordStateConfigDefinition.ADD_HEADERS_PREFIX);
@@ -556,7 +487,8 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> implements Tran
             else if (parts.length == 2) {
                 this.struct = parts[0];
 
-                if (!(this.struct.equals(Envelope.FieldName.SOURCE) || this.struct.equals(Envelope.FieldName.TRANSACTION))) {
+                if (!(this.struct.equals(Envelope.FieldName.SOURCE) || this.struct.equals(Envelope.FieldName.TRANSACTION)
+                        || this.struct.equals(MongoDbFieldName.UPDATE_DESCRIPTION))) {
                     throw new IllegalArgumentException("Unexpected field name: " + field);
                 }
 
@@ -581,6 +513,9 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> implements Tran
                     simpleFieldName.equals(TransactionMonitor.DEBEZIUM_TRANSACTION_DATA_COLLECTION_ORDER_KEY) ||
                     simpleFieldName.equals(TransactionMonitor.DEBEZIUM_TRANSACTION_TOTAL_ORDER_KEY)) {
                 return Envelope.FieldName.TRANSACTION;
+            }
+            else if (simpleFieldName.equals(MongoDbFieldName.UPDATE_DESCRIPTION)) {
+                return MongoDbFieldName.UPDATE_DESCRIPTION;
             }
             else {
                 return Envelope.FieldName.SOURCE;

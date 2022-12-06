@@ -5,7 +5,7 @@
  */
 package io.debezium.connector.mysql;
 
-import static org.fest.assertions.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import java.nio.file.Path;
 import java.sql.SQLException;
@@ -15,9 +15,10 @@ import org.junit.Before;
 import org.junit.Test;
 
 import io.debezium.config.Configuration;
+import io.debezium.connector.mysql.antlr.listener.RenameTableParserListener;
 import io.debezium.embedded.AbstractConnectorTest;
 import io.debezium.junit.logging.LogInterceptor;
-import io.debezium.relational.history.DatabaseHistory;
+import io.debezium.relational.history.SchemaHistory;
 import io.debezium.util.Testing;
 
 /**
@@ -25,10 +26,10 @@ import io.debezium.util.Testing;
  */
 public class MySqlSchemaMigrationIT extends AbstractConnectorTest {
 
-    private static final Path DB_HISTORY_PATH = Testing.Files.createTestingPath("file-db-history-json.txt")
+    private static final Path SCHEMA_HISTORY_PATH = Testing.Files.createTestingPath("file-schema-history-json.txt")
             .toAbsolutePath();
     private UniqueDatabase DATABASE = new UniqueDatabase("migration", "empty")
-            .withDbHistoryPath(DB_HISTORY_PATH);
+            .withDbHistoryPath(SCHEMA_HISTORY_PATH);
 
     private Configuration config;
 
@@ -38,7 +39,7 @@ public class MySqlSchemaMigrationIT extends AbstractConnectorTest {
         DATABASE.createAndInitialize();
 
         initializeConnectorTestFramework();
-        Testing.Files.delete(DB_HISTORY_PATH);
+        Testing.Files.delete(SCHEMA_HISTORY_PATH);
     }
 
     @After
@@ -47,7 +48,7 @@ public class MySqlSchemaMigrationIT extends AbstractConnectorTest {
             stopConnector();
         }
         finally {
-            Testing.Files.delete(DB_HISTORY_PATH);
+            Testing.Files.delete(SCHEMA_HISTORY_PATH);
         }
     }
 
@@ -94,7 +95,7 @@ public class MySqlSchemaMigrationIT extends AbstractConnectorTest {
     @Test
     public void shouldProcessAndWarnOnNonWhitelistedMigrateTable() throws SQLException, InterruptedException {
         // Use the DB configuration to define the connector's configuration ...
-        final LogInterceptor logInterceptor = new LogInterceptor();
+        final LogInterceptor logInterceptor = new LogInterceptor(RenameTableParserListener.class);
 
         config = DATABASE.defaultConfig()
                 .with(MySqlConnectorConfig.SNAPSHOT_MODE, MySqlConnectorConfig.SnapshotMode.INITIAL)
@@ -124,9 +125,9 @@ public class MySqlSchemaMigrationIT extends AbstractConnectorTest {
         connection.execute("RENAME TABLE `monitored` TO `_monitored_old`, `_monitored_new` TO `monitored`");
         connection.execute("insert into monitored values(default, 3)");
 
-        final String msg1 = "Renaming whitelisted table " + DATABASE.qualifiedTableName("monitored") + " to non-whitelisted table "
+        final String msg1 = "Renaming included table " + DATABASE.qualifiedTableName("monitored") + " to non-included table "
                 + DATABASE.qualifiedTableName("_monitored_old") + ", this can lead to schema inconsistency";
-        final String msg2 = "Renaming non-whitelisted table " + DATABASE.qualifiedTableName("_monitored_new") + " to whitelisted table "
+        final String msg2 = "Renaming non-included table " + DATABASE.qualifiedTableName("_monitored_new") + " to included table "
                 + DATABASE.qualifiedTableName("monitored") + ", this can lead to schema inconsistency";
 
         records = consumeRecordsByTopic(2);
@@ -144,12 +145,12 @@ public class MySqlSchemaMigrationIT extends AbstractConnectorTest {
     @Test
     public void shouldWarnOnInvalidMigrateTable() throws SQLException, InterruptedException {
         // Use the DB configuration to define the connector's configuration ...
-        final LogInterceptor logInterceptor = new LogInterceptor();
+        final LogInterceptor logInterceptor = new LogInterceptor(RenameTableParserListener.class);
 
         config = DATABASE.defaultConfig()
                 .with(MySqlConnectorConfig.SNAPSHOT_MODE, MySqlConnectorConfig.SnapshotMode.INITIAL)
                 .with(MySqlConnectorConfig.INCLUDE_SCHEMA_CHANGES, false)
-                .with(DatabaseHistory.STORE_ONLY_CAPTURED_TABLES_DDL, true)
+                .with(SchemaHistory.STORE_ONLY_CAPTURED_TABLES_DDL, true)
                 .with(MySqlConnectorConfig.TABLE_INCLUDE_LIST, DATABASE.qualifiedTableName("monitored"))
                 .build();
 
@@ -175,9 +176,9 @@ public class MySqlSchemaMigrationIT extends AbstractConnectorTest {
         connection.execute("RENAME TABLE `monitored` TO `_monitored_old`, `_monitored_new` TO `monitored`");
         connection.execute("insert into monitored values(default, 3)");
 
-        final String msg1 = "Renaming whitelisted table " + DATABASE.qualifiedTableName("monitored") + " to non-whitelisted table "
+        final String msg1 = "Renaming included table " + DATABASE.qualifiedTableName("monitored") + " to non-included table "
                 + DATABASE.qualifiedTableName("_monitored_old") + ", this can lead to schema inconsistency";
-        final String msg2 = "Renaming non-whitelisted table " + DATABASE.qualifiedTableName("_monitored_new") + " to whitelisted table "
+        final String msg2 = "Renaming non-included table " + DATABASE.qualifiedTableName("_monitored_new") + " to included table "
                 + DATABASE.qualifiedTableName("monitored") + ", this can lead to schema inconsistency";
 
         records = consumeRecordsByTopic(2);

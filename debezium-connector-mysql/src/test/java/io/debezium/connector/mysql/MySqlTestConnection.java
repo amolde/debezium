@@ -5,6 +5,9 @@
  */
 package io.debezium.connector.mysql;
 
+import static io.debezium.config.CommonConnectorConfig.DATABASE_CONFIG_PREFIX;
+import static io.debezium.config.CommonConnectorConfig.DRIVER_CONFIG_PREFIX;
+
 import java.sql.SQLException;
 import java.util.Map;
 
@@ -37,9 +40,9 @@ public class MySqlTestConnection extends JdbcConnection {
      * @return the MySQLConnection instance; never null
      */
     public static MySqlTestConnection forTestDatabase(String databaseName) {
-        return new MySqlTestConnection(JdbcConfiguration.copy(Configuration.fromSystemProperties("database."))
+        return new MySqlTestConnection(JdbcConfiguration.copy(
+                Configuration.fromSystemProperties(DATABASE_CONFIG_PREFIX).merge(Configuration.fromSystemProperties(DRIVER_CONFIG_PREFIX)))
                 .withDatabase(databaseName)
-                .with("useSSL", false)
                 .with("characterEncoding", "utf8")
                 .build());
     }
@@ -51,9 +54,9 @@ public class MySqlTestConnection extends JdbcConnection {
      * @return the MySQLConnection instance; never null
      */
     public static MySqlTestConnection forTestDatabase(String databaseName, Map<String, Object> urlProperties) {
-        JdbcConfiguration.Builder builder = JdbcConfiguration.copy(Configuration.fromSystemProperties("database."))
+        JdbcConfiguration.Builder builder = JdbcConfiguration.copy(
+                Configuration.fromSystemProperties(DATABASE_CONFIG_PREFIX).merge(Configuration.fromSystemProperties(DRIVER_CONFIG_PREFIX)))
                 .withDatabase(databaseName)
-                .with("useSSL", false)
                 .with("characterEncoding", "utf8");
         urlProperties.forEach(builder::with);
         return new MySqlTestConnection(builder.build());
@@ -68,11 +71,11 @@ public class MySqlTestConnection extends JdbcConnection {
      * @return the MySQLConnection instance; never null
      */
     public static MySqlTestConnection forTestDatabase(String databaseName, String username, String password) {
-        return new MySqlTestConnection(JdbcConfiguration.copy(Configuration.fromSystemProperties("database."))
+        return new MySqlTestConnection(JdbcConfiguration.copy(
+                Configuration.fromSystemProperties(DATABASE_CONFIG_PREFIX).merge(Configuration.fromSystemProperties(DRIVER_CONFIG_PREFIX)))
                 .withDatabase(databaseName)
                 .withUser(username)
                 .withPassword(password)
-                .with("useSSL", false)
                 .build());
     }
 
@@ -102,11 +105,14 @@ public class MySqlTestConnection extends JdbcConnection {
         return comment.startsWith("Percona");
     }
 
-    protected static void addDefaults(Configuration.Builder builder) {
-        builder.withDefault(JdbcConfiguration.HOSTNAME, "localhost")
+    private static JdbcConfiguration addDefaultSettings(JdbcConfiguration configuration) {
+        return JdbcConfiguration.adapt(configuration.edit()
+                .withDefault(JdbcConfiguration.HOSTNAME, "localhost")
                 .withDefault(JdbcConfiguration.PORT, 3306)
                 .withDefault(JdbcConfiguration.USER, "mysqluser")
-                .withDefault(JdbcConfiguration.PASSWORD, "mysqlpw");
+                .withDefault(JdbcConfiguration.PASSWORD, "mysqlpw")
+                .build());
+
     }
 
     protected static ConnectionFactory FACTORY = JdbcConnection.patternBasedFactory("jdbc:mysql://${hostname}:${port}/${dbname}");
@@ -116,8 +122,8 @@ public class MySqlTestConnection extends JdbcConnection {
      *
      * @param config the configuration; may not be null
      */
-    public MySqlTestConnection(Configuration config) {
-        super(config, FACTORY, null, MySqlTestConnection::addDefaults);
+    public MySqlTestConnection(JdbcConfiguration config) {
+        super(addDefaultSettings(config), FACTORY, "`", "`");
     }
 
     public MySqlVersion getMySqlVersion() {

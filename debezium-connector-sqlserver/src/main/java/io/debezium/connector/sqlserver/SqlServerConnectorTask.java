@@ -9,24 +9,23 @@ import java.sql.SQLException;
 import java.util.List;
 import java.util.stream.Collectors;
 
-import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.debezium.config.CommonConnectorConfig;
 import io.debezium.config.Configuration;
 import io.debezium.config.Field;
 import io.debezium.connector.base.ChangeEventQueue;
 import io.debezium.connector.common.BaseSourceTask;
+import io.debezium.connector.sqlserver.metrics.SqlServerMetricsFactory;
 import io.debezium.pipeline.ChangeEventSourceCoordinator;
 import io.debezium.pipeline.DataChangeEvent;
 import io.debezium.pipeline.ErrorHandler;
 import io.debezium.pipeline.EventDispatcher;
-import io.debezium.pipeline.metrics.DefaultChangeEventSourceMetricsFactory;
-import io.debezium.relational.HistorizedRelationalDatabaseConnectorConfig;
+import io.debezium.pipeline.spi.Offsets;
 import io.debezium.relational.TableId;
-import io.debezium.relational.history.DatabaseHistory;
-import io.debezium.schema.TopicSelector;
+import io.debezium.spi.topic.TopicNamingStrategy;
 import io.debezium.util.Clock;
 import io.debezium.util.SchemaNameAdjuster;
 
@@ -37,7 +36,7 @@ import io.debezium.util.SchemaNameAdjuster;
  * @author Jiri Pechanec
  *
  */
-public class SqlServerConnectorTask extends BaseSourceTask<SqlServerOffsetContext> {
+public class SqlServerConnectorTask extends BaseSourceTask<SqlServerPartition, SqlServerOffsetContext> {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(SqlServerConnectorTask.class);
     private static final String CONTEXT_NAME = "sql-server-connector-task";
@@ -55,40 +54,37 @@ public class SqlServerConnectorTask extends BaseSourceTask<SqlServerOffsetContex
     }
 
     @Override
-    public ChangeEventSourceCoordinator<SqlServerOffsetContext> start(Configuration config) {
+    public ChangeEventSourceCoordinator<SqlServerPartition, SqlServerOffsetContext> start(Configuration config) {
         final Clock clock = Clock.system();
-        final SqlServerConnectorConfig connectorConfig = new SqlServerConnectorConfig(config);
-        final TopicSelector<TableId> topicSelector = SqlServerTopicSelector.defaultSelector(connectorConfig);
-        final SchemaNameAdjuster schemaNameAdjuster = SchemaNameAdjuster.create();
-        final SqlServerValueConverters valueConverters = new SqlServerValueConverters(connectorConfig.getDecimalMode(),
-                connectorConfig.getTemporalPrecisionMode(), connectorConfig.binaryHandlingMode());
 
         // By default do not load whole result sets into memory
         config = config.edit()
-                .withDefault("database.responseBuffering", "adaptive")
-                .withDefault("database.fetchSize", 10_000)
+                .withDefault(CommonConnectorConfig.DRIVER_CONFIG_PREFIX + "responseBuffering", "adaptive")
+                .withDefault(CommonConnectorConfig.DRIVER_CONFIG_PREFIX + "fetchSize", 10_000)
                 .build();
 
-        final Configuration jdbcConfig = config.filter(
-                x -> !(x.startsWith(DatabaseHistory.CONFIGURATION_FIELD_PREFIX_STRING) || x.equals(HistorizedRelationalDatabaseConnectorConfig.DATABASE_HISTORY.name())))
-                .subset("database.", true);
-        dataConnection = new SqlServerConnection(jdbcConfig, clock, connectorConfig.getSourceTimestampMode(), valueConverters, () -> getClass().getClassLoader(),
-                connectorConfig.getSkippedOperations());
-        metadataConnection = new SqlServerConnection(jdbcConfig, clock, connectorConfig.getSourceTimestampMode(), valueConverters, () -> getClass().getClassLoader(),
-                connectorConfig.getSkippedOperations());
-        try {
-            dataConnection.setAutoCommit(false);
-        }
-        catch (SQLException e) {
-            throw new ConnectException(e);
-        }
-        this.schema = new SqlServerDatabaseSchema(connectorConfig, valueConverters, topicSelector, schemaNameAdjuster);
+        final SqlServerConnectorConfig connectorConfig = new SqlServerConnectorConfig(config);
+        final TopicNamingStrategy topicNamingStrategy = connectorConfig.getTopicNamingStrategy(
+                CommonConnectorConfig.TOPIC_NAMING_STRATEGY, true);
+        final SchemaNameAdjuster schemaNameAdjuster = connectorConfig.schemaNameAdjustmentMode().createAdjuster();
+        final SqlServerValueConverters valueConverters = new SqlServerValueConverters(connectorConfig.getDecimalMode(),
+                connectorConfig.getTemporalPrecisionMode(), connectorConfig.binaryHandlingMode());
+
+        dataConnection = new SqlServerConnection(connectorConfig.getJdbcConfig(), valueConverters,
+                connectorConfig.getSkippedOperations(), connectorConfig.useSingleDatabase(),
+                connectorConfig.getOptionRecompile());
+        metadataConnection = new SqlServerConnection(connectorConfig.getJdbcConfig(), valueConverters,
+                connectorConfig.getSkippedOperations(), connectorConfig.useSingleDatabase());
+
+        this.schema = new SqlServerDatabaseSchema(connectorConfig, metadataConnection.getDefaultValueConverter(), valueConverters, topicNamingStrategy,
+                schemaNameAdjuster);
         this.schema.initializeStorage();
 
-        final SqlServerOffsetContext previousOffset = getPreviousOffset(new SqlServerOffsetContext.Loader(connectorConfig));
-        if (previousOffset != null) {
-            schema.recover(previousOffset);
-        }
+        Offsets<SqlServerPartition, SqlServerOffsetContext> offsets = getPreviousOffsets(
+                new SqlServerPartition.Provider(connectorConfig, config),
+                new SqlServerOffsetContext.Loader(connectorConfig));
+
+        schema.recover(offsets);
 
         taskContext = new SqlServerTaskContext(connectorConfig, schema);
 
@@ -101,13 +97,13 @@ public class SqlServerConnectorTask extends BaseSourceTask<SqlServerOffsetContex
                 .loggingContextSupplier(() -> taskContext.configureLoggingContext(CONTEXT_NAME))
                 .build();
 
-        errorHandler = new SqlServerErrorHandler(connectorConfig.getLogicalName(), queue);
+        errorHandler = new SqlServerErrorHandler(connectorConfig, queue);
 
         final SqlServerEventMetadataProvider metadataProvider = new SqlServerEventMetadataProvider();
 
-        final EventDispatcher<TableId> dispatcher = new EventDispatcher<>(
+        final EventDispatcher<SqlServerPartition, TableId> dispatcher = new EventDispatcher<>(
                 connectorConfig,
-                topicSelector,
+                topicNamingStrategy,
                 schema,
                 queue,
                 connectorConfig.getTableFilters().dataCollectionFilter(),
@@ -115,15 +111,16 @@ public class SqlServerConnectorTask extends BaseSourceTask<SqlServerOffsetContex
                 metadataProvider,
                 schemaNameAdjuster);
 
-        ChangeEventSourceCoordinator<SqlServerOffsetContext> coordinator = new ChangeEventSourceCoordinator<>(
-                previousOffset,
+        ChangeEventSourceCoordinator<SqlServerPartition, SqlServerOffsetContext> coordinator = new SqlServerChangeEventSourceCoordinator(
+                offsets,
                 errorHandler,
                 SqlServerConnector.class,
                 connectorConfig,
                 new SqlServerChangeEventSourceFactory(connectorConfig, dataConnection, metadataConnection, errorHandler, dispatcher, clock, schema),
-                new DefaultChangeEventSourceMetricsFactory(),
+                new SqlServerMetricsFactory(offsets.getPartitions()),
                 dispatcher,
-                schema);
+                schema,
+                clock);
 
         coordinator.start(taskContext, this.queue, metadataProvider);
 

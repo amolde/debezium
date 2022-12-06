@@ -6,25 +6,24 @@
 package io.debezium.connector.mysql;
 
 import java.time.Instant;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 
 import org.apache.kafka.connect.data.Schema;
-import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.errors.ConnectException;
 
 import io.debezium.connector.SnapshotRecord;
+import io.debezium.pipeline.CommonOffsetContext;
 import io.debezium.pipeline.source.snapshot.incremental.IncrementalSnapshotContext;
+import io.debezium.pipeline.source.snapshot.incremental.SignalBasedIncrementalSnapshotContext;
 import io.debezium.pipeline.spi.OffsetContext;
 import io.debezium.pipeline.txmetadata.TransactionContext;
 import io.debezium.relational.TableId;
-import io.debezium.schema.DataCollectionId;
+import io.debezium.spi.schema.DataCollectionId;
 
-public class MySqlOffsetContext implements OffsetContext {
+public class MySqlOffsetContext extends CommonOffsetContext<SourceInfo> {
 
-    private static final String SERVER_PARTITION_KEY = "server";
     private static final String SNAPSHOT_COMPLETED_KEY = "snapshot_completed";
     public static final String EVENTS_TO_SKIP_OFFSET_KEY = "event";
     public static final String TIMESTAMP_KEY = "ts_sec";
@@ -32,8 +31,6 @@ public class MySqlOffsetContext implements OffsetContext {
     public static final String NON_GTID_TRANSACTION_ID_FORMAT = "file=%s,pos=%s";
 
     private final Schema sourceInfoSchema;
-    private final SourceInfo sourceInfo;
-    private final Map<String, String> partition;
     private boolean snapshotCompleted;
     private final TransactionContext transactionContext;
     private final IncrementalSnapshotContext<TableId> incrementalSnapshotContext;
@@ -47,11 +44,9 @@ public class MySqlOffsetContext implements OffsetContext {
     private boolean inTransaction = false;
     private String transactionId = null;
 
-    public MySqlOffsetContext(MySqlConnectorConfig connectorConfig, boolean snapshot, boolean snapshotCompleted,
-                              TransactionContext transactionContext, IncrementalSnapshotContext<TableId> incrementalSnapshotContext,
-                              SourceInfo sourceInfo) {
-        partition = Collections.singletonMap(SERVER_PARTITION_KEY, connectorConfig.getLogicalName());
-        this.sourceInfo = sourceInfo;
+    public MySqlOffsetContext(boolean snapshot, boolean snapshotCompleted, TransactionContext transactionContext,
+                              IncrementalSnapshotContext<TableId> incrementalSnapshotContext, SourceInfo sourceInfo) {
+        super(sourceInfo);
         sourceInfoSchema = sourceInfo.schema();
 
         this.snapshotCompleted = snapshotCompleted;
@@ -66,22 +61,9 @@ public class MySqlOffsetContext implements OffsetContext {
     }
 
     public MySqlOffsetContext(MySqlConnectorConfig connectorConfig, boolean snapshot, boolean snapshotCompleted, SourceInfo sourceInfo) {
-        this(connectorConfig, snapshot, snapshotCompleted, new TransactionContext(), new IncrementalSnapshotContext<>(),
+        this(snapshot, snapshotCompleted, new TransactionContext(),
+                connectorConfig.isReadOnlyConnection() ? new MySqlReadOnlyIncrementalSnapshotContext<>() : new SignalBasedIncrementalSnapshotContext<>(),
                 sourceInfo);
-    }
-
-    /**
-     * Get the Kafka Connect detail about the source "partition", which describes the portion of the source that we are
-     * consuming. Since we're reading the binary log for a single database, the source partition specifies the
-     * {@link #setServerName(String) database server}.
-     * <p>
-     * The resulting map is mutable for efficiency reasons (this information rarely changes), but should not be mutated.
-     *
-     * @return the source partition information; never null
-     */
-    @Override
-    public Map<String, ?> getPartition() {
-        return partition;
     }
 
     @Override
@@ -127,11 +109,6 @@ public class MySqlOffsetContext implements OffsetContext {
     }
 
     @Override
-    public Struct getSourceInfo() {
-        return sourceInfo.struct();
-    }
-
-    @Override
     public boolean isSnapshotRunning() {
         return sourceInfo.isSnapshot() && !snapshotCompleted;
     }
@@ -149,11 +126,6 @@ public class MySqlOffsetContext implements OffsetContext {
     @Override
     public void preSnapshotCompletion() {
         snapshotCompleted = true;
-    }
-
-    @Override
-    public void postSnapshotCompletion() {
-        sourceInfo.setSnapshot(SnapshotRecord.FALSE);
     }
 
     private void setTransactionId() {
@@ -195,11 +167,6 @@ public class MySqlOffsetContext implements OffsetContext {
         }
 
         @Override
-        public Map<String, ?> getPartition() {
-            return Collections.singletonMap(SERVER_PARTITION_KEY, connectorConfig.getLogicalName());
-        }
-
-        @Override
         public MySqlOffsetContext load(Map<String, ?> offset) {
             boolean snapshot = Boolean.TRUE.equals(offset.get(SourceInfo.SNAPSHOT_KEY)) || "true".equals(offset.get(SourceInfo.SNAPSHOT_KEY));
             boolean snapshotCompleted = Boolean.TRUE.equals(offset.get(SNAPSHOT_COMPLETED_KEY)) || "true".equals(offset.get(SNAPSHOT_COMPLETED_KEY));
@@ -209,9 +176,15 @@ public class MySqlOffsetContext implements OffsetContext {
                 throw new ConnectException("Source offset '" + SourceInfo.BINLOG_FILENAME_OFFSET_KEY + "' parameter is missing");
             }
             long binlogPosition = longOffsetValue(offset, SourceInfo.BINLOG_POSITION_OFFSET_KEY);
-
-            final MySqlOffsetContext offsetContext = new MySqlOffsetContext(connectorConfig, snapshot,
-                    snapshotCompleted, TransactionContext.load(offset), IncrementalSnapshotContext.load(offset, TableId.class),
+            IncrementalSnapshotContext<TableId> incrementalSnapshotContext;
+            if (connectorConfig.isReadOnlyConnection()) {
+                incrementalSnapshotContext = MySqlReadOnlyIncrementalSnapshotContext.load(offset);
+            }
+            else {
+                incrementalSnapshotContext = SignalBasedIncrementalSnapshotContext.load(offset);
+            }
+            final MySqlOffsetContext offsetContext = new MySqlOffsetContext(snapshot, snapshotCompleted,
+                    TransactionContext.load(offset), incrementalSnapshotContext,
                     new SourceInfo(connectorConfig));
             offsetContext.setBinlogStartPoint(binlogFilename, binlogPosition);
             offsetContext.setInitialSkips(longOffsetValue(offset, EVENTS_TO_SKIP_OFFSET_KEY),
@@ -238,11 +211,6 @@ public class MySqlOffsetContext implements OffsetContext {
     }
 
     @Override
-    public void markLastSnapshotRecord() {
-        sourceInfo.setSnapshot(SnapshotRecord.LAST);
-    }
-
-    @Override
     public void event(DataCollectionId tableId, Instant timestamp) {
         sourceInfo.setSourceTime(timestamp);
         sourceInfo.tableEvent((TableId) tableId);
@@ -263,11 +231,6 @@ public class MySqlOffsetContext implements OffsetContext {
     @Override
     public TransactionContext getTransactionContext() {
         return transactionContext;
-    }
-
-    @Override
-    public void incrementalSnapshotEvents() {
-        sourceInfo.setSnapshot(SnapshotRecord.INCREMENTAL);
     }
 
     @Override
@@ -425,11 +388,11 @@ public class MySqlOffsetContext implements OffsetContext {
      * Given the row number within a binlog event and the total number of rows in that event, compute the
      * Kafka Connect offset that is be included in the produced change event describing the row.
      * <p>
-     * This method should always be called before {@link #struct()}.
+     * This method should always be called before {@link SourceInfo#struct()}.
      *
      * @param eventRowNumber the 0-based row number within the event for which the offset is to be produced
      * @param totalNumberOfRows the total number of rows within the event being processed
-     * @see #struct()
+     * @see SourceInfo#struct()
      */
     public void setRowNumber(int eventRowNumber, int totalNumberOfRows) {
         sourceInfo.setRowNumber(eventRowNumber);
@@ -444,14 +407,18 @@ public class MySqlOffsetContext implements OffsetContext {
         }
     }
 
+    public void setBinlogServerId(long serverId) {
+        sourceInfo.setBinlogServerId(serverId);
+    }
+
     public void setBinlogThread(long threadId) {
-        sourceInfo.setBinlogServerId(threadId);
+        sourceInfo.setBinlogThread(threadId);
     }
 
     @Override
     public String toString() {
         return "MySqlOffsetContext [sourceInfoSchema=" + sourceInfoSchema + ", sourceInfo=" + sourceInfo
-                + ", partition=" + partition + ", snapshotCompleted=" + snapshotCompleted + ", transactionContext="
+                + ", snapshotCompleted=" + snapshotCompleted + ", transactionContext="
                 + transactionContext + ", restartGtidSet=" + restartGtidSet + ", currentGtidSet=" + currentGtidSet
                 + ", restartBinlogFilename=" + restartBinlogFilename + ", restartBinlogPosition="
                 + restartBinlogPosition + ", restartRowsToSkip=" + restartRowsToSkip + ", restartEventsToSkip="

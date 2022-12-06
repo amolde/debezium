@@ -7,10 +7,9 @@ package io.debezium.pipeline.signal;
 
 import java.io.IOException;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
-import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Struct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -24,8 +23,9 @@ import io.debezium.pipeline.EventDispatcher;
 import io.debezium.pipeline.source.snapshot.incremental.CloseIncrementalSnapshotWindow;
 import io.debezium.pipeline.source.snapshot.incremental.OpenIncrementalSnapshotWindow;
 import io.debezium.pipeline.spi.OffsetContext;
+import io.debezium.pipeline.spi.Partition;
 import io.debezium.relational.HistorizedRelationalDatabaseConnectorConfig;
-import io.debezium.schema.DataCollectionId;
+import io.debezium.spi.schema.DataCollectionId;
 
 /**
  * The class responsible for processing of signals delivered to Debezium via a dedicated signaling table.
@@ -42,34 +42,37 @@ import io.debezium.schema.DataCollectionId;
  *
  */
 @NotThreadSafe
-public class Signal {
+public class Signal<P extends Partition> {
 
     @FunctionalInterface
-    public static interface Action {
+    public interface Action<P extends Partition> {
 
         /**
          * @param signalPayload the content of the signal
          * @return true if the signal was processed
          */
-        boolean arrived(Payload signalPayload) throws InterruptedException;
+        boolean arrived(Payload<P> signalPayload) throws InterruptedException;
     }
 
-    public static class Payload {
+    public static class Payload<P extends Partition> {
         public final String id;
         public final String type;
         public final Document data;
+        public final P partition;
         public final OffsetContext offsetContext;
         public final Struct source;
 
         /**
+         * @param partition partition from which the signal was sent
          * @param id identifier of the signal intended for deduplication, usually ignored by the signal
          * @param type of the signal, usually ignored by the signal, should be used only when a signal code is shared for mutlple signals
          * @param data data specific for given signal instance
          * @param offsetContext offset at what the signal was sent
          * @param source source info about position at what the signal was sent
          */
-        public Payload(String id, String type, Document data, OffsetContext offsetContext, Struct source) {
+        public Payload(P partition, String id, String type, Document data, OffsetContext offsetContext, Struct source) {
             super();
+            this.partition = partition;
             this.id = id;
             this.type = type;
             this.data = data;
@@ -87,27 +90,26 @@ public class Signal {
     private static final Logger LOGGER = LoggerFactory.getLogger(Signal.class);
 
     private final CommonConnectorConfig connectorConfig;
-    private final String signalDataCollectionId;
-    private final EventDispatcher<? extends DataCollectionId> dispatcher;
 
-    private final Map<String, Action> signalActions = new HashMap<>();
+    private final Map<String, Action<P>> signalActions = new HashMap<>();
 
-    public Signal(CommonConnectorConfig connectorConfig, EventDispatcher<? extends DataCollectionId> eventDispatcher) {
+    public Signal(CommonConnectorConfig connectorConfig, EventDispatcher<P, ? extends DataCollectionId> eventDispatcher) {
         this.connectorConfig = connectorConfig;
-        this.signalDataCollectionId = connectorConfig.getSignalingDataCollectionId();
-        this.dispatcher = eventDispatcher;
-        registerSignalAction(Log.NAME, new Log());
+        registerSignalAction(Log.NAME, new Log<>());
         if (connectorConfig instanceof HistorizedRelationalDatabaseConnectorConfig) {
             registerSignalAction(SchemaChanges.NAME,
-                    new SchemaChanges(dispatcher, ((HistorizedRelationalDatabaseConnectorConfig) connectorConfig).useCatalogBeforeSchema()));
+                    new SchemaChanges<>(eventDispatcher, ((HistorizedRelationalDatabaseConnectorConfig) connectorConfig).useCatalogBeforeSchema()));
         }
         else {
-            registerSignalAction(SchemaChanges.NAME, new SchemaChanges(dispatcher, false));
+            registerSignalAction(SchemaChanges.NAME, new SchemaChanges<>(eventDispatcher, false));
         }
 
-        registerSignalAction(ExecuteSnapshot.NAME, new ExecuteSnapshot(dispatcher));
-        registerSignalAction(OpenIncrementalSnapshotWindow.NAME, new OpenIncrementalSnapshotWindow());
-        registerSignalAction(CloseIncrementalSnapshotWindow.NAME, new CloseIncrementalSnapshotWindow(dispatcher));
+        registerSignalAction(ExecuteSnapshot.NAME, new ExecuteSnapshot<>(eventDispatcher));
+        registerSignalAction(StopSnapshot.NAME, new StopSnapshot<>(eventDispatcher));
+        registerSignalAction(OpenIncrementalSnapshotWindow.NAME, new OpenIncrementalSnapshotWindow<>());
+        registerSignalAction(CloseIncrementalSnapshotWindow.NAME, new CloseIncrementalSnapshotWindow<>(eventDispatcher));
+        registerSignalAction(PauseIncrementalSnapshot.NAME, new PauseIncrementalSnapshot<>(eventDispatcher));
+        registerSignalAction(ResumeIncrementalSnapshot.NAME, new ResumeIncrementalSnapshot<>(eventDispatcher));
     }
 
     Signal(CommonConnectorConfig connectorConfig) {
@@ -115,68 +117,62 @@ public class Signal {
     }
 
     public boolean isSignal(DataCollectionId dataCollectionId) {
-        return signalDataCollectionId != null && signalDataCollectionId.equals(dataCollectionId.identifier());
+        return connectorConfig.isSignalDataCollection(dataCollectionId);
     }
 
-    public void registerSignalAction(String id, Action signal) {
+    public void registerSignalAction(String id, Action<P> signal) {
         LOGGER.debug("Registering signal '{}' using class '{}'", id, signal.getClass().getName());
         signalActions.put(id, signal);
     }
 
-    public boolean process(String id, String type, String data, OffsetContext offset, Struct source) throws InterruptedException {
-        LOGGER.debug("Arrived signal id = '{}', type = '{}', data = '{}'", id, type, data);
-        final Action action = signalActions.get(type);
+    public boolean process(P partition, String id, String type, String data, OffsetContext offset, Struct source) throws InterruptedException {
+        LOGGER.debug("Received signal id = '{}', type = '{}', data = '{}'", id, type, data);
+        final Action<P> action = signalActions.get(type);
         if (action == null) {
-            LOGGER.warn("Signal '{}' has arrived but the type '{}' is not recognized", id, type);
+            LOGGER.warn("Signal '{}' has been received but the type '{}' is not recognized", id, type);
             return false;
         }
         try {
             final Document jsonData = (data == null || data.isEmpty()) ? Document.create()
                     : DocumentReader.defaultReader().read(data);
-            return action.arrived(new Payload(id, type, jsonData, offset, source));
+            return action.arrived(new Payload<>(partition, id, type, jsonData, offset, source));
         }
         catch (IOException e) {
-            LOGGER.warn("Signal '{}' has arrived but the data '{}' cannot be parsed", id, data, e);
+            LOGGER.warn("Signal '{}' has been received but the data '{}' cannot be parsed", id, data, e);
             return false;
         }
     }
 
-    public boolean process(String id, String type, String data) throws InterruptedException {
-        return process(id, type, data, null, null);
+    public boolean process(P partition, String id, String type, String data) throws InterruptedException {
+        return process(partition, id, type, data, null, null);
     }
 
     /**
-     * 
+     *
      * @param value Envelope with change from signaling table
      * @param offset offset of the incoming signal
      * @return true if the signal was processed
      */
-    public boolean process(Struct value, OffsetContext offset) throws InterruptedException {
+    public boolean process(P partition, Struct value, OffsetContext offset) throws InterruptedException {
         String id = null;
         String type = null;
         String data = null;
         Struct source = null;
         try {
-            final Struct after = value.getStruct(Envelope.FieldName.AFTER);
-            if (after == null) {
-                LOGGER.warn("After part of signal '{}' is missing", value);
-                return false;
-            }
+            final Optional<String[]> parseSignal = connectorConfig.parseSignallingMessage(value);
             if (value.schema().field(Envelope.FieldName.SOURCE) != null) {
                 source = value.getStruct(Envelope.FieldName.SOURCE);
             }
-            List<Field> fields = after.schema().fields();
-            if (fields.size() != 3) {
-                LOGGER.warn("The signal event '{}' should have 3 fields but has {}", after, fields.size());
+            if (!parseSignal.isPresent()) {
                 return false;
             }
-            id = after.getString(fields.get(0).name());
-            type = after.getString(fields.get(1).name());
-            data = after.getString(fields.get(2).name());
+            id = parseSignal.get()[0];
+            type = parseSignal.get()[1];
+            data = parseSignal.get()[2];
         }
         catch (Exception e) {
             LOGGER.warn("Exception while preparing to process the signal '{}'", value, e);
         }
-        return process(id, type, data, offset, source);
+        return process(partition, id, type, data, offset, source);
     }
 }

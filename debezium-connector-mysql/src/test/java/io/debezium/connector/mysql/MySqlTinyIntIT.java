@@ -11,7 +11,7 @@ import java.sql.SQLException;
 
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.source.SourceRecord;
-import org.fest.assertions.Assertions;
+import org.assertj.core.api.Assertions;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -20,6 +20,8 @@ import io.debezium.config.Configuration;
 import io.debezium.connector.mysql.converters.TinyIntOneToBooleanConverter;
 import io.debezium.doc.FixFor;
 import io.debezium.embedded.AbstractConnectorTest;
+import io.debezium.junit.EqualityCheck;
+import io.debezium.junit.SkipWhenDatabaseVersion;
 import io.debezium.util.Testing;
 
 /**
@@ -29,10 +31,10 @@ import io.debezium.util.Testing;
  */
 public class MySqlTinyIntIT extends AbstractConnectorTest {
 
-    private static final Path DB_HISTORY_PATH = Testing.Files.createTestingPath("file-db-history-year.txt")
+    private static final Path SCHEMA_HISTORY_PATH = Testing.Files.createTestingPath("file-schema-history-year.txt")
             .toAbsolutePath();
     private final UniqueDatabase DATABASE = new UniqueDatabase("tinyintit", "tinyint_test")
-            .withDbHistoryPath(DB_HISTORY_PATH);
+            .withDbHistoryPath(SCHEMA_HISTORY_PATH);
 
     private Configuration config;
 
@@ -41,7 +43,7 @@ public class MySqlTinyIntIT extends AbstractConnectorTest {
         stopConnector();
         DATABASE.createAndInitialize();
         initializeConnectorTestFramework();
-        Testing.Files.delete(DB_HISTORY_PATH);
+        Testing.Files.delete(SCHEMA_HISTORY_PATH);
     }
 
     @After
@@ -50,7 +52,7 @@ public class MySqlTinyIntIT extends AbstractConnectorTest {
             stopConnector();
         }
         finally {
-            Testing.Files.delete(DB_HISTORY_PATH);
+            Testing.Files.delete(SCHEMA_HISTORY_PATH);
         }
     }
 
@@ -132,12 +134,68 @@ public class MySqlTinyIntIT extends AbstractConnectorTest {
         stopConnector();
     }
 
+    @Test
+    @FixFor("DBZ-5236")
+    @SkipWhenDatabaseVersion(check = EqualityCheck.GREATER_THAN_OR_EQUAL, major = 8, minor = 0, reason = "MySQL 8 does not provide unsigned tinyint length (DBZ-5343)")
+    public void shouldHandleUnsignedTinyIntOneAsBoolean() throws SQLException, InterruptedException {
+        // Use the DB configuration to define the connector's configuration ...
+        config = DATABASE.defaultConfig()
+                .with(MySqlConnectorConfig.SNAPSHOT_MODE, MySqlConnectorConfig.SnapshotMode.INITIAL)
+                .with(MySqlConnectorConfig.TABLE_INCLUDE_LIST, DATABASE.qualifiedTableName("DBZ5236"))
+                .with(MySqlConnectorConfig.CUSTOM_CONVERTERS, "boolean")
+                .with("boolean.type", TinyIntOneToBooleanConverter.class.getName())
+                .build();
+
+        // Start the connector ...
+        start(MySqlConnector.class, config);
+
+        consumeInitial();
+
+        assertUnsignedBooleanChangeRecord();
+
+        try (final Connection conn = MySqlTestConnection.forTestDatabase(DATABASE.getDatabaseName()).connection()) {
+            conn.createStatement().execute("INSERT INTO DBZ5236 VALUES (DEFAULT, 1, 1, 0)");
+        }
+        assertUnsignedBooleanChangeRecord();
+
+        stopConnector();
+    }
+
+    @Test
+    @FixFor("DBZ-5343")
+    public void shouldHandleMySQL8TinyIntAsBoolean() throws SQLException, InterruptedException {
+        // Use the DB configuration to define the connector's configuration ...
+        config = DATABASE.defaultConfig()
+                .with(MySqlConnectorConfig.SNAPSHOT_MODE, MySqlConnectorConfig.SnapshotMode.INITIAL)
+                .with(MySqlConnectorConfig.SNAPSHOT_LOCKING_MODE, "none")
+                .with(MySqlConnectorConfig.TABLE_INCLUDE_LIST, DATABASE.qualifiedTableName("DBZ5236"))
+                .with(MySqlConnectorConfig.CUSTOM_CONVERTERS, "boolean")
+                .with("boolean.type", TinyIntOneToBooleanConverter.class.getName())
+                .with("boolean.length.checker", "false")
+                .with("boolean.selector", ".*DBZ5236.ti2,.*DBZ5236.ti3")
+                .build();
+
+        // Start the connector ...
+        start(MySqlConnector.class, config);
+
+        consumeInitial();
+
+        assertUnsignedBooleanChangeRecord();
+
+        try (final Connection conn = MySqlTestConnection.forTestDatabase(DATABASE.getDatabaseName()).connection()) {
+            conn.createStatement().execute("INSERT INTO DBZ5236 VALUES (DEFAULT, 1, 1, 0)");
+        }
+        assertUnsignedBooleanChangeRecord();
+
+        stopConnector();
+    }
+
     private void consumeInitial() throws InterruptedException {
         // ---------------------------------------------------------------------------------------------------------------
         // Consume all of the events due to startup and initialization of the database
         // ---------------------------------------------------------------------------------------------------------------
         final int numDatabase = 2;
-        final int numTables = 4;
+        final int numTables = 6;
         final int numOthers = 2;
         consumeRecords(numDatabase + numTables + numOthers);
     }
@@ -171,5 +229,15 @@ public class MySqlTinyIntIT extends AbstractConnectorTest {
 
         Assertions.assertThat(change.getBoolean("b")).isEqualTo(true);
         Assertions.assertThat(change.schema().field("b").schema().defaultValue()).isEqualTo(false);
+    }
+
+    private void assertUnsignedBooleanChangeRecord() throws InterruptedException {
+        final SourceRecord record = consumeRecord();
+        Assertions.assertThat(record).isNotNull();
+        final Struct change = ((Struct) record.value()).getStruct("after");
+
+        Assertions.assertThat(change.getInt16("ti1")).isEqualTo((short) 1);
+        Assertions.assertThat(change.getBoolean("ti2")).isEqualTo(true);
+        Assertions.assertThat(change.getBoolean("ti3")).isEqualTo(false);
     }
 }

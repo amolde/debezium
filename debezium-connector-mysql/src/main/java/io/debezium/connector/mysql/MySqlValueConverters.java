@@ -7,7 +7,6 @@ package io.debezium.connector.mysql;
 
 import java.io.IOException;
 import java.math.BigDecimal;
-import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.Charset;
 import java.nio.charset.IllegalCharsetNameException;
@@ -38,7 +37,6 @@ import org.slf4j.LoggerFactory;
 
 import com.github.shyiko.mysql.binlog.event.deserialization.AbstractRowsEventDataDeserializer;
 import com.github.shyiko.mysql.binlog.event.deserialization.json.JsonBinary;
-import com.mysql.cj.CharsetMapping;
 
 import io.debezium.DebeziumException;
 import io.debezium.annotation.Immutable;
@@ -147,7 +145,6 @@ public class MySqlValueConverters extends JdbcValueConverters {
      *            {@link io.debezium.jdbc.JdbcValueConverters.BigIntUnsignedMode#PRECISE} is to be used
      * @param binaryMode how binary columns should be represented
      * @param adjuster a temporal adjuster to make a database specific time modification before conversion
-     * @param handler for errors during postponed binlog parsing
      */
     public MySqlValueConverters(DecimalMode decimalMode, TemporalPrecisionMode temporalPrecisionMode, BigIntUnsignedMode bigIntUnsignedMode,
                                 BinaryHandlingMode binaryMode,
@@ -184,12 +181,12 @@ public class MySqlValueConverters extends JdbcValueConverters {
             return Year.builder();
         }
         if (matches(typeName, "ENUM")) {
-            String commaSeperatedOptions = extractEnumAndSetOptionsAsString(column);
-            return io.debezium.data.Enum.builder(commaSeperatedOptions);
+            String commaSeparatedOptions = extractEnumAndSetOptionsAsString(column);
+            return io.debezium.data.Enum.builder(commaSeparatedOptions);
         }
         if (matches(typeName, "SET")) {
-            String commaSeperatedOptions = extractEnumAndSetOptionsAsString(column);
-            return io.debezium.data.EnumSet.builder(commaSeperatedOptions);
+            String commaSeparatedOptions = extractEnumAndSetOptionsAsString(column);
+            return io.debezium.data.EnumSet.builder(commaSeparatedOptions);
         }
         if (matches(typeName, "SMALLINT UNSIGNED") || matches(typeName, "SMALLINT UNSIGNED ZEROFILL")
                 || matches(typeName, "INT2 UNSIGNED") || matches(typeName, "INT2 UNSIGNED ZEROFILL")) {
@@ -213,6 +210,12 @@ public class MySqlValueConverters extends JdbcValueConverters {
                     // Source: https://kafka.apache.org/0102/javadoc/org/apache/kafka/connect/data/Schema.Type.html
                     return Decimal.builder(0);
             }
+        }
+        if ((matches(typeName, "FLOAT")
+                || matches(typeName, "FLOAT UNSIGNED")
+                || matches(typeName, "FLOAT UNSIGNED ZEROFILL"))
+                && column.scale().isEmpty() && column.length() <= 24) {
+            return SchemaBuilder.float32();
         }
         // Otherwise, let the base class handle it ...
         return super.schemaBuilder(column);
@@ -328,10 +331,10 @@ public class MySqlValueConverters extends JdbcValueConverters {
             logger.warn("Column is missing a character set: {}", column);
             return null;
         }
-        String encoding = CharsetMapping.getJavaEncodingForMysqlCharset(mySqlCharsetName);
+        String encoding = MySqlConnection.getJavaEncodingForMysqlCharSet(mySqlCharsetName);
         if (encoding == null) {
             logger.debug("Column uses MySQL character set '{}', which has no mapping to a Java character set, will try it in lowercase", mySqlCharsetName);
-            encoding = CharsetMapping.getJavaEncodingForMysqlCharset(mySqlCharsetName.toLowerCase());
+            encoding = MySqlConnection.getJavaEncodingForMysqlCharSet(mySqlCharsetName.toLowerCase());
         }
         if (encoding == null) {
             logger.warn("Column uses MySQL character set '{}', which has no mapping to a Java character set", mySqlCharsetName);
@@ -380,6 +383,53 @@ public class MySqlValueConverters extends JdbcValueConverters {
                 r.deliver(data);
             }
         });
+    }
+
+    @Override
+    protected Object convertSmallInt(Column column, Field fieldDefn, Object data) {
+        // MySQL allows decimal default values for smallint columns
+        if (data instanceof String) {
+            data = Math.round(Double.parseDouble((String) data));
+        }
+
+        return super.convertSmallInt(column, fieldDefn, data);
+    }
+
+    @Override
+    protected Object convertInteger(Column column, Field fieldDefn, Object data) {
+        // MySQL allows decimal default values for integer columns
+        if (data instanceof String) {
+            data = Math.round(Double.parseDouble((String) data));
+        }
+
+        return super.convertInteger(column, fieldDefn, data);
+    }
+
+    @Override
+    protected Object convertBigInt(Column column, Field fieldDefn, Object data) {
+        // MySQL allows decimal default values for bigint columns
+        if (data instanceof String) {
+            data = Math.round(Double.parseDouble((String) data));
+        }
+
+        return super.convertBigInt(column, fieldDefn, data);
+    }
+
+    /**
+     * MySql reports FLOAT(p) values as FLOAT and DOUBLE.
+     * A precision from 0 to 23 results in a 4-byte single-precision FLOAT column.
+     * A precision from 24 to 53 results in an 8-byte double-precision DOUBLE column.
+     * As of MySQL 8.0.17, the nonstandard FLOAT(M,D) and DOUBLE(M,D) syntax is deprecated, and should expect support
+     * for it be removed in a future version of MySQL. Based on this future, we didn't handle the case.
+     */
+    @Override
+    protected Object convertFloat(Column column, Field fieldDefn, Object data) {
+        if (column.scale().isEmpty() && column.length() <= 24) {
+            return super.convertReal(column, fieldDefn, data);
+        }
+        else {
+            return super.convertFloat(column, fieldDefn, data);
+        }
     }
 
     /**
@@ -618,13 +668,13 @@ public class MySqlValueConverters extends JdbcValueConverters {
     }
 
     @Override
-    protected ByteBuffer toByteBuffer(Column column, byte[] data) {
+    protected byte[] normalizeBinaryData(Column column, byte[] data) {
         // DBZ-254 right-pad fixed-length binary column values with 0x00 (zero byte)
         if (column.jdbcType() == Types.BINARY && data.length < column.length()) {
             data = Arrays.copyOf(data, column.length());
         }
 
-        return super.toByteBuffer(column, data);
+        return super.normalizeBinaryData(column, data);
     }
 
     /**

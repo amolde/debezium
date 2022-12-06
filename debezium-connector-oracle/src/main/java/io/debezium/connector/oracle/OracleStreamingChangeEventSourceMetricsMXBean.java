@@ -7,7 +7,6 @@ package io.debezium.connector.oracle;
 
 import java.util.Set;
 
-import io.debezium.connector.oracle.logminer.HistoryRecorder;
 import io.debezium.pipeline.metrics.StreamingChangeEventSourceMetricsMXBean;
 
 /**
@@ -119,11 +118,6 @@ public interface OracleStreamingChangeEventSourceMetricsMXBean extends Streaming
     void changeBatchSize(boolean increment, boolean lobEnabled);
 
     /**
-     * this flag indicates whether log mining is being recorded by {@link HistoryRecorder}
-     */
-    boolean getRecordMiningHistory();
-
-    /**
      * This represents the maximum number of entries processed per second from LogMiner sessions.
      * Entries include things such as DMLs, commits, rollbacks, etc.
      *
@@ -218,6 +212,11 @@ public interface OracleStreamingChangeEventSourceMetricsMXBean extends Streaming
     long getNumberOfRolledBackTransactions();
 
     /**
+     * @return the number of abandoned transactions because of number of events oversized
+     */
+    long getNumberOfOversizedTransactions();
+
+    /**
      * @return average number of committed transactions per second in the transaction buffer
      */
     long getCommitThroughput();
@@ -299,6 +298,26 @@ public interface OracleStreamingChangeEventSourceMetricsMXBean extends Streaming
      * @return the number of unparsable ddl statements
      */
     int getUnparsableDdlCount();
+
+    /**
+     * @return the current mining session's UGA memory usage in bytes.
+     */
+    long getMiningSessionUserGlobalAreaMemoryInBytes();
+
+    /**
+     * @return the current mining session's UGA maximum memory usage in bytes.
+     */
+    long getMiningSessionUserGlobalAreaMaxMemoryInBytes();
+
+    /**
+     * @return the current mining session's PGA memory usage in bytes.
+     */
+    long getMiningSessionProcessGlobalAreaMemoryInBytes();
+
+    /**
+     * @return the current mining session's PGA maximum memory usage in bytes.
+     */
+    long getMiningSessionProcessGlobalAreaMaxMemoryInBytes();
 
     /**
      * Resets metrics.

@@ -8,7 +8,10 @@ package io.debezium.schema;
 import java.util.Collection;
 
 import io.debezium.pipeline.spi.OffsetContext;
+import io.debezium.pipeline.spi.Offsets;
+import io.debezium.pipeline.spi.Partition;
 import io.debezium.relational.TableId;
+import io.debezium.spi.schema.DataCollectionId;
 
 /**
  * A database schema that is historized, i.e. it undergoes schema changes and can be recovered from a persistent schema
@@ -32,7 +35,11 @@ public interface HistorizedDatabaseSchema<I extends DataCollectionId> extends Da
 
     void applySchemaChange(SchemaChangeEvent schemaChange);
 
-    void recover(OffsetContext offset);
+    default void recover(Partition partition, OffsetContext offset) {
+        recover(Offsets.of(partition, offset));
+    }
+
+    void recover(Offsets<?, ?> offsets);
 
     void initializeStorage();
 

@@ -11,6 +11,7 @@ import static java.time.ZoneId.systemDefault;
 import java.io.StringWriter;
 import java.io.UnsupportedEncodingException;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.nio.charset.Charset;
 import java.sql.SQLException;
 import java.sql.Timestamp;
@@ -88,17 +89,21 @@ import io.debezium.util.Strings;
  */
 public class PostgresValueConverter extends JdbcValueConverters {
 
+    public static final Date POSITIVE_INFINITY_DATE = new Date(PGStatement.DATE_POSITIVE_INFINITY);
     public static final Timestamp POSITIVE_INFINITY_TIMESTAMP = new Timestamp(PGStatement.DATE_POSITIVE_INFINITY);
     public static final Instant POSITIVE_INFINITY_INSTANT = Conversions.toInstantFromMicros(PGStatement.DATE_POSITIVE_INFINITY);
     public static final LocalDateTime POSITIVE_INFINITY_LOCAL_DATE_TIME = LocalDateTime.ofInstant(POSITIVE_INFINITY_INSTANT, ZoneOffset.UTC);
     public static final OffsetDateTime POSITIVE_INFINITY_OFFSET_DATE_TIME = OffsetDateTime.ofInstant(Conversions.toInstantFromMillis(PGStatement.DATE_POSITIVE_INFINITY),
             ZoneOffset.UTC);
+    public static final LocalDate POSITIVE_INFINITY_LOCAL_DATE = LocalDate.parse("-5877611-06-21");
 
+    public static final Date NEGATIVE_INFINITY_DATE = new Date(PGStatement.DATE_NEGATIVE_INFINITY);
     public static final Timestamp NEGATIVE_INFINITY_TIMESTAMP = new Timestamp(PGStatement.DATE_NEGATIVE_INFINITY);
     public static final Instant NEGATIVE_INFINITY_INSTANT = Conversions.toInstantFromMicros(PGStatement.DATE_NEGATIVE_INFINITY);
     public static final LocalDateTime NEGATIVE_INFINITY_LOCAL_DATE_TIME = LocalDateTime.ofInstant(NEGATIVE_INFINITY_INSTANT, ZoneOffset.UTC);
     public static final OffsetDateTime NEGATIVE_INFINITY_OFFSET_DATE_TIME = OffsetDateTime.ofInstant(Conversions.toInstantFromMillis(PGStatement.DATE_NEGATIVE_INFINITY),
             ZoneOffset.UTC);
+    public static final LocalDate NEGATIVE_INFINITY_LOCAL_DATE = LocalDate.parse("-5877611-06-22");
 
     /**
      * Variable scale decimal/numeric is defined by metadata
@@ -153,6 +158,8 @@ public class PostgresValueConverter extends JdbcValueConverters {
     private final String toastPlaceholderString;
     private final byte[] toastPlaceholderBinary;
 
+    private final int moneyFractionDigits;
+
     public static PostgresValueConverter of(PostgresConnectorConfig connectorConfig, Charset databaseCharset, TypeRegistry typeRegistry) {
         return new PostgresValueConverter(
                 databaseCharset,
@@ -165,14 +172,15 @@ public class PostgresValueConverter extends JdbcValueConverters {
                 connectorConfig.hStoreHandlingMode(),
                 connectorConfig.binaryHandlingMode(),
                 connectorConfig.intervalHandlingMode(),
-                connectorConfig.toastedValuePlaceholder());
+                connectorConfig.getUnavailableValuePlaceholder(),
+                connectorConfig.moneyFractionDigits());
     }
 
     protected PostgresValueConverter(Charset databaseCharset, DecimalMode decimalMode,
                                      TemporalPrecisionMode temporalPrecisionMode, ZoneOffset defaultOffset,
                                      BigIntUnsignedMode bigIntUnsignedMode, boolean includeUnknownDatatypes, TypeRegistry typeRegistry,
                                      HStoreHandlingMode hStoreMode, BinaryHandlingMode binaryMode, IntervalHandlingMode intervalMode,
-                                     byte[] toastPlaceholder) {
+                                     byte[] toastPlaceholder, int moneyFractionDigits) {
         super(decimalMode, temporalPrecisionMode, defaultOffset, null, bigIntUnsignedMode, binaryMode);
         this.databaseCharset = databaseCharset;
         this.jsonFactory = new JsonFactory();
@@ -182,6 +190,7 @@ public class PostgresValueConverter extends JdbcValueConverters {
         this.intervalMode = intervalMode;
         this.toastPlaceholderBinary = toastPlaceholder;
         this.toastPlaceholderString = new String(toastPlaceholder);
+        this.moneyFractionDigits = moneyFractionDigits;
     }
 
     @Override
@@ -221,8 +230,7 @@ public class PostgresValueConverter extends JdbcValueConverters {
             case PgOid.POINT:
                 return Point.builder();
             case PgOid.MONEY:
-                // Money has always scale 2
-                return Decimal.builder(2);
+                return moneySchema();
             case PgOid.NUMERIC:
                 return numericSchema(column);
             case PgOid.BYTEA:
@@ -330,20 +338,38 @@ public class PostgresValueConverter extends JdbcValueConverters {
                 }
 
                 final PostgresType resolvedType = typeRegistry.get(oidValue);
+
                 if (resolvedType.isEnumType()) {
                     return io.debezium.data.Enum.builder(Strings.join(",", resolvedType.getEnumValues()));
                 }
-                else if (resolvedType.isArrayType() && resolvedType.getElementType().isEnumType()) {
-                    List<String> enumValues = resolvedType.getElementType().getEnumValues();
-                    return SchemaBuilder.array(io.debezium.data.Enum.builder(Strings.join(",", enumValues)));
-                }
+                else if (resolvedType.isArrayType()) {
+                    if (resolvedType.getElementType().isEnumType()) {
+                        List<String> enumValues = resolvedType.getElementType().getEnumValues();
+                        return SchemaBuilder.array(io.debezium.data.Enum.builder(Strings.join(",", enumValues)));
+                    }
+                    else {
+                        // unfortunately, this does not work for array columns of domain types; the element type will have a
+                        // non-matching JDBC id, resulting in no schema builder to be returned for those; the only way to export
+                        // them right now is via 'includeUnknownDatatypes'
+                        final SchemaBuilder jdbcSchemaBuilder = arrayElementSchema(column);
 
-                final SchemaBuilder jdbcSchemaBuilder = super.schemaBuilder(column);
-                if (jdbcSchemaBuilder == null) {
-                    return includeUnknownDatatypes ? binaryMode.getSchema() : null;
+                        if (jdbcSchemaBuilder != null) {
+                            return SchemaBuilder.array(jdbcSchemaBuilder);
+                        }
+                        else {
+                            return includeUnknownDatatypes ? SchemaBuilder.array(binaryMode.getSchema()) : null;
+                        }
+                    }
                 }
                 else {
-                    return jdbcSchemaBuilder;
+                    SchemaBuilder jdbcSchemaBuilder = super.schemaBuilder(column);
+
+                    if (jdbcSchemaBuilder != null) {
+                        return jdbcSchemaBuilder;
+                    }
+                    else {
+                        return includeUnknownDatatypes ? binaryMode.getSchema() : null;
+                    }
                 }
         }
     }
@@ -365,6 +391,37 @@ public class PostgresValueConverter extends JdbcValueConverters {
                     SchemaBuilder.STRING_SCHEMA,
                     SchemaBuilder.OPTIONAL_STRING_SCHEMA);
         }
+    }
+
+    private SchemaBuilder moneySchema() {
+        switch (decimalMode) {
+            case DOUBLE:
+                return SchemaBuilder.float64();
+            case PRECISE:
+                return Decimal.builder(moneyFractionDigits);
+            case STRING:
+                return SchemaBuilder.string();
+            default:
+                throw new IllegalArgumentException("Unknown decimalMode");
+        }
+    }
+
+    private SchemaBuilder arrayElementSchema(Column column) {
+        PostgresType arrayType = typeRegistry.get(column.nativeType());
+        PostgresType elementType = arrayType.getElementType();
+        final String elementTypeName = elementType.getName();
+        final String elementColumnName = column.name() + "-element";
+        final Column elementColumn = Column.editor()
+                .name(elementColumnName)
+                .jdbcType(elementType.getJdbcId())
+                .nativeType(elementType.getOid())
+                .type(elementTypeName)
+                .optional(true)
+                .scale(column.scale().orElse(null))
+                .length(column.length())
+                .create();
+
+        return schemaBuilder(elementColumn);
     }
 
     @Override
@@ -403,7 +460,7 @@ public class PostgresValueConverter extends JdbcValueConverters {
             case PgOid.POINT:
                 return data -> convertPoint(column, fieldDefn, data);
             case PgOid.MONEY:
-                return data -> convertMoney(column, fieldDefn, data);
+                return data -> convertMoney(column, fieldDefn, data, decimalMode);
             case PgOid.NUMERIC:
                 return (data) -> convertDecimal(column, fieldDefn, data, decimalMode);
             case PgOid.BYTEA:
@@ -508,7 +565,11 @@ public class PostgresValueConverter extends JdbcValueConverters {
                 .length(column.length())
                 .create();
 
-        Schema elementSchema = schemaBuilder(elementColumn)
+        SchemaBuilder elementSchemaBuilder = schemaBuilder(elementColumn);
+        if (elementSchemaBuilder == null) {
+            return null;
+        }
+        Schema elementSchema = elementSchemaBuilder
                 .optional()
                 .build();
 
@@ -722,14 +783,31 @@ public class PostgresValueConverter extends JdbcValueConverters {
         return super.convertBits(column, fieldDefn, data, numBytes);
     }
 
-    protected Object convertMoney(Column column, Field fieldDefn, Object data) {
-        return convertValue(column, fieldDefn, data, BigDecimal.ZERO.setScale(2), (r) -> {
-            if (data instanceof Double) {
-                r.deliver(BigDecimal.valueOf((Double) data).setScale(2));
-            }
-            else if (data instanceof Number) {
-                // the plugin will return a 64bit signed integer where the last 2 are always decimals
-                r.deliver(BigDecimal.valueOf(((Number) data).longValue(), 2));
+    protected Object convertMoney(Column column, Field fieldDefn, Object data, DecimalMode mode) {
+        return convertValue(column, fieldDefn, data, BigDecimal.ZERO.setScale(moneyFractionDigits), (r) -> {
+            switch (mode) {
+                case DOUBLE:
+                    if (data instanceof Double) {
+                        r.deliver(data);
+                    }
+                    else if (data instanceof Number) {
+                        r.deliver(((Number) data).doubleValue());
+                    }
+                    break;
+                case PRECISE:
+                    if (data instanceof Double) {
+                        r.deliver(BigDecimal.valueOf((Double) data).setScale(moneyFractionDigits, RoundingMode.HALF_UP));
+                    }
+                    else if (data instanceof Number) {
+                        // the plugin will return a 64bit signed integer where the last #moneyFractionDigits are always decimals
+                        r.deliver(BigDecimal.valueOf(((Number) data).longValue()).setScale(moneyFractionDigits, RoundingMode.HALF_UP));
+                    }
+                    break;
+                case STRING:
+                    r.deliver(String.valueOf(data));
+                    break;
+                default:
+                    throw new IllegalArgumentException("Unknown decimalMode");
             }
         });
     }
@@ -950,7 +1028,9 @@ public class PostgresValueConverter extends JdbcValueConverters {
     }
 
     private boolean isVariableScaleDecimal(final Column column) {
-        return column.length() == VARIABLE_SCALE_DECIMAL_LENGTH &&
+        // TODO: Remove VARIABLE_SCALE_DECIMAL_LENGTH when https://github.com/pgjdbc/pgjdbc/issues/2275
+        // is closed.
+        return (column.length() == 0 || column.length() == VARIABLE_SCALE_DECIMAL_LENGTH) &&
                 column.scale().orElseGet(() -> 0) == 0;
     }
 
@@ -1018,6 +1098,11 @@ public class PostgresValueConverter extends JdbcValueConverters {
     @Override
     protected Object convertBinaryToBase64(Column column, Field fieldDefn, Object data) {
         return super.convertBinaryToBase64(column, fieldDefn, (data instanceof PGobject) ? ((PGobject) data).getValue() : data);
+    }
+
+    @Override
+    protected Object convertBinaryToBase64UrlSafe(Column column, Field fieldDefn, Object data) {
+        return super.convertBinaryToBase64UrlSafe(column, fieldDefn, (data instanceof PGobject) ? ((PGobject) data).getValue() : data);
     }
 
     @Override

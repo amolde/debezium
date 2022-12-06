@@ -3,7 +3,7 @@
 [id="debezium-connector-for-vitess"]
 = {prodname} connector for Vitess
 :context: vitess
-
+:mbean-name: {context}
 :toc:
 :toc-placement: macro
 :linkattrs:
@@ -12,7 +12,8 @@
 
 toc::[]
 
-{prodname}'s Vitess connector captures row-level changes in the shards of a Vitess link:https://vitess.io/docs/concepts/keyspace/[keyspace]. Vitess version {link-prefix}:{link-vitess-connector}#limitations-with-earlier-vitess-versions[8.0.0], 9.0.0 are supported.
+{prodname}'s Vitess connector captures row-level changes in the shards of a Vitess link:https://vitess.io/docs/concepts/keyspace/[keyspace].
+For information about the Vitess versions that are compatible with this connector, see the link:https://debezium.io/releases/[{prodname} release overview].
 
 The connector does not support snapshot feature at the moment. The first time it connects to a Vitess cluster, it starts from the current VGTID location of the keyspace and continuously captures row-level changes that insert, update, and delete database content and that were committed to a Vitess keyspace. The connector generates data change event records and streams them to Kafka topics. For each table, the default behavior is that the connector streams all generated events to a separate Kafka topic for that table. Applications and services consume data change event records from that topic.
 
@@ -66,9 +67,9 @@ When Kafka Connect gracefully shuts down, it stops the connectors, flushes all e
 [[vitess-topic-names]]
 === Topics names
 
-The Vitess connector writes events for all insert, update, and delete operations on a single table to a single Kafka topic. By default, the Kafka topic name is _serverName_._keyspaceName_._tableName_ where:
+The Vitess connector writes events for all insert, update, and delete operations on a single table to a single Kafka topic. By default, the Kafka topic name is _topicPrefix_._keyspaceName_._tableName_ where:
 
-* _serverName_ is the logical name of the connector as specified with the `database.server.name` connector configuration property.
+* _topicPrefix_ is the topic prefix as specified by the `topic.prefix` connector configuration property.
 * _keyspaceName_ is the name of the keyspace (a.k.a. database) where the operation occurred.
 * _tableName_ is the name of the database table in which the operation occurred.
 
@@ -78,6 +79,89 @@ For example, suppose that `fulfillment` is the logical server name in the config
 * `fulfillment.commerce.products_on_hand`
 * `fulfillment.commerce.customers`
 * `fulfillment.commerce.orders`
+
+[[vitess-transaction-metadata]]
+=== Transaction metadata
+
+{prodname} can generate events that represent transaction boundaries and that enrich data change event messages.
+
+[NOTE]
+.Limits on when {prodname} receives transaction metadata
+====
+{prodname} registers and receives metadata only for transactions that occur after you deploy the connector.
+Metadata for transactions that occur before you deploy the connector is not available.
+====
+
+{prodname} generates transaction boundary events for the `BEGIN` and `END` delimiters in every transaction.
+Transaction boundary events contain the following fields:
+
+`status`:: `BEGIN` or `END`.
+`id`:: String representation of the unique transaction identifier.
+`ts_ms`:: The time of a transaction boundary event (`BEGIN` or `END` event) at the data source.
+If the data source does not provide {prodname} with the event time, then the field instead represents the time at which {prodname} processes the event.
+`event_count` (for `END` events):: Total number of events emitted by the transaction.
+`data_collections` (for `END` events):: An array of pairs of `data_collection` and `event_count` elements that indicates the number of events that the connector emits for changes that originate from a data collection.
+
+.Example
+
+[source,json,indent=0,subs="+attributes"]
+----
+{
+  "status": "BEGIN",
+  "id": "[{\"keyspace\":\"test_unsharded_keyspace\",\"shard\":\"0\",\"gtid\":\"MySQL56/e03ece6c-4c04-11ec-8e20-0242ac110004:1-37\"}]",
+  "ts_ms": 1486500577125,
+  "event_count": null,
+  "data_collections": null
+}
+
+{
+  "status": "END",
+  "id": "[{\"keyspace\":\"test_unsharded_keyspace\",\"shard\":\"0\",\"gtid\":\"MySQL56/e03ece6c-4c04-11ec-8e20-0242ac110004:1-37\"}]",
+  "ts_ms": 1486500577691,
+  "event_count": 1,
+  "data_collections": [
+    {
+      "data_collection": "test_unsharded_keyspace.my_seq",
+      "event_count": 1
+    }
+  ]
+}
+----
+
+Unless overridden via the xref:vitess-property-topic-transaction[`topic.transaction`] option,
+the connector emits transaction events to the xref:vitess-property-topic-prefix[`_<topic.prefix>_`]`.transaction` topic.
+
+.Change data event enrichment
+
+When transaction metadata is enabled the data message `Envelope` is enriched with a new `transaction` field.
+This field provides information about every event in the form of a composite of fields:
+
+* `id` - string representation of unique transaction identifier
+* `total_order` - absolute position of the event among all events generated by the transaction
+* `data_collection_order` - the per-data collection position of the event among all events that were emitted by the transaction
+
+Following is an example of a message:
+
+[source,json,indent=0,subs="+attributes"]
+----
+{
+  "before": null,
+  "after": {
+    "pk": "2",
+    "aa": "1"
+  },
+  "source": {
+...
+  },
+  "op": "c",
+  "ts_ms": 1637988245467,
+  "transaction": {
+    "id": "[{\"keyspace\":\"test_unsharded_keyspace\",\"shard\":\"0\",\"gtid\":\"MySQL56/e03ece6c-4c04-11ec-8e20-0242ac110004:1-68\"}]",
+    "total_order": 1,
+    "data_collection_order": 1
+  }
+}
+----
 
 // Type: assembly
 // ModuleID: descriptions-of-debezium-vitess-connector-data-change-events
@@ -118,7 +202,7 @@ The following skeleton JSON shows the basic four parts of a change event. Howeve
 |`schema`
 |The first `schema` field is part of the event key. It specifies a Kafka Connect schema that describes what is in the event key's `payload` portion. In other words, the first `schema` field describes the structure of the primary key, or the first single-column unique key if the table does not have a primary key, for the table that was changed. Multi-column unique key is not supported. +
  +
-It is possible to override the table's primary key by setting the {link-prefix}:{link-vitess-connector}#vitess-property-message-key-columns[`message.key.columns` connector configuration property]. In this case, the first schema field describes the structure of the key identified by that property.
+It is possible to override the table's primary key by setting the xref:vitess-property-message-key-columns[`message.key.columns` connector configuration property]. In this case, the first schema field describes the structure of the key identified by that property.
 
 |2
 |`payload`
@@ -135,7 +219,7 @@ It is possible to override the table's primary key by setting the {link-prefix}:
 |===
 
 
-By default behavior is that the connector streams change event records to {link-prefix}:{link-vitess-connector}#vitess-topic-names[topics with names that are the same as the event's originating table].
+By default behavior is that the connector streams change event records to xref:vitess-topic-names[topics with names that are the same as the event's originating table].
 
 [NOTE]
 ====
@@ -177,7 +261,7 @@ CREATE TABLE customers (
 ----
 
 .Example change event key
-If the `database.server.name` connector configuration property has the value `Vitess_server`, every change event for the `customers` table while it has this definition has the same key structure, which in JSON looks like this:
+If the `topic.prefix` connector configuration property has the value `Vitess_server`, every change event for the `customers` table while it has this definition has the same key structure, which in JSON looks like this:
 
 [source,json,indent=0]
 ----
@@ -265,7 +349,7 @@ CREATE TABLE customers (
 );
 ----
 
-The emitted events for `UPDATE` and `DELETE` oeprations contain the previous values of all columns in the table.
+The emitted events for `UPDATE` and `DELETE` operations contain the previous values of all columns in the table.
 
 // Type: continue
 [[vitess-create-events]]
@@ -417,8 +501,8 @@ The following example shows the value portion of a change event that the connect
             "name": "my_sharded_connector",
             "ts_ms": 1559033904863,
             "snapshot": true,
-            "db": "Vitess_server",
-            "schema": "commerce",
+            "db": "",
+            "keyspace": "commerce",
             "table": "customers",
             "vgtid": "[{\"keyspace\":\"commerce\",\"shard\":\"80-\",\"gtid\":\"MariaDB/0-54610504-47\"},{\"keyspace\":\"commerce\",\"shard\":\"-80\",\"gtid\":\"MariaDB/0-1592148-45\"}]"
         },
@@ -444,7 +528,7 @@ a|In the `schema` section, each `name` field specifies the schema for a field in
  +
 `Vitess_server.commerce.customers.Value` is the schema for the payload's `before` and `after` fields. This schema is specific to the `customers` table. +
  +
-Names of schemas for `before` and `after` fields are of the form `_logicalName_._keyspaceName_._tableName_.Value`, which ensures that the schema name is unique in the database. This means that when using the {link-prefix}:{link-avro-serialization}[Avro converter], the resulting Avro schema for each table in each logical source has its own evolution and history.
+Names of schemas for `before` and `after` fields are of the form `_logicalName_._keyspaceName_._tableName_.Value`, which ensures that the schema name is unique in the database. This means that when using the xref:{link-avro-serialization}[Avro converter], the resulting Avro schema for each table in each logical source has its own evolution and history.
 
 |3
 |`name`
@@ -459,7 +543,7 @@ a|`Vitess_server.commerce.customers.Envelope` is the schema for the overall stru
 |The value's actual data. This is the information that the change event is providing. +
  +
 It may appear that the JSON representations of the events are much larger than the rows they describe. This is because the JSON representation must include the schema and the payload portions of the message.
-However, by using the {link-prefix}:{link-avro-serialization}[Avro converter], you can significantly decrease the size of the messages that the connector streams to Kafka topics.
+However, by using the xref:{link-avro-serialization}[Avro converter], you can significantly decrease the size of the messages that the connector streams to Kafka topics.
 
 |6
 |`before`
@@ -525,8 +609,8 @@ The value of a change event for an update in the sample `customers` table has th
             "name": "my_sharded_connector",
             "ts_ms": 1559033904863,
             "snapshot": null,
-            "db": "Vitess_server",
-            "schema": "commerce",
+            "db": "",
+            "keyspace": "commerce",
             "table": "customers",
             "vgtid": "[{\"keyspace\":\"commerce\",\"shard\":\"80-\",\"gtid\":\"MariaDB/0-54610504-47\"},{\"keyspace\":\"commerce\",\"shard\":\"-80\",\"gtid\":\"MariaDB/0-1592148-46\"}]"
         },
@@ -574,7 +658,7 @@ In the `source` object, `ts_ms` indicates the time that the change was made in t
 
 [NOTE]
 ====
-Updating the columns for a row's primary key changes the value of the row's key. When a key changes, {prodname} outputs _three_ events: a `DELETE` event and a {link-prefix}:{link-vitess-connector}#vitess-tombstone-events[tombstone event] with the old key for the row, followed by an event with the new key for the row. Details are in the next section.
+Updating the columns for a row's primary key changes the value of the row's key. When a key changes, {prodname} outputs _three_ events: a `DELETE` event and a xref:vitess-tombstone-events[tombstone event] with the old key for the row, followed by an event with the new key for the row. Details are in the next section.
 ====
 
 [[vitess-delete-events]]
@@ -600,8 +684,8 @@ The value in a _delete_ change event has the same `schema` portion as _create_ a
             "name": "my_sharded_connector",
             "ts_ms": 1559033904863,
             "snapshot": null,
-            "db": "Vitess_server",
-            "schema": "commerce",
+            "db": "",
+            "keyspace": "commerce",
             "table": "customers",
             "vgtid": "[{\"keyspace\":\"commerce\",\"shard\":\"80-\",\"gtid\":\"MariaDB/0-54610504-47\"},{\"keyspace\":\"commerce\",\"shard\":\"-80\",\"gtid\":\"MariaDB/0-1592148-47\"}]"
         },
@@ -664,6 +748,8 @@ When a row is deleted, the _delete_ event value still works with log compaction,
 
 The Vitess connector represents changes to rows with events that are structured like the table in which the row exists. The event contains a field for each column value. How that value is represented in the event depends on the Vitess data type of the column. This section describes these mappings.
 
+If the default data type conversions do not meet your needs, you can {link-prefix}:{link-custom-converters}#custom-converters[create a custom converter] for the connector.
+
 [id="vitess-basic-types"]
 === Basic types
 
@@ -724,24 +810,24 @@ a|_n/a_
 |`FLOAT64`
 a|_n/a_
 
-|`CHAR(M)]`
+|`CHAR[(M)]`
 |`STRING`
 a|_n/a_
 
-|`VARCHAR(M)]`
+|`VARCHAR[(M)]`
 |`STRING`
 a|_n/a_
 
-|`BINARY(M)]`
-|`STRING`
+|`BINARY[(M)]`
+|`BYTES`
 a|_n/a_
 
-|`VARBINARY(M)]`
-|`STRING`
+|`VARBINARY[(M)]`
+|`BYTES`
 a|_n/a_
 
 |`TINYBLOB`
-|`STRING`
+|`BYTES`
 a|_n/a_
 
 |`TINYTEXT`
@@ -749,7 +835,7 @@ a|_n/a_
 a|_n/a_
 
 |`BLOB`
-|`STRING`
+|`BYTES`
 a|_n/a_
 
 |`TEXT`
@@ -757,7 +843,7 @@ a|_n/a_
 a|_n/a_
 
 |`MEDIUMBLOB`
-|`STRING`
+|`BYTES`
 a|_n/a_
 
 |`MEDIUMTEXT`
@@ -765,7 +851,7 @@ a|_n/a_
 a|_n/a_
 
 |`LONGBLOB`
-|`STRING`
+|`BYTES`
 a|_n/a_
 
 |`LONGTEXT`
@@ -825,17 +911,9 @@ a|_n/a_
 // ModuleID: setting-up-vitess-to-run-a-debezium-connector
 // Title: Setting up Vitess to run a {prodname} connector
 [[setting-up-vitess]]
-== Set up
+== Seting up Vitess
 
-Vitess does not require special setup before you can install and run a {prodname} connector.
-
-// Type: procedure
-// ModuleID: vitess-setup
-// Title: Vitess Setup for {prodname}
-[[setup-vitess]]
-=== Setup Vitess
-
-You can follow the link:https://vitess.io/docs/get-started/local-docker/[Local Install via Docker] guide, or the link:https://vitess.io/docs/get-started/operator/[Vitess Operator for Kubernetes] guide to install Vitess. No special setup is needed to support Vitess connector.
+{prodname} does not require any specific configuration for use with Vitess. Install Vitess according to the standard instructions in the link:https://vitess.io/docs/get-started/local-docker/[Local Install via Docker] guide, or the link:https://vitess.io/docs/get-started/operator/[Vitess Operator for Kubernetes] guide.
 
 .Checklist
 
@@ -858,7 +936,7 @@ Because Vitess connector reads change events from the VTGate VStream gRPC server
 
 With link:https://zookeeper.apache.org[Zookeeper], link:http://kafka.apache.org/[Kafka], and {link-kafka-docs}.html#connect[Kafka Connect] installed, the remaining tasks to deploy a {prodname} Vitess connector are to download the link:https://repo1.maven.org/maven2/io/debezium/debezium-connector-vitess/{debezium-version}/debezium-connector-vitess-{debezium-version}-plugin.tar.gz[connector's plug-in archive], extract the JAR files into your Kafka Connect environment, and add the directory with the JAR files to {link-kafka-docs}/#connectconfigs[Kafka Connect's `plugin.path`]. You then need to restart your Kafka Connect process to pick up the new JAR files.
 
-If you are working with immutable containers, see link:https://hub.docker.com/r/debezium/[{prodname}'s Container images] for Zookeeper, Kafka and Kafka Connect with the Vitess connector already installed and ready to run. You can also xref:operations/openshift.adoc[run {prodname} on Kubernetes and OpenShift].
+If you are working with immutable containers, see link:https://quay.io/organization/debezium[{prodname}'s Container images] for Zookeeper, Kafka and Kafka Connect with the Vitess connector already installed and ready to run. You can also xref:operations/openshift.adoc[run {prodname} on Kubernetes and OpenShift].
 
 // Type: concept
 // ModuleID:debezium-vitess-connector-configuration-example
@@ -886,7 +964,7 @@ You can choose to produce events for a subset of the schemas and tables. Optiona
     "vitess.vtctld.port": "15999", // <10>
     "vitess.vtctld.user": "vitess", // <11>
     "vitess.vtctld.password": "vitess_password", // <12>
-    "database.server.name": "fullfillment", // <13>
+    "topic.prefix": "fullfillment", // <13>
     "tasks.max": 1 // <14>
   }
 }
@@ -903,10 +981,63 @@ You can choose to produce events for a subset of the schemas and tables. Optiona
 <10> The port of the VTCtld server.
 <11> The username of the VTCtld server (VTCtld gRPC).
 <12> The password of the VTCtld database server (VTCtld gRPC).
-<13> The logical name of the Vitess cluster, which forms a namespace and is used in all the names of the Kafka topics to which the connector writes, the Kafka Connect schema names, and the namespaces of the corresponding Avro schema when the Avro converter is used.
+<13> The topic prefix for the Vitess cluster, which forms a namespace and is used in all the names of the Kafka topics to which the connector writes, the Kafka Connect schema names, and the namespaces of the corresponding Avro schema when the Avro converter is used.
 <14> Only one task should operate at any one time.
 
-See the {link-prefix}:{link-vitess-connector}#vitess-connector-properties[complete list of Vitess connector properties] that can be specified in these configurations.
+See the xref:vitess-connector-properties[complete list of Vitess connector properties] that can be specified in these configurations.
+
+You can send this configuration with a `POST` command to a running Kafka Connect service. The service records the configuration and starts the connector task that connects to the Vitess database and streams change event records to Kafka topics.
+
+// Type: concept
+// ModuleID:debezium-vitess-connector-configuration-example-offset-storage-per-task
+// Title: {prodname} Vitess connector configuration example-offset-storage-per-task
+[[vitess-example-configuration-offset-storage-per-task]]
+=== Connector configuration example for offset-storage-per-task mode
+
+When you have a big Vitess installation which requires more than one connector task to process the change logs, you can use offset-storage-per-task feature to launch multiple connector tasks and have each task work with a subset of vitess shards.  Each task will persist its offsets (the vgtids for the shards it's tracking) in Kafka's offset topic in its own partition space.
+
+Following is the same example for a Vitess connector that connects to a Vitess (VTGate's VStream) server but with three additional parameteres to invoke the offset-storage-per-task mode.
+
+[source,json]
+----
+{
+  "name": "inventory-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.vitess.VitessConnector",
+    "database.hostname": "192.168.99.100",
+    "database.port": "15991",
+    "database.user": "vitess",
+    "database.password": "vitess_password",
+    "vitess.keyspace": "commerce",
+    "vitess.tablet.type": "MASTER",
+    "vitess.vtctld.host": "192.168.99.101",
+    "vitess.vtctld.port": "15999",
+    "vitess.vtctld.user": "vitess",
+    "vitess.vtctld.password": "vitess_password",
+    "database.server.name": "fullfillment",
+    "vitess.offset.storage.per.task": true, // <1>
+    "vitess.offset.storage.task.key.gen": 1, // <2>
+    "vitess.prev.num.tasks": 1, // <3>
+    "tasks.max": 2 // <4>
+  }
+}
+----
+<1> Specify that we want to turn on offset-storage-per-task feature
+<2> Specify that the generation number for the current task parallelism is 1
+<3> Specify that the number of tasks in the previous generation of task parallelism is 1
+<4> Specify that we want to launch two tasks for the current task parallelism
+
+The task to vitess shards distribution is based on a simple round robin algorithm.  In this example of launching two connector tasks and assume we have 4 vitess shards (-40,40-80,80-c0,c0-), task0 will be working on shards (-40,80-c0) and task1 will be working on shards (40-80,c0-).
+
+The reason that we need three config params is to make sure the offsets saved by each connector task don't collide with each other and to handle the migration of offsets by the previous task paralleism automatically.  In order to make sure that we don't collide on the partition keys in Kafka offset topic, we are using this partition name scheme for each connector task: taskId_numTasks_gen.  So for the current example of launching two tasks with generation number 1, task0 will be writing its offsets in Kafka's offset topic in partition key: task0_2_1 and task1 will be using partition key: (task1_2_1). The gen config param is used to distinguish the partition keys generated from different generations (generation corresponds to each change of task parallelism)
+
+When the task paralleism changes (e.g. you want to launch 4 connector tasks instead of 2 to handle the bigger volume of traffic from vitess), you will specify tasks.max=4, vitess.offset.storage.task.key.gen=2, vitess.prev.num.tasks=2, the offset partition for this task paralleism generation will be: task0_4_2, task1_4_2, task2_4_2, task3_4_2.  Once the connector restarts, the connector will detect there is no previous offsets saved for the current 4 partition keys and it will invoke an automatic offset migration from the offsets saved in the previous generation keys: task0_2_1 and task1_2_1.  For the current example of 4 vitess shards (-40,40-80,80-c0,c0-), task0 will be working on shard:(-40), task1:(40-80), task2:(80-c0), task3:(c0-).  The offsets for those 4 shards from the previous generation of parallelism (using 2 tasks with each task working with 2 shards) will be auto-migrated to this generation of using 4 tasks (one task working with one shard each).
+
+Note that the task parallelism gen number is defaulted to be 0 for the offsets saved in Kafka offset topic before offset-storage-per-task feature is enabled, there is a special offset lookup during offset migration.  So if you have the vitess connector running for a while without the offset-storage-per-task feature on and now you want to turn on this feature, please specify vitess.offset.storage.task.key.gen=1, vitess.prev.num.tasks=1 to help the offset auto migration.
+
+Note that vitess.prev.num.tasks needs to match the actual number of tasks launched in the previous task parallelism generation.  The number of connector tasks is usually the same as the tasks.max config params you specified, but in the rare case that tasks.max > number of vitess shards, the connector will only launch the_number_of_tasks = the_number_of_vitess_shards.  This rare case is probably a mis-configuration in the first place.
+
+See the xref:vitess-connector-properties[complete list of Vitess connector properties] that can be specified in these configurations.
 
 You can send this configuration with a `POST` command to a running Kafka Connect service. The service records the configuration and starts the connector task that connects to the Vitess database and streams change event records to Kafka topics.
 
@@ -944,9 +1075,9 @@ When the connector starts, it starts generating data change events for row-level
 
 The {prodname} Vitess connector provides only one type of metrics that are in addition to the built-in support for JMX metrics that Zookeeper, Kafka, and Kafka Connect provide.
 
-* {link-prefix}:{link-vitess-connector}#vitess-streaming-metrics[Streaming metrics] provide information about connector operation when the connector is capturing changes and streaming change event records.
+* xref:vitess-streaming-metrics[Streaming metrics] provide information about connector operation when the connector is capturing changes and streaming change event records.
 
-{link-prefix}:{link-debezium-monitoring}#monitoring-debezium[{prodname} monitoring documentation] provides details for how to expose these metrics by using JMX.
+xref:{link-debezium-monitoring}#monitoring-debezium[{prodname} monitoring documentation] provides details for how to expose these metrics by using JMX.
 
 // Type: reference
 // ModuleID: monitoring-debezium-vitess-connector-record-streaming
@@ -954,7 +1085,7 @@ The {prodname} Vitess connector provides only one type of metrics that are in ad
 [[vitess-streaming-metrics]]
 ==== Streaming metrics
 
-The *MBean* is `debezium.vitess:type=connector-metrics,context=streaming,server=_<database.server.name>_`.
+include::{partialsdir}/modules/all-connectors/frag-common-mbean-name.adoc[leveloffset=+1,tags=common-streaming]
 
 [cols="45%a,25%a,30%a",options="header"]
 |===
@@ -1027,19 +1158,19 @@ The following configuration properties are _required_ unless a default value is 
 |Description
 
 |[[vitess-property-name]]<<vitess-property-name, `+name+`>>
-|
+|No default
 |Unique name for the connector. Attempting to register again with the same name will fail. This property is required by all Kafka Connect connectors.
 
 |[[vitess-property-connector-class]]<<vitess-property-connector-class, `+connector.class+`>>
-|
+|No default
 |The name of the Java class for the connector. Always use a value of `io.debezium.connector.vitess.VitessConnector` for the Vitess connector.
 
 |[[vitess-property-tasks-max]]<<vitess-property-tasks-max, `+tasks.max+`>>
 |`1`
-|The maximum number of tasks that should be created for this connector. The Vitess connector always uses a single task and therefore does not use this value, so the default is always acceptable.
+|The maximum number of tasks that should be created for this connector. The Vitess connector can use more than 1 tasks if you enable offset.storage.per.task mode.
 
 |[[vitess-property-database-hostname]]<<vitess-property-database-hostname, `+database.hostname+`>>
-|
+|No default
 |IP address or hostname of the Vitess database server (VTGate).
 
 |[[vitess-property-database-port]]<<vitess-property-database-port, `+database.port+`>>
@@ -1054,6 +1185,20 @@ The following configuration properties are _required_ unless a default value is 
 |_n/a_
 |An optional name of the shard from which to stream the changes. If not configured, in case of unsharded keyspace, the connector streams changes from the only shard, in case of sharded keyspace, the connector streams changes from all shards in the keyspace. We recommend not configuring it in order to stream from all shards in the keyspace because it has better support for reshard operation. If configured, for example, `-80`, the connector will stream changes from the `-80` shard.
 
+|[[vitess-property-gtid]]<<vitess-property-gtid, `+vitess.gtid+`>>
+|`current`
+|An optional GTID position for a shard to stream from. This has to be set together with `vitess.shard`. If not configured, the connector streams changes from the latest position for the given shard.
+
+|[[vitess-property-stop-on-reshard]]<<vitess-property-stop-on-reshard, `+vitess.stop_on_reshard+`>>
+|`false`
+|Controls Vitess flag stop_on_reshard. +
+ +
+`true` - the stream will be stopped after a reshard operation.  +
+ +
+`false` - the stream will be automatically migrated for the new shards after a reshard operation. +
+ +
+If set to `true`, you should also consider setting `vitess.gtid` in the configuration.
+
 |[[vitess-property-database-user]]<<vitess-property-database-user, `+vitess.database.user+`>>
 |_n/a_
 |An optional username of the Vitess database server (VTGate). If not configured, unauthenticated VTGate gRPC is used.
@@ -1061,22 +1206,6 @@ The following configuration properties are _required_ unless a default value is 
 |[[vitess-property-database-password]]<<vitess-property-database-password, `+vitess.database.password+`>>
 |_n/a_
 |An optional password of the Vitess database server (VTGate). If not configured, unauthenticated VTGate gRPC is used.
-
-|[[vitess-property-vtctld-host]]<<vitess-property-vtctld-host, `+vitess.vtctld.host+`>>
-|
-|IP address or hostname of the VTCtld server.
-
-|[[vitess-property-vtctld-port]]<<vitess-property-vtctld-port, `+vitess.vtctld.port+`>>
-|`15999`
-|Integer port number of the VTCtld server.
-
-|[[vitess-property-vtctld-user]]<<vitess-property-vtctld-user, `+vitess.vtctld.user+`>>
-|_n/a_
-|An optional username of the VTCtld server. If not configured, unauthenticated VTCtld gRPC is used.
-
-|[[vitess-property-vtctld-password]]<<vitess-property-vtctld-password, `+vitess.vtctld.password+`>>
-|_n/a_
-|An optional password of the VTCtld server. If not configured, unauthenticated VTCtld gRPC is used.
 
 |[[vitess-property-tablet-type]]<<vitess-property-tablet-type, `+vitess.tablet.type+`>>
 |`MASTER`
@@ -1088,24 +1217,32 @@ The following configuration properties are _required_ unless a default value is 
  +
 `RDONLY`  represents streaming from the read-only slave MySQL instance.
 
-|[[vitess-property-database-server-name]]<<vitess-property-database-server-name, `+database.server.name+`>>
-|
-|Logical name that identifies and provides a namespace for the particular Vitess database server or cluster in which {prodname} is capturing changes. Only alphanumeric characters, hyphens and underscores must be used in the database server logical name. The logical name should be unique across all other connectors, since it is used as a topic name prefix for all Kafka topics that receive records from this connector.
+|[[vitess-property-topic-prefix]]<<vitess-property-topic-prefix, `+topic.prefix+`>>
+|No default
+|Topic prefix that provides a namespace for the particular Vitess database server or cluster in which {prodname} is capturing changes.
+Only alphanumeric characters, hyphens, dots and underscores must be used in the database server logical name.
+The prefix should be unique across all other connectors, since it is used as a topic name prefix for all Kafka topics that receive records from this connector.
++
+[WARNING]
+====
+Do not change the value of this property.
+If you change the name value, after a restart, instead of continuing to emit events to the original topics, the connector emits subsequent events to topics whose names are based on the new value.
+====
 
 |[[vitess-property-table-include-list]]<<vitess-property-table-include-list, `+table.include.list+`>>
-|
+|No default
 |An optional, comma-separated list of regular expressions that match fully-qualified table identifiers for tables whose changes you want to capture. Any table not included in `table.include.list` does not have its changes captured. Each identifier is of the form _keyspace_._tableName_. By default, the connector captures changes in every non-system table in each schema whose changes are being captured. Do not also set the `table.exclude.list` property.
 
 |[[vitess-property-table-exclude.list]]<<vitess-property-table-exclude.list, `+table.exclude.list+`>>
-|
+|No default
 |An optional, comma-separated list of regular expressions that match fully-qualified table identifiers for tables whose changes you *do not* want to capture. Any table not included in `table.exclude.list` has it changes captured. Each identifier is of the form _keyspace_._tableName_. Do not also set the `table.include.list` property.
 
 |[[vitess-property-column-include-list]]<<vitess-property-column-include-list, `+column.include.list+`>>
-|
+|No default
 |An optional, comma-separated list of regular expressions that match the fully-qualified names of columns that should be included in change event record values. Fully-qualified names for columns are of the form _keyspace_._tableName_._columnName_. Do not also set the `column.exclude.list` property.
 
 |[[vitess-property-column-exclude-list]]<<vitess-property-column-exclude-list, `+column.exclude.list+`>>
-|
+|No default
 |An optional, comma-separated list of regular expressions that match the fully-qualified names of columns that should be excluded from change event record values. Fully-qualified names for columns are of the form _keyspace_._tableName_._columnName_. Do not also set the `column.include.list` property.
 
 |[[vitess-property-tombstones-on-delete]]<<vitess-property-tombstones-on-delete, `+tombstones.on.delete+`>>
@@ -1117,6 +1254,24 @@ The following configuration properties are _required_ unless a default value is 
 `false` - only a _delete_ event is emitted. +
  +
 After a source record is deleted, emitting a tombstone event (the default behavior) allows Kafka to completely delete all events that pertain to the key of the deleted row in case {link-kafka-docs}/#compaction[log compaction] is enabled for the topic.
+
+|[[vitess-property-offset-storage-per-task]]<<vitess-property-offset-storage-per-task, `+vitess.offset.storage.per.task+`>>
+|`false`
+|Specify whether to turn on offset-storage-per-task mode launch multiple connector tasks and persist offsets partitioned by task. +
+ +
+`true` - turn on offset-storage-per-task mode.  +
+ +
+`false` - do not use offset-storage-per-task mode. +
+ +
+You will also you also need to specify vitess.offset.storage.task.key.gen and vitess.prev.num.tasks params if you turn on offset-storage-per-task mode.
+
+|[[vitess-property-offset-storage-task-key-gen]]<<vitess-property-offset-storage-task-key-gen, `+vitess.offset.storage.task.key.gen+`>>
+|`-1`
+|Specify the task paralleism generation number when vitess.offset.storage.per.task is turned on. You should increase the generation number when you decide to change the connector task parallelism (either launch more connector tasks or less)
+
+|[[vitess-property-prev-num-tasks]]<<vitess-property-prev-num-tasks, `+vitess.prev.num.tasks+`>>
+|`-1`
+|Specify the number of connector tasks used in the previous generation of task paralleism when vitess.offset.storage.per.task is turned on.
 
 |[[vitess-property-message-key-columns]]<<vitess-property-message-key-columns, `+message.key.columns+`>>
 |_empty string_
@@ -1131,6 +1286,13 @@ For example, +
 `keyspaceA.table_a:regex_1;keyspaceA.table_b:regex_2;keyspaceA.table_c:regex_3` +
  +
 If `table_a` has a an `id` column, and `regex_1` is `^i` (matches any column that starts with `i`), the connector maps the value in ``table_a``'s `id` column to a key field in change events that the connector sends to Kafka.
+
+|[[vitess-property-schema-name-adjustment-mode]]<<vitess-property-schema-name-adjustment-mode,`+schema.name.adjustment.mode+`>>
+|none
+|Specifies how schema names should be adjusted for compatibility with the message converter used by the connector. Possible settings:  +
+
+* `none` does not apply any adjustment. +
+* `avro` replaces the characters that cannot be used in the Avro type name with underscore. +
 |===
 
 [id="vitess-advanced-configuration-properties"]
@@ -1142,6 +1304,30 @@ The following _advanced_ configuration properties have defaults that work in mos
 |Property
 |Default
 |Description
+
+|[[vitess-property-converters]]<<vitess-property-converters, `converters`>>
+|No default
+|Enumerates a comma-separated list of the symbolic names of the {link-prefix}:{link-custom-converters}#custom-converters[custom converter] instances that the connector can use.
+For example, +
+
+`isbn`
+
+You must set the `converters` property to enable the connector to use a custom converter.
+
+For each converter that you configure for a connector, you must also add a `.type` property, which specifies the fully-qualifed name of the class that implements the converter interface.
+The `.type` property uses the following format: +
+
+`_<converterSymbolicName>_.type` +
+
+For example, +
+
+ isbn.type: io.debezium.test.IsbnConverter
+
+If you want to further control the behavior of a configured converter, you can add one or more configuration parameters to pass values to the converter.
+To associate any additional configuration parameter with a converter, prefix the parameter names with the symbolic name of the converter.
+For example, +
+
+ isbn.schema.name: io.debezium.vitess.type.Isbn
 
 |[[vitess-property-event-processing-failure-handling-mode]]<<vitess-property-event-processing-failure-handling-mode, `+event.processing.failure.handling.mode+`>>
 |`fail`
@@ -1155,30 +1341,105 @@ The following _advanced_ configuration properties have defaults that work in mos
 
 |[[vitess-property-max-queue-size]]<<vitess-property-max-queue-size, `+max.queue.size+`>>
 |`20240`
-|Positive integer value for the maximum size of the blocking queue. The connector places change events received from streaming replication in the blocking queue before writing them to Kafka. This queue can provide backpressure when, for example, writing records to Kafka is slower that it should be or Kafka is not available.
+|Positive integer value that specifies the maximum number of records that the blocking queue can hold.
+When {prodname} reads events streamed from the database, it places the events in the blocking queue before it writes them to Kafka.
+The blocking queue can provide backpressure for reading change events from the database
+in cases where the connector ingests messages faster than it can write them to Kafka, or when Kafka becomes unavailable.
+Events that are held in the queue are disregarded when the connector periodically records offsets.
+Always set the value of `max.queue.size` to be larger than the value of xref:{context}-property-max-batch-size[`max.batch.size`].
 
 |[[vitess-property-max-batch-size]]<<vitess-property-max-batch-size, `+max.batch.size+`>>
-|`10240`
+|`2048`
 |Positive integer value that specifies the maximum size of each batch of events that the connector processes.
 
 |[[vitess-property-max-queue-size-in-bytes]]<<vitess-property-max-queue-size-in-bytes, `+max.queue.size.in.bytes+`>>
 |`0`
-|Long value for the maximum size in bytes of the blocking queue. The feature is disabled by default, it will be active if it's set with a positive long value.
+|A long integer value that specifies the maximum volume of the blocking queue in bytes.
+By default, volume limits are not specified for the blocking queue.
+To specify the number of bytes that the queue can consume, set this property to a positive long value. +
+If xref:vitess-property-max-queue-size[`max.queue.size`] is also set, writing to the queue is blocked when the size of the queue reaches the limit specified by either property.
+For example, if you set `max.queue.size=1000`, and `max.queue.size.in.bytes=5000`, writing to the queue is blocked after the queue contains 1000 records, or after the volume of the records in the queue reaches 5000 bytes.
 
 |[[vitess-property-poll-interval-ms]]<<vitess-property-poll-interval-ms, `+poll.interval.ms+`>>
-|`1000`
+|`500`
 |Positive integer value that specifies the number of milliseconds the connector should wait for new change events to appear before it starts processing a batch of events. Defaults to 1000 milliseconds, or 1 second.
 
 |[[vitess-property-sanitize-field-names]]<<vitess-property-sanitize-field-names, `+sanitize.field.names+`>>
 |`true` if connector configuration sets the `key.converter` or `value.converter` property to the Avro converter. +
 `false` if not.
-|Indicates whether field names are sanitized to adhere to {link-prefix}:{link-avro-serialization}#avro-naming[Avro naming requirements].
+|Indicates whether field names are sanitized to adhere to xref:{link-avro-serialization}#avro-naming[Avro naming requirements].
 
 |[[vitess-property-skipped-operations]]<<vitess-property-skipped-operations, `+skipped.operations+`>>
-|
-| comma-separated list of operation types that will be skipped during streaming.
-The operations include: `c` for inserts/create, `u` for updates, and `d` for deletes.
-By default, no operations are skipped.
+|`t`
+|A comma-separated list of operation types that will be skipped during streaming.
+The operations include: `c` for inserts/create, `u` for updates, `d` for deletes, `t` for truncates, and `none` to not skip any operations.
+By default, truncate operations are skipped (not emitted by this connector).
+
+|[[vitess-property-provide-transaction-metadata]]<<vitess-property-provide-transaction-metadata, `provide.transaction.metadata`>>
+|`false`
+|Determines whether the connector generates events with transaction boundaries and enriches change event envelopes with transaction metadata. Specify `true` if you want the connector to do this. See xref:vitess-transaction-metadata[Transaction metadata] for details.
+
+|[[vitess-property-keepalive-interval-ms]]<<vitess-property-keepalive-interval-ms, `+vitess.keepalive.interval.ms+`>>
+|`Long.MAX_VALUE`
+|Control the interval between periodic gPRC keepalive pings for VStream. Defaults to `Long.MAX_VALUE` (disabled).
+
+|[[vitess-property-grpc-headers]]<<vitess-property-grpc-headers, `+vitess.grpc.headers+`>>
+|No default
+|Specify a comma-separated list of gRPC headers. Defaults to empty. The format is: +
+ +
+_key1:value1,key2:value2_,... +
+ +
+For example, +
+ +
+`x-envoy-upstream-rq-timeout-ms:0,x-envoy-max-retries:2`
+
+|[[vitess-property-grpc-max-inbound-message-size]]<<vitess-property-grpc-max-inbound-message-size, `+vitess.grpc.max_inbound_message_size+`>>
+|No default
+|Specify the maximum message size in bytes allowed to be received on the channel. +
+ +
+Default is 4MiB
+
+|[[vitess-property-column-propagate-source-type]]<<vitess-property-column-propagate-source-type, `+column.propagate.source.type+`>>
+|_n/a_
+a|An optional, comma-separated list of regular expressions that match the fully-qualified names of columns whose original type and length should be added as a parameter to the corresponding field schemas in the emitted change event records. These schema parameters:
+
+`pass:[_]pass:[_]debezium.source.column.type`
+
+are used to propagate the original type name and length for variable-width types, respectively. This is useful to properly size corresponding columns in sink databases. Fully-qualified names for columns are of the following form:
+
+_keyspaceName_._tableName_._columnName_
+
+|[[vitess-property-datatype-propagate-source-type]]<<vitess-property-datatype-propagate-source-type, `+datatype.propagate.source.type+`>>
+|_n/a_
+a|An optional, comma-separated list of regular expressions that match the database-specific data type name of columns whose original type and length should be added as a parameter to the corresponding field schemas in the emitted change event records. These schema parameters:
+
+`pass:[_]pass:[_]debezium.source.column.type`
+
+are used to propagate the original type name and length for variable-width types, respectively. This is useful to properly size corresponding columns in sink databases. Fully-qualified names for columns are of the following form:
+
+_keyspaceName_._tableName_._columnName_
+
+See xref:vitess-data-types[how Vitess connectors map data types] for the list of Vitess-specific data type names.
+
+|[[vitess-property-topic-naming-strategy]]<<vitess-property-topic-naming-strategy, `topic.naming.strategy`>>
+|`io.debezium.schema.SchemaTopicNamingStrategy`
+|The name of the TopicNamingStrategy class that should be used to determine the topic name for data change, schema change, transaction, heartbeat event etc., defaults to `SchemaTopicNamingStrategy`.
+
+|[[vitess-property-topic-delimiter]]<<vitess-property-topic-delimiter, `topic.delimiter`>>
+|`.`
+|Specify the delimiter for topic name, defaults to `.`.
+
+|[[vitess-property-topic-cache-size]]<<vitess-property-topic-cache-size, `topic.cache.size`>>
+|`10000`
+|The size used for holding the topic names in bounded concurrent hash map. This cache will help to determine the topic name corresponding to a given data collection.
+
+|[[vitess-property-topic-transaction]]<<vitess-property-topic-transaction, `topic.transaction`>>
+|`transaction`
+|Controls the name of the topic to which the connector sends transaction metadata messages. The topic name has this pattern: +
+ +
+_topic.prefix_._topic.transaction_ +
+ +
+For example, if the topic prefix is `fulfillment`, the default topic name is `fulfillment.transaction`.
 
 |===
 

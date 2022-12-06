@@ -20,6 +20,8 @@ import java.util.stream.Collectors;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.postgresql.core.BaseConnection;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import io.debezium.connector.postgresql.connection.PostgresConnection;
 import io.debezium.connector.postgresql.connection.ReplicationMessage;
@@ -27,6 +29,7 @@ import io.debezium.data.Envelope.Operation;
 import io.debezium.function.Predicates;
 import io.debezium.pipeline.spi.ChangeRecordEmitter;
 import io.debezium.pipeline.spi.OffsetContext;
+import io.debezium.pipeline.spi.Partition;
 import io.debezium.relational.Column;
 import io.debezium.relational.ColumnEditor;
 import io.debezium.relational.RelationalChangeRecordEmitter;
@@ -35,6 +38,7 @@ import io.debezium.relational.TableEditor;
 import io.debezium.relational.TableId;
 import io.debezium.relational.TableSchema;
 import io.debezium.schema.DataCollectionSchema;
+import io.debezium.spi.schema.DataCollectionId;
 import io.debezium.util.Clock;
 import io.debezium.util.Strings;
 
@@ -43,34 +47,33 @@ import io.debezium.util.Strings;
  *
  * @author Horia Chiorean (hchiorea@redhat.com), Jiri Pechanec
  */
-public class PostgresChangeRecordEmitter extends RelationalChangeRecordEmitter {
+public class PostgresChangeRecordEmitter extends RelationalChangeRecordEmitter<PostgresPartition> {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(PostgresChangeRecordEmitter.class);
 
     private final ReplicationMessage message;
     private final PostgresSchema schema;
     private final PostgresConnectorConfig connectorConfig;
     private final PostgresConnection connection;
     private final TableId tableId;
-    private final boolean unchangedToastColumnMarkerMissing;
-    private final boolean nullToastedValuesMissingFromOld;
     private final Map<String, Object> cachedOldToastedValues = new HashMap<>();
 
-    public PostgresChangeRecordEmitter(OffsetContext offset, Clock clock, PostgresConnectorConfig connectorConfig, PostgresSchema schema, PostgresConnection connection,
+    public PostgresChangeRecordEmitter(PostgresPartition partition, OffsetContext offset, Clock clock, PostgresConnectorConfig connectorConfig, PostgresSchema schema,
+                                       PostgresConnection connection, TableId tableId,
                                        ReplicationMessage message) {
-        super(offset, clock);
+        super(partition, offset, clock);
 
         this.schema = schema;
         this.message = message;
         this.connectorConfig = connectorConfig;
         this.connection = connection;
 
-        this.tableId = PostgresSchema.parse(message.getTable());
-        this.unchangedToastColumnMarkerMissing = !connectorConfig.plugin().hasUnchangedToastColumnMarker();
-        this.nullToastedValuesMissingFromOld = !connectorConfig.plugin().sendsNullToastedValuesInOld();
-        Objects.requireNonNull(tableId);
+        this.tableId = tableId;
+        Objects.requireNonNull(this.tableId);
     }
 
     @Override
-    protected Operation getOperation() {
+    public Operation getOperation() {
         switch (message.getOperation()) {
             case INSERT:
                 return Operation.CREATE;
@@ -86,7 +89,7 @@ public class PostgresChangeRecordEmitter extends RelationalChangeRecordEmitter {
     }
 
     @Override
-    public void emitChangeRecords(DataCollectionSchema schema, Receiver receiver) throws InterruptedException {
+    public void emitChangeRecords(DataCollectionSchema schema, Receiver<PostgresPartition> receiver) throws InterruptedException {
         schema = synchronizeTableSchema(schema);
         super.emitChangeRecords(schema, receiver);
     }
@@ -94,7 +97,7 @@ public class PostgresChangeRecordEmitter extends RelationalChangeRecordEmitter {
     @Override
     protected void emitTruncateRecord(Receiver receiver, TableSchema tableSchema) throws InterruptedException {
         Struct envelope = tableSchema.getEnvelopeSchema().truncate(getOffset().getSourceInfo(), getClock().currentTimeAsInstant());
-        receiver.changeRecord(tableSchema, Operation.TRUNCATE, null, envelope, getOffset(), null);
+        receiver.changeRecord(getPartition(), tableSchema, Operation.TRUNCATE, null, envelope, getOffset(), null);
     }
 
     @Override
@@ -104,9 +107,9 @@ public class PostgresChangeRecordEmitter extends RelationalChangeRecordEmitter {
                 case CREATE:
                     return null;
                 case UPDATE:
-                    return columnValues(message.getOldTupleList(), tableId, true, message.hasTypeMetadata(), true, true);
+                    return columnValues(message.getOldTupleList(), tableId, true, true, true);
                 default:
-                    return columnValues(message.getOldTupleList(), tableId, true, message.hasTypeMetadata(), false, true);
+                    return columnValues(message.getOldTupleList(), tableId, true, false, true);
             }
         }
         catch (SQLException e) {
@@ -119,9 +122,9 @@ public class PostgresChangeRecordEmitter extends RelationalChangeRecordEmitter {
         try {
             switch (getOperation()) {
                 case CREATE:
-                    return columnValues(message.getNewTupleList(), tableId, true, message.hasTypeMetadata(), false, false);
+                    return columnValues(message.getNewTupleList(), tableId, true, false, false);
                 case UPDATE:
-                    return columnValues(message.getNewTupleList(), tableId, true, message.hasTypeMetadata(), false, false);
+                    return columnValues(message.getNewTupleList(), tableId, true, false, false);
                 default:
                     return null;
             }
@@ -132,26 +135,23 @@ public class PostgresChangeRecordEmitter extends RelationalChangeRecordEmitter {
     }
 
     private DataCollectionSchema synchronizeTableSchema(DataCollectionSchema tableSchema) {
-        final boolean metadataInMessage = message.hasTypeMetadata();
-        final TableId tableId = (TableId) tableSchema.id();
-        final Table table = schema.tableFor(tableId);
         if (getOperation() == Operation.DELETE || !message.shouldSchemaBeSynchronized()) {
             return tableSchema;
         }
+        final TableId tableId = (TableId) tableSchema.id();
+        final Table table = schema.tableFor(tableId);
         final List<ReplicationMessage.Column> columns = message.getNewTupleList();
         // check if we need to refresh our local schema due to DB schema changes for this table
-        if (schemaChanged(columns, table, metadataInMessage)) {
+        if (schemaChanged(columns, table)) {
             // Refresh the schema so we get information about primary keys
             refreshTableFromDatabase(tableId);
             // Update the schema with metadata coming from decoder message
-            if (metadataInMessage) {
-                schema.refresh(tableFromFromMessage(columns, schema.tableFor(tableId)));
-            }
+            schema.refresh(tableFromFromMessage(columns, schema.tableFor(tableId)));
         }
         return schema.schemaFor(tableId);
     }
 
-    private Object[] columnValues(List<ReplicationMessage.Column> columns, TableId tableId, boolean refreshSchemaIfChanged, boolean metadataInMessage,
+    private Object[] columnValues(List<ReplicationMessage.Column> columns, TableId tableId, boolean refreshSchemaIfChanged,
                                   boolean sourceOfToasted, boolean oldValues)
             throws SQLException {
         if (columns == null || columns.isEmpty()) {
@@ -191,21 +191,6 @@ public class PostgresChangeRecordEmitter extends RelationalChangeRecordEmitter {
                 values[position] = value;
             }
         }
-        if (unchangedToastColumnMarkerMissing) {
-            for (String columnName : undeliveredToastableColumns) {
-                int position = getPosition(columnName, table, values);
-                if (position != -1) {
-                    final Object candidate = cachedOldToastedValues.get(columnName);
-                    if (oldValues && nullToastedValuesMissingFromOld) {
-                        // wal2json connector does not send null toasted value among old values
-                        values[position] = null;
-                    }
-                    else {
-                        values[position] = candidate != null ? candidate : UnchangedToastedReplicationMessageColumn.UNCHANGED_TOAST_VALUE;
-                    }
-                }
-            }
-        }
         return values;
     }
 
@@ -213,14 +198,14 @@ public class PostgresChangeRecordEmitter extends RelationalChangeRecordEmitter {
         final Column tableColumn = table.columnWithName(columnName);
 
         if (tableColumn == null) {
-            logger.warn(
+            LOGGER.warn(
                     "Internal schema is out-of-sync with incoming decoder events; column {} will be omitted from the change event.",
                     columnName);
             return -1;
         }
         int position = tableColumn.position() - 1;
         if (position < 0 || position >= values.length) {
-            logger.warn(
+            LOGGER.warn(
                     "Internal schema is out-of-sync with incoming decoder events; column {} will be omitted from the change event.",
                     columnName);
             return -1;
@@ -229,15 +214,15 @@ public class PostgresChangeRecordEmitter extends RelationalChangeRecordEmitter {
     }
 
     private Optional<DataCollectionSchema> newTable(TableId tableId) {
-        logger.debug("Schema for table '{}' is missing", tableId);
+        LOGGER.debug("Schema for table '{}' is missing", tableId);
         refreshTableFromDatabase(tableId);
         final TableSchema tableSchema = schema.schemaFor(tableId);
         if (tableSchema == null) {
-            logger.warn("cannot load schema for table '{}'", tableId);
+            LOGGER.warn("cannot load schema for table '{}'", tableId);
             return Optional.empty();
         }
         else {
-            logger.debug("refreshed DB schema to include table '{}'", tableId);
+            LOGGER.debug("refreshed DB schema to include table '{}'", tableId);
             return Optional.of(tableSchema);
         }
     }
@@ -251,11 +236,11 @@ public class PostgresChangeRecordEmitter extends RelationalChangeRecordEmitter {
         }
     }
 
-    static Optional<DataCollectionSchema> updateSchema(TableId tableId, ChangeRecordEmitter changeRecordEmitter) {
-        return ((PostgresChangeRecordEmitter) changeRecordEmitter).newTable(tableId);
+    static Optional<DataCollectionSchema> updateSchema(Partition partition, DataCollectionId tableId, ChangeRecordEmitter<PostgresPartition> changeRecordEmitter) {
+        return ((PostgresChangeRecordEmitter) changeRecordEmitter).newTable((TableId) tableId);
     }
 
-    private boolean schemaChanged(List<ReplicationMessage.Column> columns, Table table, boolean metadataInMessage) {
+    private boolean schemaChanged(List<ReplicationMessage.Column> columns, Table table) {
         int tableColumnCount = table.columns().size();
         int replicationColumnCount = columns.size();
 
@@ -274,7 +259,7 @@ public class PostgresChangeRecordEmitter extends RelationalChangeRecordEmitter {
         if (msgHasMissingColumns || msgHasAdditionalColumns) {
             // the table metadata has less or more columns than the event, which means the table structure has changed,
             // so we need to trigger a refresh...
-            logger.info("Different column count {} present in the server message as schema in memory contains {}; refreshing table schema",
+            LOGGER.info("Different column count {} present in the server message as schema in memory contains {}; refreshing table schema",
                     replicationColumnCount,
                     tableColumnCount);
             return true;
@@ -286,7 +271,7 @@ public class PostgresChangeRecordEmitter extends RelationalChangeRecordEmitter {
             String columnName = message.getName();
             Column column = table.columnWithName(columnName);
             if (column == null) {
-                logger.info("found new column '{}' present in the server message which is not part of the table metadata; refreshing table schema", columnName);
+                LOGGER.info("found new column '{}' present in the server message which is not part of the table metadata; refreshing table schema", columnName);
                 return true;
             }
             else {
@@ -295,34 +280,32 @@ public class PostgresChangeRecordEmitter extends RelationalChangeRecordEmitter {
                 if (localType != incomingType) {
                     final int incomingRootType = message.getType().getRootType().getOid();
                     if (localType != incomingRootType) {
-                        logger.info("detected new type for column '{}', old type was {} ({}), new type is {} ({}); refreshing table schema", columnName, localType,
+                        LOGGER.info("detected new type for column '{}', old type was {} ({}), new type is {} ({}); refreshing table schema", columnName, localType,
                                 column.typeName(),
                                 incomingType, message.getType().getName());
                         return true;
                     }
                 }
-                if (metadataInMessage) {
-                    final int localLength = column.length();
-                    final int incomingLength = message.getTypeMetadata().getLength();
-                    if (localLength != incomingLength) {
-                        logger.info("detected new length for column '{}', old length was {}, new length is {}; refreshing table schema", columnName, localLength,
-                                incomingLength);
-                        return true;
-                    }
-                    final int localScale = column.scale().orElseGet(() -> 0);
-                    final int incomingScale = message.getTypeMetadata().getScale();
-                    if (localScale != incomingScale) {
-                        logger.info("detected new scale for column '{}', old scale was {}, new scale is {}; refreshing table schema", columnName, localScale,
-                                incomingScale);
-                        return true;
-                    }
-                    final boolean localOptional = column.isOptional();
-                    final boolean incomingOptional = message.isOptional();
-                    if (localOptional != incomingOptional) {
-                        logger.info("detected new optional status for column '{}', old value was {}, new value is {}; refreshing table schema", columnName, localOptional,
-                                incomingOptional);
-                        return true;
-                    }
+                final int localLength = column.length();
+                final int incomingLength = message.getTypeMetadata().getLength();
+                if (localLength != incomingLength) {
+                    LOGGER.info("detected new length for column '{}', old length was {}, new length is {}; refreshing table schema", columnName, localLength,
+                            incomingLength);
+                    return true;
+                }
+                final int localScale = column.scale().orElseGet(() -> 0);
+                final int incomingScale = message.getTypeMetadata().getScale();
+                if (localScale != incomingScale) {
+                    LOGGER.info("detected new scale for column '{}', old scale was {}, new scale is {}; refreshing table schema", columnName, localScale,
+                            incomingScale);
+                    return true;
+                }
+                final boolean localOptional = column.isOptional();
+                final boolean incomingOptional = message.isOptional();
+                if (localOptional != incomingOptional) {
+                    LOGGER.info("detected new optional status for column '{}', old value was {}, new value is {}; refreshing table schema", columnName, localOptional,
+                            incomingOptional);
+                    return true;
                 }
             }
             return false;
@@ -343,8 +326,8 @@ public class PostgresChangeRecordEmitter extends RelationalChangeRecordEmitter {
 
         List<String> toastableColumns = schema.getToastableColumnsForTableId(table.id());
 
-        if (logger.isDebugEnabled()) {
-            logger.debug("msg columns: '{}' --- missing columns: '{}' --- toastableColumns: '{}",
+        if (LOGGER.isDebugEnabled()) {
+            LOGGER.debug("msg columns: '{}' --- missing columns: '{}' --- toastableColumns: '{}",
                     String.join(",", msgColumnNames),
                     String.join(",", missingColumnNames),
                     String.join(",", toastableColumns));
@@ -371,8 +354,8 @@ public class PostgresChangeRecordEmitter extends RelationalChangeRecordEmitter {
                             // as long as default value is not added to the decoded message metadata, we must apply
                             // the current default read from the database
                             Optional.ofNullable(table.columnWithName(column.getName()))
-                                    .map(Column::defaultValue)
-                                    .ifPresent(columnEditor::defaultValue);
+                                    .flatMap(Column::defaultValueExpression)
+                                    .ifPresent(columnEditor::defaultValueExpression);
 
                             return columnEditor.create();
                         })
@@ -382,7 +365,7 @@ public class PostgresChangeRecordEmitter extends RelationalChangeRecordEmitter {
         while (itPkCandidates.hasNext()) {
             final String candidateName = itPkCandidates.next();
             if (!combinedTable.hasUniqueValues() && combinedTable.columnWithName(candidateName) == null) {
-                logger.error("Potentional inconsistency in key for message {}", columns);
+                LOGGER.error("Potentional inconsistency in key for message {}", columns);
                 itPkCandidates.remove();
             }
         }

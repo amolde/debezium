@@ -7,6 +7,7 @@ package io.debezium.relational;
 
 import io.debezium.data.Envelope.Operation;
 import io.debezium.pipeline.spi.OffsetContext;
+import io.debezium.pipeline.spi.Partition;
 import io.debezium.util.Clock;
 
 /**
@@ -14,18 +15,18 @@ import io.debezium.util.Clock;
  *
  * @author Jiri Pechanec
  */
-public class SnapshotChangeRecordEmitter extends RelationalChangeRecordEmitter {
+public class SnapshotChangeRecordEmitter<P extends Partition> extends RelationalChangeRecordEmitter<P> {
 
     private final Object[] row;
 
-    public SnapshotChangeRecordEmitter(OffsetContext offset, Object[] row, Clock clock) {
-        super(offset, clock);
+    public SnapshotChangeRecordEmitter(P partition, OffsetContext offset, Object[] row, Clock clock) {
+        super(partition, offset, clock);
 
         this.row = row;
     }
 
     @Override
-    protected Operation getOperation() {
+    public Operation getOperation() {
         return Operation.READ;
     }
 

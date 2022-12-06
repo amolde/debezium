@@ -3,8 +3,8 @@
     <parent>
         <groupId>io.debezium</groupId>
         <artifactId>debezium-parent</artifactId>
-        <version>1.6.0-SNAPSHOT</version>
-	<relativePath>../debezium-parent/pom.xml</relativePath>
+        <version>2.1.0-SNAPSHOT</version>
+        <relativePath>../debezium-parent/pom.xml</relativePath>
     </parent>
     <modelVersion>4.0.0</modelVersion>
     <artifactId>debezium-connector-postgres</artifactId>
@@ -16,7 +16,7 @@
           Note that the `dockerhost.ip` property is computed from the IP address of DOCKER_HOST, which will
           work on all platforms. We'll set some of these as system properties during integration testing.
       -->
-        <version.postgres.server>9.6</version.postgres.server>
+        <version.postgres.server>10</version.postgres.server>
         <postgres.host>${docker.host.address}</postgres.host>
         <postgres.port>5432</postgres.port>
         <postgres.user>postgres</postgres.user>
@@ -29,11 +29,17 @@
         <docker.skip>false</docker.skip>
         <docker.showLogs>true</docker.showLogs>
         <docker.initimage>ln -fs /usr/share/zoneinfo/US/Samoa /etc/localtime &amp;&amp; echo timezone=US/Samoa &gt;&gt; ${postgres.config.file}</docker.initimage>
+        <docker.dbs>debezium/postgres-server-test-database</docker.dbs>
+        <docker.filter>${docker.dbs}</docker.filter>
 
         <protobuf.output.directory>${project.basedir}/generated-sources</protobuf.output.directory>
 
         <!-- We're tracking the API changes of the SPI. -->
         <revapi.skip>false</revapi.skip>
+
+        <!-- Apicurion container properties -->
+        <apicurio.port>8080</apicurio.port>
+        <apicurio.init.timeout>60000</apicurio.init.timeout> <!-- 60 seconds -->
     </properties>
 
     <dependencies>
@@ -79,13 +85,8 @@
             <scope>test</scope>
         </dependency>
         <dependency>
-            <groupId>org.slf4j</groupId>
-            <artifactId>slf4j-log4j12</artifactId>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>log4j</groupId>
-            <artifactId>log4j</artifactId>
+            <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-classic</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>
@@ -99,8 +100,8 @@
             <scope>test</scope>
         </dependency>
         <dependency>
-            <groupId>org.easytesting</groupId>
-            <artifactId>fest-assert</artifactId>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>
@@ -119,7 +120,7 @@
             <scope>test</scope>
         </dependency>
     </dependencies>
-   
+
     <build>
         <plugins>
             <plugin>
@@ -176,10 +177,32 @@
                             </run>
                             <build>
                                 <from>${postgres.image}</from>
-                                 <runCmds>
-                                   <run>${docker.initimage}</run>
-                                 </runCmds>
+                                <runCmds>
+                                    <run>${docker.initimage}</run>
+                                </runCmds>
                             </build>
+                            <external>
+                                <type>properties</type>
+                                <mode>override</mode>
+                            </external>
+                        </image>
+                        <image>
+                            <name>apicurio/apicurio-registry-mem:${version.apicurio}</name>
+                            <run>
+                                <namingStrategy>none</namingStrategy>
+                                <ports>
+                                    <port>${apicurio.port}:8080</port>
+                                </ports>
+                                <log>
+                                    <prefix>apicurio</prefix>
+                                    <enabled>true</enabled>
+                                    <color>blue</color>
+                                </log>
+                                <wait>
+                                    <log>.*apicurio-registry-app.*started in.*</log>
+                                    <time>${apicurio.init.timeout}</time>
+                                </wait>
+                            </run>
                         </image>
                     </images>
                 </configuration>
@@ -241,6 +264,20 @@
                         <skipLongRunningTests>${skipLongRunningTests}</skipLongRunningTests>
                     </systemPropertyVariables>
                 </configuration>
+            </plugin>
+            <plugin>
+                <groupId>io.debezium</groupId>
+                <artifactId>debezium-schema-generator</artifactId>
+                <version>${project.version}</version>
+                <executions>
+                    <execution>
+                        <id>generate-connector-metadata</id>
+                        <goals>
+                            <goal>generate-api-spec</goal>
+                        </goals>
+                        <phase>prepare-package</phase>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
         <resources>
@@ -373,9 +410,15 @@
             </properties>
         </profile>
         <profile>
-            <id>wal2json-decoder</id>
+            <id>postgres-14</id>
             <properties>
-                <decoder.plugin.name>wal2json</decoder.plugin.name>
+                <version.postgres.server>14</version.postgres.server>
+            </properties>
+        </profile>
+        <profile>
+            <id>postgres-15</id>
+            <properties>
+                <version.postgres.server>15</version.postgres.server>
             </properties>
         </profile>
         <profile>
@@ -389,6 +432,31 @@
             <properties>
                 <postgres.system.lang>${cs_CZ.iso-8859-2}</postgres.system.lang>
                 <postgres.encoding>LATIN2</postgres.encoding>
+            </properties>
+        </profile>
+        <profile>
+            <id>apicurio</id>
+            <activation>
+                <activeByDefault>false</activeByDefault>
+                <property>
+                    <name>apicurio</name>
+                </property>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <configuration>
+                            <systemPropertyVariables>
+                                <use.apicurio>true</use.apicurio>
+                            </systemPropertyVariables>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+            <properties>
+                <docker.filter>${docker.dbs},apicurio/apicurio-registry-mem:${version.apicurio}</docker.filter>
             </properties>
         </profile>
     </profiles>

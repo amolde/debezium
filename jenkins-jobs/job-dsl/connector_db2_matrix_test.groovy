@@ -22,7 +22,7 @@ matrixJob('connector-debezium-db2-matrix-test') {
     }
 
     triggers {
-        cron('H 04 * * 1-5')
+        cron('H 04 * * *')
     }
 
     wrappers {
@@ -31,16 +31,25 @@ matrixJob('connector-debezium-db2-matrix-test') {
         timeout {
             noActivity(1200)
         }
+        credentialsBinding {
+            usernamePassword('QUAY_USERNAME', 'QUAY_PASSWORD', 'rh-integration-quay-creds')
+            string('RP_TOKEN', 'report-portal-token')
+        }
     }
 
     publishers {
+        archiveArtifacts {
+            pattern('**/target/surefire-reports/*.xml')
+            pattern('**/target/failsafe-reports/*.xml')
+        }
         archiveJunit('**/target/surefire-reports/*.xml')
         archiveJunit('**/target/failsafe-reports/*.xml')
-        mailer('jpechane@redhat.com', false, true)
+        mailer('debezium-qe@redhat.com', false, true)
     }
 
     logRotator {
         daysToKeep(7)
+        numToKeep(10)
     }
 
     steps {
@@ -50,35 +59,38 @@ ls -A1 | xargs rm -rf
 
 # Retrieve sources
 if [ "$PRODUCT_BUILD" == true ] ; then
-    PROFILE_PROD="pnc"
+    export MAVEN_OPTS="-Dmaven.wagon.http.ssl.insecure=true -Dmaven.wagon.http.ssl.allowall=true -Dmaven.wagon.http.ssl.ignore.validity.dates=true"
+    PROFILE_PROD="-Ppnc"
     curl -OJs $SOURCE_URL && unzip debezium-*-src.zip
-
-    # Build parent
-    mvn clean install -s ~/.m2/settings-snapshots.xml -am -fae \
-        -DskipTests -DskipITs \
-        -Dinsecure.repositories=WARN \
-        -P$PROFILE_PROD
-
-    # Run connector tests
-    cd debezium-connector-db2
-    mvn clean install -U -s $HOME/.m2/settings-snapshots.xml -am -fae \
-        -Dmaven.test.failure.ignore=true \
-        -Dtest.argline="-Ddebezium.test.records.waittime=5" \
-        -Dinsecure.repositories=WARN \
-        -P$PROFILE_PROD \
-        $MAVEN_ARGS
+    pushd debezium-*-src
+    pushd debezium-connector-db2-*
+    ATTRIBUTES="downstream db2"
 else
-    PROFILE_PROD="none"
     git clone $REPOSITORY .
     git checkout $BRANCH
-
-    # Run connector tests
-    mvn clean install -U -s $HOME/.m2/settings-snapshots.xml -am -fae \
-        -Dmaven.test.failure.ignore=true \
-        -Dtest.argline="-Ddebezium.test.records.waittime=5" \
-        -Dinsecure.repositories=WARN \
-        $MAVEN_ARGS
+    ATTRIBUTES="upstream db2"
 fi
+
+# Run connector tests
+mvn clean install -U -s $HOME/.m2/settings-snapshots.xml -am -fae \
+    -Dmaven.test.failure.ignore=true \
+    -Dtest.argline="-Ddebezium.test.records.waittime=5" \
+    -Dinsecure.repositories=WARN \
+    $PROFILE_PROD
+    
+RESULTS_FOLDER=final-results
+RESULTS_PATH=$RESULTS_FOLDER/results
+
+mkdir -p $RESULTS_PATH
+cp target/failsafe-reports/*.xml $RESULTS_PATH
+rm -rf $RESULTS_PATH/failsafe-summary.xml
+
+docker login quay.io -u "$QUAY_USERNAME" -p "$QUAY_PASSWORD"
+
+curl -O https://raw.githubusercontent.com/debezium/debezium/main/jenkins-jobs/scripts/report.sh
+chmod +x ./report.sh
+
+./report.sh --connector true --env-file env-file.env --results-folder $RESULTS_FOLDER --attributes "$ATTRIBUTES"
 ''')
     }
 }

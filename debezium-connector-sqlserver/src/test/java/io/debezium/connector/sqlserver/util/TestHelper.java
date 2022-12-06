@@ -13,22 +13,25 @@ import java.sql.SQLException;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 import javax.management.InstanceNotFoundException;
 import javax.management.MBeanServer;
 import javax.management.MalformedObjectNameException;
 import javax.management.ObjectName;
 
+import org.apache.kafka.common.utils.Sanitizer;
 import org.awaitility.Awaitility;
 import org.awaitility.core.ConditionTimeoutException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.debezium.config.CommonConnectorConfig;
 import io.debezium.config.Configuration;
 import io.debezium.connector.sqlserver.Lsn;
-import io.debezium.connector.sqlserver.SourceTimestampMode;
 import io.debezium.connector.sqlserver.SqlServerChangeTable;
 import io.debezium.connector.sqlserver.SqlServerConnection;
 import io.debezium.connector.sqlserver.SqlServerConnectorConfig;
@@ -38,8 +41,9 @@ import io.debezium.jdbc.JdbcConnection;
 import io.debezium.jdbc.JdbcValueConverters;
 import io.debezium.jdbc.TemporalPrecisionMode;
 import io.debezium.relational.RelationalDatabaseConnectorConfig;
-import io.debezium.relational.history.FileDatabaseHistory;
-import io.debezium.util.Clock;
+import io.debezium.relational.TableId;
+import io.debezium.storage.file.history.FileSchemaHistory;
+import io.debezium.util.Collect;
 import io.debezium.util.IoUtil;
 import io.debezium.util.Strings;
 import io.debezium.util.Testing;
@@ -51,18 +55,22 @@ public class TestHelper {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(TestHelper.class);
 
-    public static final Path DB_HISTORY_PATH = Testing.Files.createTestingPath("file-db-history-connect.txt").toAbsolutePath();
-    public static final String TEST_DATABASE = "testdb";
+    public static final Path SCHEMA_HISTORY_PATH = Testing.Files.createTestingPath("file-schema-history-connect.txt").toAbsolutePath();
+    public static final String TEST_DATABASE_1 = "testDB1";
+    public static final String TEST_DATABASE_2 = "testDB2";
+    public static final String TEST_SERVER_NAME = "server1";
     private static final String TEST_PROPERTY_PREFIX = "debezium.test.";
 
+    private static final String TEST_TASK_ID = "0";
     private static final String STATEMENTS_PLACEHOLDER = "#";
+    private static final String SCHEMA_PLACEHOLDER = "%";
 
     private static final String ENABLE_DB_CDC = "IF EXISTS(select 1 from sys.databases where name='#' AND is_cdc_enabled=0)\n"
             + "EXEC sys.sp_cdc_enable_db";
     private static final String DISABLE_DB_CDC = "IF EXISTS(select 1 from sys.databases where name='#' AND is_cdc_enabled=1)\n"
             + "EXEC sys.sp_cdc_disable_db";
     private static final String ENABLE_TABLE_CDC = "IF EXISTS(select 1 from sys.tables where name = '#' AND is_tracked_by_cdc=0)\n"
-            + "EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = N'#', @role_name = NULL, @supports_net_changes = 0";
+            + "EXEC sys.sp_cdc_enable_table @source_schema = N'%', @source_name = N'#', @role_name = NULL, @supports_net_changes = 0";
     private static final String IS_CDC_ENABLED = "SELECT COUNT(1) FROM sys.databases WHERE name = '#' AND is_cdc_enabled=1";
     private static final String IS_CDC_TABLE_ENABLED = "SELECT COUNT(*) FROM sys.tables tb WHERE tb.is_tracked_by_cdc = 1 AND tb.name='#'";
     private static final String ENABLE_TABLE_CDC_WITH_CUSTOM_CAPTURE = "EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = N'%s', @capture_instance = N'%s', @role_name = NULL, @supports_net_changes = 0, @captured_column_list = %s";
@@ -94,19 +102,8 @@ public class TestHelper {
         }
     }
 
-    public static JdbcConfiguration adminJdbcConfig() {
-        return JdbcConfiguration.copy(Configuration.fromSystemProperties("database."))
-                .withDefault(JdbcConfiguration.DATABASE, "master")
-                .withDefault(JdbcConfiguration.HOSTNAME, "localhost")
-                .withDefault(JdbcConfiguration.PORT, 1433)
-                .withDefault(JdbcConfiguration.USER, "sa")
-                .withDefault(JdbcConfiguration.PASSWORD, "Password!")
-                .build();
-    }
-
     public static JdbcConfiguration defaultJdbcConfig() {
-        return JdbcConfiguration.copy(Configuration.fromSystemProperties("database."))
-                .withDefault(JdbcConfiguration.DATABASE, TEST_DATABASE)
+        return JdbcConfiguration.copy(Configuration.fromSystemProperties(SqlServerConnectorConfig.DATABASE_CONFIG_PREFIX))
                 .withDefault(JdbcConfiguration.HOSTNAME, "localhost")
                 .withDefault(JdbcConfiguration.PORT, 1433)
                 .withDefault(JdbcConfiguration.USER, "sa")
@@ -114,35 +111,64 @@ public class TestHelper {
                 .build();
     }
 
-    /**
-     * Returns a default configuration suitable for most test cases. Can be amended/overridden in individual tests as
-     * needed.
-     */
-    public static Configuration.Builder defaultConfig() {
+    public static JdbcConfiguration jdbcConfig(String user, String password) {
+        return JdbcConfiguration.copy(defaultJdbcConfig())
+                .withUser(user)
+                .withPassword(password)
+                .build();
+    }
+
+    public static Configuration.Builder defaultConnectorConfig() {
         JdbcConfiguration jdbcConfiguration = defaultJdbcConfig();
         Configuration.Builder builder = Configuration.create();
 
         jdbcConfiguration.forEach(
                 (field, value) -> builder.with(SqlServerConnectorConfig.DATABASE_CONFIG_PREFIX + field, value));
 
-        return builder.with(RelationalDatabaseConnectorConfig.SERVER_NAME, "server1")
-                .with(SqlServerConnectorConfig.DATABASE_HISTORY, FileDatabaseHistory.class)
-                .with(FileDatabaseHistory.FILE_PATH, DB_HISTORY_PATH)
+        return builder.with(CommonConnectorConfig.TOPIC_PREFIX, "server1")
+                .with(SqlServerConnectorConfig.SCHEMA_HISTORY, FileSchemaHistory.class)
+                .with(FileSchemaHistory.FILE_PATH, SCHEMA_HISTORY_PATH)
                 .with(RelationalDatabaseConnectorConfig.INCLUDE_SCHEMA_CHANGES, false);
     }
 
+    /**
+     * Returns a default connector configuration suitable for most test cases. Can be amended/overridden
+     * in individual tests as needed.
+     */
+    public static Configuration.Builder defaultConfig() {
+        return defaultConfig(TEST_DATABASE_1);
+    }
+
+    /**
+     * Returns a default configuration for connectors in multi-partition mode.
+     */
+    public static Configuration.Builder defaultConfig(String... databaseNames) {
+        return defaultConnectorConfig()
+                .with(SqlServerConnectorConfig.DATABASE_NAMES.name(), String.join(",", databaseNames));
+    }
+
     public static void createTestDatabase() {
+        createTestDatabase(TEST_DATABASE_1);
+    }
+
+    public static void createTestDatabases(String... databaseNames) {
+        for (String databaseName : databaseNames) {
+            createTestDatabase(databaseName);
+        }
+    }
+
+    public static void createTestDatabase(String databaseName) {
         // NOTE: you cannot enable CDC for the "master" db (the default one) so
         // all tests must use a separate database...
         try (SqlServerConnection connection = adminConnection()) {
             connection.connect();
-            dropTestDatabase(connection);
-            String sql = "CREATE DATABASE testDB\n";
+            dropTestDatabase(connection, databaseName);
+            String sql = String.format("CREATE DATABASE [%s]\n", databaseName);
             connection.execute(sql);
-            connection.execute("USE testDB");
-            connection.execute("ALTER DATABASE testDB SET ALLOW_SNAPSHOT_ISOLATION ON");
+            connection.execute(String.format("USE [%s]", databaseName));
+            connection.execute(String.format("ALTER DATABASE [%s] SET ALLOW_SNAPSHOT_ISOLATION ON", databaseName));
             // NOTE: you cannot enable CDC on master
-            enableDbCdc(connection, "testDB");
+            enableDbCdc(connection, databaseName);
         }
         catch (SQLException e) {
             LOGGER.error("Error while initiating test database", e);
@@ -153,25 +179,25 @@ public class TestHelper {
     public static void dropTestDatabase() {
         try (SqlServerConnection connection = adminConnection()) {
             connection.connect();
-            dropTestDatabase(connection);
+            dropTestDatabase(connection, TEST_DATABASE_1);
         }
         catch (SQLException e) {
             throw new IllegalStateException("Error while dropping test database", e);
         }
     }
 
-    private static void dropTestDatabase(SqlServerConnection connection) throws SQLException {
+    private static void dropTestDatabase(SqlServerConnection connection, String databaseName) throws SQLException {
         try {
             Awaitility.await("Disabling CDC").atMost(60, TimeUnit.SECONDS).until(() -> {
                 try {
-                    connection.execute("USE testDB");
+                    connection.execute(String.format("USE [%s]", databaseName));
                 }
                 catch (SQLException e) {
                     // if the database doesn't yet exist, there is no need to disable CDC
                     return true;
                 }
                 try {
-                    disableDbCdc(connection, "testDB");
+                    disableDbCdc(connection, databaseName);
                     return true;
                 }
                 catch (SQLException e) {
@@ -180,22 +206,22 @@ public class TestHelper {
             });
         }
         catch (ConditionTimeoutException e) {
-            throw new IllegalArgumentException("Failed to disable CDC on testDB", e);
+            throw new IllegalArgumentException(String.format("Failed to disable CDC on %s", databaseName), e);
         }
 
         connection.execute("USE master");
 
         try {
-            Awaitility.await("Dropping database testDB").atMost(60, TimeUnit.SECONDS).until(() -> {
+            Awaitility.await(String.format("Dropping database %s", databaseName)).atMost(60, TimeUnit.SECONDS).until(() -> {
                 try {
-                    String sql = "IF EXISTS(select 1 from sys.databases where name = 'testDB') DROP DATABASE testDB";
+                    String sql = String.format("IF EXISTS(select 1 from sys.databases where name = '%s') DROP DATABASE [%s]", databaseName, databaseName);
                     connection.execute(sql);
                     return true;
                 }
                 catch (SQLException e) {
-                    LOGGER.warn("DROP DATABASE testDB failed (will be retried): {}", e.getMessage());
+                    LOGGER.warn(String.format("DROP DATABASE %s failed (will be retried): {}", databaseName), e.getMessage());
                     try {
-                        connection.execute("ALTER DATABASE testDB SET SINGLE_USER WITH ROLLBACK IMMEDIATE;");
+                        connection.execute(String.format("ALTER DATABASE [%s] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;", databaseName));
                     }
                     catch (SQLException e2) {
                         LOGGER.error("Failed to rollback immediately", e2);
@@ -210,13 +236,46 @@ public class TestHelper {
     }
 
     public static SqlServerConnection adminConnection() {
-        return new SqlServerConnection(TestHelper.adminJdbcConfig(), Clock.system(), SourceTimestampMode.getDefaultMode(),
-                new SqlServerValueConverters(JdbcValueConverters.DecimalMode.PRECISE, TemporalPrecisionMode.ADAPTIVE, null));
+        return new SqlServerConnection(TestHelper.defaultJdbcConfig(),
+                new SqlServerValueConverters(JdbcValueConverters.DecimalMode.PRECISE, TemporalPrecisionMode.ADAPTIVE, null),
+                Collections.emptySet(), false);
     }
 
     public static SqlServerConnection testConnection() {
-        return new SqlServerConnection(TestHelper.defaultJdbcConfig(), Clock.system(), SourceTimestampMode.getDefaultMode(),
-                new SqlServerValueConverters(JdbcValueConverters.DecimalMode.PRECISE, TemporalPrecisionMode.ADAPTIVE, null));
+        return testConnection(TEST_DATABASE_1);
+    }
+
+    /**
+     * Returns a database connection that isn't explicitly connected to any database.
+     */
+    public static SqlServerConnection multiPartitionTestConnection() {
+        return testConnection(defaultJdbcConfig());
+    }
+
+    public static SqlServerConnection testConnection(String databaseName) {
+        JdbcConfiguration config = JdbcConfiguration.adapt(defaultJdbcConfig()
+                .edit()
+                .with(JdbcConfiguration.ON_CONNECT_STATEMENTS, "USE [" + databaseName + "]")
+                .build());
+
+        return testConnection(config);
+    }
+
+    public static SqlServerConnection testConnection(JdbcConfiguration config) {
+        return new SqlServerConnection(config,
+                new SqlServerValueConverters(JdbcValueConverters.DecimalMode.PRECISE, TemporalPrecisionMode.ADAPTIVE, null),
+                Collections.emptySet(), false);
+    }
+
+    public static SqlServerConnection testConnectionWithOptionRecompile() {
+        JdbcConfiguration config = JdbcConfiguration.adapt(defaultJdbcConfig()
+                .edit()
+                .with(JdbcConfiguration.DATABASE, TEST_DATABASE_1)
+                .build());
+
+        return new SqlServerConnection(config,
+                new SqlServerValueConverters(JdbcValueConverters.DecimalMode.PRECISE, TemporalPrecisionMode.ADAPTIVE, null),
+                Collections.emptySet(), true);
     }
 
     /**
@@ -232,7 +291,7 @@ public class TestHelper {
             Objects.requireNonNull(name);
             connection.execute(ENABLE_DB_CDC.replace(STATEMENTS_PLACEHOLDER, name));
 
-            // make sure testDB has cdc-enabled before proceeding; throwing exception if it fails
+            // make sure the test database has cdc-enabled before proceeding; throwing exception if it fails
             Awaitility.await().atMost(60, TimeUnit.SECONDS).until(() -> {
                 final String sql = IS_CDC_ENABLED.replace(STATEMENTS_PLACEHOLDER, name);
                 return connection.queryAndMap(sql, connection.singleResultMapper(rs -> rs.getLong(1), "")) == 1L;
@@ -258,7 +317,26 @@ public class TestHelper {
     }
 
     /**
-     * Enables CDC for a table if not already enabled and generates the wrapper
+     * Enables CDC for given schema and table if not already enabled and generates the wrapper
+     * functions for that table.
+     *
+     * @param connection
+     *            sql connection
+     * @param tableId
+     *            {@link TableId} of the table, schema and table name may not be {@code null}
+     *
+     * @throws SQLException if anything unexpected fails
+     */
+    public static void enableSchemaTableCdc(SqlServerConnection connection, TableId tableId) throws SQLException {
+        Objects.requireNonNull(tableId.schema());
+        Objects.requireNonNull(tableId.table());
+        String enableCdcForTableStmt = ENABLE_TABLE_CDC.replace(STATEMENTS_PLACEHOLDER, tableId.table()).replace(SCHEMA_PLACEHOLDER, tableId.schema());
+        String generateWrapperFunctionsStmts = CDC_WRAPPERS_DML.replaceAll(STATEMENTS_PLACEHOLDER, tableId.table().replaceAll("\\$", "\\\\\\$"));
+        connection.execute(enableCdcForTableStmt, generateWrapperFunctionsStmts);
+    }
+
+    /**
+     * Enables CDC for a table in default schema if not already enabled and generates the wrapper
      * functions for that table.
      *
      * @param connection
@@ -268,10 +346,7 @@ public class TestHelper {
      * @throws SQLException if anything unexpected fails
      */
     public static void enableTableCdc(SqlServerConnection connection, String name) throws SQLException {
-        Objects.requireNonNull(name);
-        String enableCdcForTableStmt = ENABLE_TABLE_CDC.replace(STATEMENTS_PLACEHOLDER, name);
-        String generateWrapperFunctionsStmts = CDC_WRAPPERS_DML.replaceAll(STATEMENTS_PLACEHOLDER, name.replaceAll("\\$", "\\\\\\$"));
-        connection.execute(enableCdcForTableStmt, generateWrapperFunctionsStmts);
+        TestHelper.enableSchemaTableCdc(connection, new TableId(null, "dbo", name));
     }
 
     /**
@@ -322,7 +397,7 @@ public class TestHelper {
      *            the source table columns that are to be included in the change table, may not be {@code null}
      * @throws SQLException if anything unexpected fails
      */
-    public static void enableTableCdc(SqlServerConnection connection, String tableName, String captureName, List<String> captureColumnList) throws SQLException {
+    public static void enableTableCdc(JdbcConnection connection, String tableName, String captureName, List<String> captureColumnList) throws SQLException {
         Objects.requireNonNull(tableName);
         Objects.requireNonNull(captureName);
         Objects.requireNonNull(captureColumnList);
@@ -338,18 +413,32 @@ public class TestHelper {
      *            the name of the table, may not be {@code null}
      * @throws SQLException if anything unexpected fails
      */
-    public static void disableTableCdc(SqlServerConnection connection, String name) throws SQLException {
+    public static void disableTableCdc(JdbcConnection connection, String name) throws SQLException {
         Objects.requireNonNull(name);
         String disableCdcForTableStmt = DISABLE_TABLE_CDC.replace(STATEMENTS_PLACEHOLDER, name);
         connection.execute(disableCdcForTableStmt);
     }
 
     public static void waitForSnapshotToBeCompleted() {
+        waitForDatabaseSnapshotToBeCompleted(TEST_DATABASE_1);
+    }
+
+    public static void waitForDatabaseSnapshotToBeCompleted(String databaseName) {
+        waitForSnapshotToBeCompleted(getObjectName("snapshot", "server1", databaseName));
+    }
+
+    public static void waitForDatabaseSnapshotsToBeCompleted(String... databaseNames) {
+        for (String databaseName : databaseNames) {
+            waitForDatabaseSnapshotToBeCompleted(databaseName);
+        }
+    }
+
+    private static void waitForSnapshotToBeCompleted(ObjectName objectName) {
         final MBeanServer mbeanServer = ManagementFactory.getPlatformMBeanServer();
         try {
             Awaitility.await("Snapshot not completed").atMost(Duration.ofSeconds(60)).until(() -> {
                 try {
-                    return (boolean) mbeanServer.getAttribute(getObjectName("snapshot", "server1"), "SnapshotCompleted");
+                    return (boolean) mbeanServer.getAttribute(objectName, "SnapshotCompleted");
                 }
                 catch (InstanceNotFoundException e) {
                     // Metrics has not started yet
@@ -362,12 +451,23 @@ public class TestHelper {
         }
     }
 
+    public static void waitForTaskStreamingStarted(String taskId) {
+        waitForStreamingStarted(getObjectName(Collect.linkMapOf(
+                "server", "server1",
+                "task", taskId,
+                "context", "streaming")));
+    }
+
     public static void waitForStreamingStarted() {
+        waitForTaskStreamingStarted(TEST_TASK_ID);
+    }
+
+    public static void waitForStreamingStarted(ObjectName objectName) {
         final MBeanServer mbeanServer = ManagementFactory.getPlatformMBeanServer();
         try {
             Awaitility.await("Streaming never started").atMost(Duration.ofSeconds(60)).until(() -> {
                 try {
-                    return (boolean) mbeanServer.getAttribute(getObjectName("streaming", "server1"), "Connected");
+                    return (boolean) mbeanServer.getAttribute(objectName, "Connected");
                 }
                 catch (InstanceNotFoundException e) {
                     // Metrics has not started yet
@@ -381,24 +481,55 @@ public class TestHelper {
     }
 
     public static void waitForMaxLsnAvailable(SqlServerConnection connection) throws Exception {
+        waitForMaxLsnAvailable(connection, TEST_DATABASE_1);
+    }
+
+    public static void waitForMaxLsnAvailable(SqlServerConnection connection, String databaseName) throws Exception {
         try {
             Awaitility.await("Max LSN not available")
                     .atMost(60, TimeUnit.SECONDS)
                     .pollDelay(Duration.ofSeconds(0))
                     .pollInterval(Duration.ofMillis(100))
-                    .until(() -> connection.getMaxLsn().isAvailable());
+                    .until(() -> connection.getMaxLsn(databaseName).isAvailable());
         }
         catch (ConditionTimeoutException e) {
             throw new IllegalArgumentException("A max LSN was not available", e);
         }
     }
 
-    private static ObjectName getObjectName(String context, String serverName) throws MalformedObjectNameException {
-        return new ObjectName("debezium.sql_server:type=connector-metrics,context=" + context + ",server=" + serverName);
+    private static ObjectName getObjectName(String context, String serverName) {
+        return getObjectName(Collect.linkMapOf(
+                "context", context,
+                "server", serverName));
+    }
+
+    private static ObjectName getObjectName(String context, String serverName, String databaseName) {
+        return getObjectName(Collect.linkMapOf(
+                "server", serverName,
+                "task", TEST_TASK_ID,
+                "context", context,
+                "database", databaseName));
+    }
+
+    private static ObjectName getObjectName(Map<String, String> tags) {
+        final String metricName = "debezium.sql_server:type=connector-metrics,"
+                + tags.entrySet().stream()
+                        .map(e -> e.getKey() + "=" + Sanitizer.jmxSanitize(e.getValue()))
+                        .collect(Collectors.joining(","));
+        try {
+            return new ObjectName(metricName);
+        }
+        catch (MalformedObjectNameException e) {
+            throw new IllegalArgumentException("Unable to build object name", e);
+        }
     }
 
     public static int waitTimeForRecords() {
         return Integer.parseInt(System.getProperty(TEST_PROPERTY_PREFIX + "records.waittime", "5"));
+    }
+
+    public static int waitTimeForLogEntries() {
+        return Integer.parseInt(System.getProperty(TEST_PROPERTY_PREFIX + "log.waittime", "15"));
     }
 
     /**
@@ -417,19 +548,19 @@ public class TestHelper {
                     .atMost(60, TimeUnit.SECONDS)
                     .pollDelay(Duration.ofSeconds(0))
                     .pollInterval(Duration.ofMillis(100)).until(() -> {
-                        if (!connection.getMaxLsn().isAvailable()) {
+                        if (!connection.getMaxLsn(TEST_DATABASE_1).isAvailable()) {
                             return false;
                         }
 
-                        for (SqlServerChangeTable ct : connection.listOfChangeTables()) {
+                        for (SqlServerChangeTable ct : connection.getChangeTables(TEST_DATABASE_1)) {
                             final String ctTableName = ct.getChangeTableId().table();
                             if (ctTableName.endsWith("dbo_" + connection.getNameOfChangeTable(tableName))) {
                                 try {
-                                    final Lsn minLsn = connection.getMinLsn(ctTableName);
-                                    final Lsn maxLsn = connection.getMaxLsn();
+                                    final Lsn minLsn = connection.getMinLsn(TEST_DATABASE_1, ctTableName);
+                                    final Lsn maxLsn = connection.getMaxLsn(TEST_DATABASE_1);
                                     final CdcRecordFoundBlockingMultiResultSetConsumer consumer = new CdcRecordFoundBlockingMultiResultSetConsumer(handler);
                                     SqlServerChangeTable[] tables = Collections.singletonList(ct).toArray(new SqlServerChangeTable[]{});
-                                    connection.getChangesForTables(tables, minLsn, maxLsn, consumer);
+                                    connection.getChangesForTables(TEST_DATABASE_1, tables, minLsn, maxLsn, consumer);
                                     return consumer.isFound();
                                 }
                                 catch (Exception e) {
@@ -472,19 +603,19 @@ public class TestHelper {
                     .atMost(30, TimeUnit.SECONDS)
                     .pollDelay(Duration.ofSeconds(0))
                     .pollInterval(Duration.ofMillis(100)).until(() -> {
-                        if (!connection.getMaxLsn().isAvailable()) {
+                        if (!connection.getMaxLsn(TEST_DATABASE_1).isAvailable()) {
                             return false;
                         }
 
-                        for (SqlServerChangeTable ct : connection.listOfChangeTables()) {
+                        for (SqlServerChangeTable ct : connection.getChangeTables(TEST_DATABASE_1)) {
                             final String ctTableName = ct.getChangeTableId().table();
                             if (ctTableName.endsWith(connection.getNameOfChangeTable(captureInstanceName))) {
                                 try {
-                                    final Lsn minLsn = connection.getMinLsn(ctTableName);
-                                    final Lsn maxLsn = connection.getMaxLsn();
+                                    final Lsn minLsn = connection.getMinLsn(TEST_DATABASE_1, ctTableName);
+                                    final Lsn maxLsn = connection.getMaxLsn(TEST_DATABASE_1);
                                     final CdcRecordFoundBlockingMultiResultSetConsumer consumer = new CdcRecordFoundBlockingMultiResultSetConsumer(handler);
                                     SqlServerChangeTable[] tables = Collections.singletonList(ct).toArray(new SqlServerChangeTable[]{});
-                                    connection.getChangesForTables(tables, minLsn, maxLsn, consumer);
+                                    connection.getChangesForTables(TEST_DATABASE_1, tables, minLsn, maxLsn, consumer);
                                     return consumer.isFound();
                                 }
                                 catch (Exception e) {
@@ -503,6 +634,10 @@ public class TestHelper {
         catch (ConditionTimeoutException e) {
             throw new IllegalStateException("Expected record never appeared in the CDC table", e);
         }
+    }
+
+    public static String topicName(String databaseName, String tableName) {
+        return String.join(".", TEST_SERVER_NAME, databaseName, "dbo", tableName);
     }
 
     @FunctionalInterface

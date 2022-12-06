@@ -4,7 +4,7 @@
   <parent>
     <groupId>io.debezium</groupId>
     <artifactId>debezium-build-parent</artifactId>
-    <version>1.6.0-SNAPSHOT</version>
+    <version>2.1.0-SNAPSHOT</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
 
@@ -16,32 +16,9 @@
     <properties>
 
         <!-- Maven Plugins -->
-        <version.compiler.plugin>3.8.1</version.compiler.plugin>
-        <version.resources.plugin>3.1.0</version.resources.plugin>
-        <version.filtering.plugin>3.1.1</version.filtering.plugin>
-        <version.dependency.plugin>3.1.1</version.dependency.plugin>
-        <version.enforcer.plugin>3.0.0-M2</version.enforcer.plugin>
-
-        <version.jar.plugin>3.0.2</version.jar.plugin>
-        <version.source.plugin>3.1.0</version.source.plugin>
-        <version.assembly.plugin>3.1.1</version.assembly.plugin>
-        <version.war.plugin>2.5</version.war.plugin>
-        <version.google.formatter.plugin>0.4</version.google.formatter.plugin>
-        <version.docker.maven.plugin>0.31.0</version.docker.maven.plugin>
-        <version.staging.plugin>1.6.8</version.staging.plugin>
-        <version.protoc.maven.plugin>3.8.0</version.protoc.maven.plugin>
-        <version.javadoc.plugin>3.1.1</version.javadoc.plugin>
-        <version.code.formatter>2.15.0</version.code.formatter>
-        <version.surefire.plugin>3.0.0-M3</version.surefire.plugin>
-        <version.checkstyle.plugin>3.1.1</version.checkstyle.plugin>
-        <version.release.plugin>2.5.3</version.release.plugin>
-        <version.impsort>1.6.0</version.impsort>
-        <version.failsafe.plugin>${version.surefire.plugin}</version.failsafe.plugin>
-        <version.checkstyle>8.32</version.checkstyle>
-        <version.revapi.plugin>0.11.5</version.revapi.plugin>
-        <version.jandex>1.0.8</version.jandex>
-        <version.revapi-java.plugin>0.21.0</version.revapi-java.plugin>
-        <version.build-helper.plugin>1.9.1</version.build-helper.plugin>
+        <version.docker.maven.plugin>0.40.2</version.docker.maven.plugin>
+        <version.code.formatter>2.16.0</version.code.formatter>
+        <version.impsort>1.6.2</version.impsort>
 
         <!-- Dockerfiles -->
         <docker.maintainer>Debezium community</docker.maintainer>
@@ -58,6 +35,7 @@
         <!-- Set formatting default goals -->
         <format.formatter.goal>format</format.formatter.goal>
         <format.imports.goal>sort</format.imports.goal>
+        <format.imports.source.compliance>15</format.imports.source.compliance>
 
         <!-- No debug options by default -->
         <debug.argline />
@@ -146,7 +124,12 @@
                         <removeUnused>true</removeUnused>
                     </configuration>
                 </plugin>
-               <plugin>
+                <plugin>
+                    <groupId>org.codehaus.mojo</groupId>
+                    <artifactId>exec-maven-plugin</artifactId>
+                    <version>3.0.0</version>
+                </plugin>
+                <plugin>
                     <groupId>org.jboss.jandex</groupId>
                     <artifactId>jandex-maven-plugin</artifactId>
                     <version>${version.jandex}</version>
@@ -286,6 +269,7 @@
                         <artifactId>impsort-maven-plugin</artifactId>
                         <configuration>
                             <removeUnused>true</removeUnused>
+                            <compliance>${format.imports.source.compliance}</compliance>
                         </configuration>
                         <executions>
                             <execution>

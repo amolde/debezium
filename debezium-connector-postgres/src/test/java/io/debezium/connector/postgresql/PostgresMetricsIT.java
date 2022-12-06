@@ -15,8 +15,8 @@ import javax.management.MBeanServer;
 import javax.management.MalformedObjectNameException;
 import javax.management.ObjectName;
 
+import org.assertj.core.api.Assertions;
 import org.awaitility.Awaitility;
-import org.fest.assertions.Assertions;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
@@ -26,6 +26,8 @@ import org.slf4j.LoggerFactory;
 
 import io.debezium.config.Configuration;
 import io.debezium.connector.postgresql.PostgresConnectorConfig.SnapshotMode;
+import io.debezium.junit.EqualityCheck;
+import io.debezium.junit.SkipWhenJavaVersion;
 import io.debezium.util.Testing;
 
 /**
@@ -146,12 +148,14 @@ public class PostgresMetricsIT extends AbstractRecordsProducerTest {
 
         // Check snapshot metrics
         Assertions.assertThat(mBeanServer.getAttribute(getSnapshotMetricsObjectName(), "TotalTableCount")).isEqualTo(1);
-        Assertions.assertThat(mBeanServer.getAttribute(getSnapshotMetricsObjectName(), "MonitoredTables")).isEqualTo(new String[]{ "public.simple" });
+        Assertions.assertThat(mBeanServer.getAttribute(getSnapshotMetricsObjectName(), "CapturedTables")).isEqualTo(new String[]{ "public.simple" });
         Assertions.assertThat(mBeanServer.getAttribute(getSnapshotMetricsObjectName(), "TotalNumberOfEventsSeen")).isEqualTo(2L);
         Assertions.assertThat(mBeanServer.getAttribute(getSnapshotMetricsObjectName(), "RemainingTableCount")).isEqualTo(0);
         Assertions.assertThat(mBeanServer.getAttribute(getSnapshotMetricsObjectName(), "SnapshotRunning")).isEqualTo(false);
         Assertions.assertThat(mBeanServer.getAttribute(getSnapshotMetricsObjectName(), "SnapshotAborted")).isEqualTo(false);
         Assertions.assertThat(mBeanServer.getAttribute(getSnapshotMetricsObjectName(), "SnapshotCompleted")).isEqualTo(true);
+        Assertions.assertThat(mBeanServer.getAttribute(getSnapshotMetricsObjectName(), "SnapshotPaused")).isEqualTo(false);
+        Assertions.assertThat(mBeanServer.getAttribute(getSnapshotMetricsObjectName(), "SnapshotPausedDurationInSeconds")).isEqualTo(0L);
     }
 
     private void assertSnapshotNotExecutedMetrics() throws Exception {
@@ -169,7 +173,7 @@ public class PostgresMetricsIT extends AbstractRecordsProducerTest {
 
         // Check snapshot metrics
         Assertions.assertThat(mBeanServer.getAttribute(getSnapshotMetricsObjectName(), "TotalTableCount")).isEqualTo(0);
-        Assertions.assertThat(mBeanServer.getAttribute(getSnapshotMetricsObjectName(), "MonitoredTables")).isEqualTo(new String[]{});
+        Assertions.assertThat(mBeanServer.getAttribute(getSnapshotMetricsObjectName(), "CapturedTables")).isEqualTo(new String[]{});
         Assertions.assertThat(mBeanServer.getAttribute(getSnapshotMetricsObjectName(), "TotalNumberOfEventsSeen")).isEqualTo(0L);
         Assertions.assertThat(mBeanServer.getAttribute(getSnapshotMetricsObjectName(), "RemainingTableCount")).isEqualTo(0);
         Assertions.assertThat(mBeanServer.getAttribute(getSnapshotMetricsObjectName(), "SnapshotRunning")).isEqualTo(false);
@@ -194,11 +198,12 @@ public class PostgresMetricsIT extends AbstractRecordsProducerTest {
         Assertions.assertThat(mBeanServer.getAttribute(getStreamingMetricsObjectName(), "Connected")).isEqualTo(true);
         Assertions.assertThat(mBeanServer.getAttribute(getStreamingMetricsObjectName(), "TotalNumberOfEventsSeen")).isEqualTo(2L);
         // todo: this does not seem to be populated?
-        // Assertions.assertThat(mBeanServer.getAttribute(getStreamingMetricsObjectName(), "MonitoredTables")).isEqualTo(new String[] {"public.simple"});
+        // Assertions.assertThat(mBeanServer.getAttribute(getStreamingMetricsObjectName(), "CapturedTables")).isEqualTo(new String[] {"public.simple"});
     }
 
     @Test
-    public void twoRecordsInQueue() throws Exception {
+    @SkipWhenJavaVersion(check = EqualityCheck.GREATER_THAN_OR_EQUAL, value = 16, description = "Deep reflection not allowed by default on this Java version")
+    public void oneRecordInQueue() throws Exception {
         // Testing.Print.enable();
         final MBeanServer mBeanServer = ManagementFactory.getPlatformMBeanServer();
         TestHelper.execute(INIT_STATEMENTS, INSERT_STATEMENTS);
@@ -269,51 +274,6 @@ public class PostgresMetricsIT extends AbstractRecordsProducerTest {
                     long value = (long) mBeanServer.getAttribute(getStreamingMetricsObjectName(), "CurrentQueueSizeInBytes");
                     return value == 0;
                 });
-        Assertions.assertThat(mBeanServer.getAttribute(getStreamingMetricsObjectName(), "CurrentQueueSizeInBytes")).isEqualTo(0L);
-        stopConnector();
-    }
-
-    @Test
-    public void oneRecordInQueue() throws Exception {
-        final MBeanServer mBeanServer = ManagementFactory.getPlatformMBeanServer();
-        TestHelper.execute(INIT_STATEMENTS, INSERT_STATEMENTS);
-        final int recordCount = 2;
-
-        Configuration.Builder configBuilder = TestHelper.defaultConfig()
-                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NEVER)
-                .with(PostgresConnectorConfig.DROP_SLOT_ON_STOP, Boolean.TRUE)
-                .with(PostgresConnectorConfig.MAX_QUEUE_SIZE, 10)
-                .with(PostgresConnectorConfig.MAX_BATCH_SIZE, 1)
-                .with(PostgresConnectorConfig.POLL_INTERVAL_MS, 5000L)
-                .with(PostgresConnectorConfig.MAX_QUEUE_SIZE_IN_BYTES, 10L);
-        start(PostgresConnector.class, configBuilder.build());
-
-        waitForStreamingToStart();
-        for (int i = 0; i < recordCount - 1; i++) {
-            TestHelper.execute(INSERT_STATEMENTS);
-        }
-        Awaitility.await()
-                .alias("MBean attribute was not an expected value")
-                .pollInterval(100, TimeUnit.MILLISECONDS)
-                .atMost(TestHelper.waitTimeForRecords() * 5, TimeUnit.SECONDS)
-                .ignoreException(InstanceNotFoundException.class)
-                .until(() -> {
-                    long value = (long) mBeanServer.getAttribute(getStreamingMetricsObjectName(), "CurrentQueueSizeInBytes");
-                    return value > 0;
-                });
-        Assertions.assertThat(mBeanServer.getAttribute(getStreamingMetricsObjectName(), "CurrentQueueSizeInBytes")).isNotEqualTo(0L);
-        Awaitility.await()
-                .alias("MBean attribute was not an expected value")
-                .pollInterval(100, TimeUnit.MILLISECONDS)
-                .atMost(TestHelper.waitTimeForRecords() * 5, TimeUnit.SECONDS)
-                .ignoreException(InstanceNotFoundException.class)
-                .until(() -> {
-                    int value = (int) mBeanServer.getAttribute(getStreamingMetricsObjectName(), "QueueRemainingCapacity");
-                    return value == 9;
-                });
-        Assertions.assertThat(mBeanServer.getAttribute(getStreamingMetricsObjectName(), "QueueRemainingCapacity")).isEqualTo(9);
-
-        SourceRecords records = consumeRecordsByTopic(recordCount);
         Assertions.assertThat(mBeanServer.getAttribute(getStreamingMetricsObjectName(), "CurrentQueueSizeInBytes")).isEqualTo(0L);
         stopConnector();
     }

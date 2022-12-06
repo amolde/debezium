@@ -7,10 +7,13 @@ package io.debezium.connector.mysql;
 
 import java.io.Serializable;
 
+import org.apache.kafka.connect.data.Struct;
+
 import io.debezium.data.Envelope;
 import io.debezium.data.Envelope.Operation;
 import io.debezium.pipeline.spi.OffsetContext;
 import io.debezium.relational.RelationalChangeRecordEmitter;
+import io.debezium.relational.TableSchema;
 import io.debezium.util.Clock;
 
 /**
@@ -18,15 +21,16 @@ import io.debezium.util.Clock;
  *
  * @author Jiri Pechanec
  */
-public class MySqlChangeRecordEmitter extends RelationalChangeRecordEmitter {
+public class MySqlChangeRecordEmitter extends RelationalChangeRecordEmitter<MySqlPartition> {
 
     private final Envelope.Operation operation;
     private final OffsetContext offset;
     private final Object[] before;
     private final Object[] after;
 
-    public MySqlChangeRecordEmitter(OffsetContext offset, Clock clock, Envelope.Operation operation, Serializable[] before, Serializable[] after) {
-        super(offset, clock);
+    public MySqlChangeRecordEmitter(MySqlPartition partition, OffsetContext offset, Clock clock, Envelope.Operation operation, Serializable[] before,
+                                    Serializable[] after) {
+        super(partition, offset, clock);
         this.offset = offset;
         this.operation = operation;
         this.before = before;
@@ -39,17 +43,23 @@ public class MySqlChangeRecordEmitter extends RelationalChangeRecordEmitter {
     }
 
     @Override
-    protected Operation getOperation() {
+    public Operation getOperation() {
         return operation;
     }
 
     @Override
     protected Object[] getOldColumnValues() {
-        return before != null ? before : null;
+        return before;
     }
 
     @Override
     protected Object[] getNewColumnValues() {
-        return after != null ? after : null;
+        return after;
+    }
+
+    @Override
+    protected void emitTruncateRecord(Receiver receiver, TableSchema tableSchema) throws InterruptedException {
+        Struct envelope = tableSchema.getEnvelopeSchema().truncate(getOffset().getSourceInfo(), getClock().currentTimeAsInstant());
+        receiver.changeRecord(getPartition(), tableSchema, Operation.TRUNCATE, null, envelope, getOffset(), null);
     }
 }

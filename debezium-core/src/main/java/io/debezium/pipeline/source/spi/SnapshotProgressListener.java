@@ -5,58 +5,79 @@
  */
 package io.debezium.pipeline.source.spi;
 
+import io.debezium.pipeline.spi.Partition;
 import io.debezium.relational.TableId;
-import io.debezium.schema.DataCollectionId;
+import io.debezium.spi.schema.DataCollectionId;
 
 /**
- * A class invoked by {@link SnapshotChangeEventSource} whenever an important event or change of state happens.
+ * Invoked whenever an important event or change of state happens during the snapshot phase.
  *
  * @author Jiri Pechanec
  */
-public interface SnapshotProgressListener {
+public interface SnapshotProgressListener<P extends Partition> {
 
-    void snapshotStarted();
+    void snapshotStarted(P partition);
 
-    void monitoredDataCollectionsDetermined(Iterable<? extends DataCollectionId> dataCollectionIds);
+    void snapshotPaused(P partition);
 
-    void snapshotCompleted();
+    void snapshotResumed(P partition);
 
-    void snapshotAborted();
+    void monitoredDataCollectionsDetermined(P partition, Iterable<? extends DataCollectionId> dataCollectionIds);
 
-    void dataCollectionSnapshotCompleted(DataCollectionId dataCollectionId, long numRows);
+    void snapshotCompleted(P partition);
 
-    void rowsScanned(TableId tableId, long numRows);
+    void snapshotAborted(P partition);
 
-    void currentChunk(String chunkId, Object[] from, Object[] to);
+    void dataCollectionSnapshotCompleted(P partition, DataCollectionId dataCollectionId, long numRows);
 
-    public static SnapshotProgressListener NO_OP = new SnapshotProgressListener() {
+    void rowsScanned(P partition, TableId tableId, long numRows);
 
-        @Override
-        public void snapshotStarted() {
-        }
+    void currentChunk(P partition, String chunkId, Object[] chunkFrom, Object[] chunkTo);
 
-        @Override
-        public void rowsScanned(TableId tableId, long numRows) {
-        }
+    void currentChunk(P partition, String chunkId, Object[] chunkFrom, Object[] chunkTo, Object[] tableTo);
 
-        @Override
-        public void monitoredDataCollectionsDetermined(Iterable<? extends DataCollectionId> dataCollectionIds) {
-        }
+    static <P extends Partition> SnapshotProgressListener<P> NO_OP() {
+        return new SnapshotProgressListener<P>() {
 
-        @Override
-        public void dataCollectionSnapshotCompleted(DataCollectionId dataCollectionId, long numRows) {
-        }
+            @Override
+            public void snapshotStarted(P partition) {
+            }
 
-        @Override
-        public void snapshotCompleted() {
-        }
+            @Override
+            public void snapshotPaused(P partition) {
+            }
 
-        @Override
-        public void snapshotAborted() {
-        }
+            @Override
+            public void snapshotResumed(P partition) {
+            }
 
-        @Override
-        public void currentChunk(String chunkId, Object[] from, Object[] to) {
-        }
-    };
+            @Override
+            public void rowsScanned(P partition, TableId tableId, long numRows) {
+            }
+
+            @Override
+            public void monitoredDataCollectionsDetermined(P partition, Iterable<? extends DataCollectionId> dataCollectionIds) {
+            }
+
+            @Override
+            public void dataCollectionSnapshotCompleted(P partition, DataCollectionId dataCollectionId, long numRows) {
+            }
+
+            @Override
+            public void snapshotCompleted(P partition) {
+            }
+
+            @Override
+            public void snapshotAborted(P partition) {
+            }
+
+            @Override
+            public void currentChunk(P partition, String chunkId, Object[] chunkFrom, Object[] chunkTo) {
+            }
+
+            @Override
+            public void currentChunk(P partition, String chunkId, Object[] chunkFrom, Object[] chunkTo, Object[] tableTo) {
+            }
+        };
+    }
 }

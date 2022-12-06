@@ -10,6 +10,7 @@ import org.slf4j.LoggerFactory;
 
 import io.debezium.annotation.ThreadSafe;
 import io.debezium.config.CommonConnectorConfig;
+import io.debezium.spi.schema.DataCollectionId;
 import io.debezium.util.BoundedConcurrentHashMap;
 import io.debezium.util.BoundedConcurrentHashMap.Eviction;
 
@@ -21,7 +22,9 @@ import io.debezium.util.BoundedConcurrentHashMap.Eviction;
  *
  * @param <I>
  *            The type of {@link DataCollectionId} used by a given implementation
+ * @deprecated Use {@link io.debezium.spi.topic.TopicNamingStrategy} instead.
  */
+@Deprecated
 public class TopicSelector<I extends DataCollectionId> {
 
     private final String prefix;

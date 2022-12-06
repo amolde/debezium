@@ -43,17 +43,17 @@ import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.TearDown;
 import org.openjdk.jmh.annotations.Warmup;
 
+import io.debezium.config.CommonConnectorConfig;
 import io.debezium.config.Configuration;
 import io.debezium.connector.oracle.OracleConnection;
 import io.debezium.connector.oracle.OracleConnector;
 import io.debezium.connector.oracle.OracleConnectorConfig;
 import io.debezium.connector.oracle.OracleConnectorConfig.ConnectorAdapter;
-import io.debezium.connector.oracle.OracleConnectorConfig.LogMiningDmlParser;
 import io.debezium.connector.oracle.OracleConnectorConfig.LogMiningStrategy;
 import io.debezium.connector.oracle.OracleConnectorConfig.SnapshotMode;
 import io.debezium.embedded.EmbeddedEngine;
 import io.debezium.jdbc.JdbcConfiguration;
-import io.debezium.relational.history.FileDatabaseHistory;
+import io.debezium.storage.file.history.FileSchemaHistory;
 import io.debezium.util.IoUtil;
 
 /**
@@ -86,9 +86,6 @@ public class EndToEndPerf {
         @Param({ "1000", "5000", "10000" })
         public int dmlEvents;
 
-        @Param({ "legacy", "fast" })
-        public String parser;
-
         @Param({ "redo_log_catalog", "online_catalog" })
         public String miningStrategy;
 
@@ -118,7 +115,6 @@ public class EndToEndPerf {
                     .with(OracleConnectorConfig.SNAPSHOT_MODE, SnapshotMode.SCHEMA_ONLY)
                     .with(OracleConnectorConfig.TABLE_INCLUDE_LIST, "DEBEZIUM\\.TEST")
                     .with(OracleConnectorConfig.LOG_MINING_STRATEGY, LogMiningStrategy.parse(miningStrategy))
-                    .with(OracleConnectorConfig.LOG_MINING_DML_PARSER, LogMiningDmlParser.parse(parser))
                     .build();
 
             Configuration config = Configuration.copy(connectorConfig)
@@ -240,12 +236,12 @@ public class EndToEndPerf {
             Configuration.Builder builder = Configuration.create();
             jdbcConfiguration.forEach((f, v) -> builder.with(OracleConnectorConfig.DATABASE_CONFIG_PREFIX + f, v));
 
-            return builder.with(OracleConnectorConfig.SERVER_NAME, SERVER_NAME)
+            return builder.with(CommonConnectorConfig.TOPIC_PREFIX, SERVER_NAME)
                     .with(OracleConnectorConfig.PDB_NAME, "ORCLPDB1")
                     .with(OracleConnectorConfig.INCLUDE_SCHEMA_CHANGES, false)
                     .with(OracleConnectorConfig.CONNECTOR_ADAPTER, ConnectorAdapter.LOG_MINER)
-                    .with(OracleConnectorConfig.DATABASE_HISTORY, FileDatabaseHistory.class)
-                    .with(FileDatabaseHistory.FILE_PATH, getPath("history.txt"));
+                    .with(OracleConnectorConfig.SCHEMA_HISTORY, FileSchemaHistory.class)
+                    .with(FileSchemaHistory.FILE_PATH, getPath("history.txt"));
         }
 
         private Configuration.Builder testConfig() {
@@ -256,10 +252,7 @@ public class EndToEndPerf {
         }
 
         private OracleConnection getTestConnection() {
-            Configuration config = testConfig().build();
-            Configuration jdbcConfig = config.subset("database.", true);
-
-            OracleConnection connection = new OracleConnection(jdbcConfig, EndToEndPerf.class::getClassLoader);
+            OracleConnection connection = new OracleConnection(testJdbcConfig());
             try {
                 connection.setAutoCommit(false);
             }
@@ -267,7 +260,7 @@ public class EndToEndPerf {
                 throw new RuntimeException(e);
             }
 
-            String pdbName = new OracleConnectorConfig(config).getPdbName();
+            String pdbName = new OracleConnectorConfig(testConfig().build()).getPdbName();
             if (pdbName != null) {
                 connection.setSessionToPdb(pdbName);
             }

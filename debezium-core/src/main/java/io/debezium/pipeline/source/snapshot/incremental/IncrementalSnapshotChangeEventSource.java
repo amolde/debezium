@@ -6,10 +6,11 @@
 package io.debezium.pipeline.source.snapshot.incremental;
 
 import java.util.List;
+import java.util.Optional;
 
-import io.debezium.pipeline.EventDispatcher;
 import io.debezium.pipeline.spi.OffsetContext;
-import io.debezium.schema.DataCollectionId;
+import io.debezium.pipeline.spi.Partition;
+import io.debezium.spi.schema.DataCollectionId;
 
 /**
  * A Contract t
@@ -18,14 +19,35 @@ import io.debezium.schema.DataCollectionId;
  *
  * @param <T> data collection id class
  */
-public interface IncrementalSnapshotChangeEventSource<T extends DataCollectionId> {
+public interface IncrementalSnapshotChangeEventSource<P extends Partition, T extends DataCollectionId> {
 
-    void closeWindow(String id, EventDispatcher<T> dispatcher, OffsetContext offsetContext) throws InterruptedException;
+    void closeWindow(P partition, String id, OffsetContext offsetContext) throws InterruptedException;
 
-    void processMessage(DataCollectionId dataCollectionId, Object key, OffsetContext offsetContext);
+    void pauseSnapshot(P partition, OffsetContext offsetContext) throws InterruptedException;
 
-    void init(OffsetContext offsetContext);
+    void resumeSnapshot(P partition, OffsetContext offsetContext) throws InterruptedException;
 
-    void addDataCollectionNamesToSnapshot(List<String> dataCollectionIds, OffsetContext offsetContext)
+    void processMessage(P partition, DataCollectionId dataCollectionId, Object key, OffsetContext offsetContext) throws InterruptedException;
+
+    void init(P partition, OffsetContext offsetContext);
+
+    void addDataCollectionNamesToSnapshot(P partition, List<String> dataCollectionIds, Optional<String> additionalCondition, OffsetContext offsetContext)
             throws InterruptedException;
+
+    void stopSnapshot(P partition, List<String> dataCollectionIds, OffsetContext offsetContext);
+
+    default void processHeartbeat(P partition, OffsetContext offsetContext) throws InterruptedException {
+    }
+
+    default void processFilteredEvent(P partition, OffsetContext offsetContext) throws InterruptedException {
+    }
+
+    default void processTransactionStartedEvent(P partition, OffsetContext offsetContext) throws InterruptedException {
+    }
+
+    default void processTransactionCommittedEvent(P partition, OffsetContext offsetContext) throws InterruptedException {
+    }
+
+    default void processSchemaChange(P partition, DataCollectionId dataCollectionId) throws InterruptedException {
+    }
 }

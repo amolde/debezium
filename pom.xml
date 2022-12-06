@@ -1,30 +1,33 @@
 <?xml version="1.0"?>
-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
 
-  <parent>
-    <groupId>org.jboss</groupId>
-    <artifactId>jboss-parent</artifactId>
-    <version>36</version>
-  </parent>
+    <parent>
+        <groupId>org.jboss</groupId>
+        <artifactId>jboss-parent</artifactId>
+        <version>36</version>
+    </parent>
 
-    <modelVersion>4.0.0</modelVersion>
     <groupId>io.debezium</groupId>
     <artifactId>debezium-build-parent</artifactId>
-    <version>1.6.0-SNAPSHOT</version>
+    <version>2.1.0-SNAPSHOT</version>
     <name>Debezium Build Aggregator</name>
     <description>Debezium is an open source change data capture platform</description>
     <packaging>pom</packaging>
     <url>https://debezium.io</url>
+
     <scm>
         <connection>scm:git:git@github.com:debezium/debezium.git</connection>
         <developerConnection>scm:git:git@github.com:debezium/debezium.git</developerConnection>
         <url>https://github.com/debezium/debezium</url>
         <tag>HEAD</tag>
     </scm>
+
     <issueManagement>
         <system>jira</system>
         <url>http://issues.jboss.org/browse/DBZ</url>
     </issueManagement>
+
     <licenses>
         <license>
             <name>Apache Software License 2.0</name>
@@ -50,9 +53,10 @@
     </developers>
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
 
-        <maven.compiler.source>1.8</maven.compiler.source>
-        <maven.compiler.target>1.8</maven.compiler.target>
+        <maven.compiler.release>11</maven.compiler.release>
+        <maven.compiler.testRelease>11</maven.compiler.testRelease>
 
         <!-- Enforce JDK 11 for building (handled via JBoss parent POM)-->
         <jdk.min.version>11</jdk.min.version>
@@ -60,26 +64,26 @@
         <!-- Maven Plugins -->
         <version.compiler.plugin>3.8.1</version.compiler.plugin>
         <version.resources.plugin>3.1.0</version.resources.plugin>
-        <version.filtering.plugin>3.1.1</version.filtering.plugin>
         <version.dependency.plugin>3.1.1</version.dependency.plugin>
         <version.enforcer.plugin>3.0.0-M2</version.enforcer.plugin>
 
+        <version.maven>3.8.4</version.maven>
         <version.jar.plugin>3.0.2</version.jar.plugin>
         <version.source.plugin>3.1.0</version.source.plugin>
         <version.assembly.plugin>3.1.1</version.assembly.plugin>
         <version.war.plugin>2.5</version.war.plugin>
         <version.google.formatter.plugin>0.4</version.google.formatter.plugin>
         <version.docker.maven.plugin>0.31.0</version.docker.maven.plugin>
-        <version.staging.plugin>1.6.8</version.staging.plugin>
+        <version.staging.plugin>1.6.12</version.staging.plugin>
         <version.protoc.maven.plugin>3.8.0</version.protoc.maven.plugin>
-        <version.javadoc.plugin>3.1.1</version.javadoc.plugin>
-        <version.code.formatter>2.15.0</version.code.formatter>
-        <version.surefire.plugin>3.0.0-M3</version.surefire.plugin>
+        <version.javadoc.plugin>3.4.0</version.javadoc.plugin>
+        <version.code.formatter>2.20.0</version.code.formatter>
+        <version.surefire.plugin>3.0.0-M6</version.surefire.plugin>
         <version.checkstyle.plugin>3.1.1</version.checkstyle.plugin>
         <version.release.plugin>2.5.3</version.release.plugin>
-        <version.impsort>1.6.0</version.impsort>
+        <version.impsort>1.7.0</version.impsort>
         <version.failsafe.plugin>${version.surefire.plugin}</version.failsafe.plugin>
-        <version.checkstyle>8.32</version.checkstyle>
+        <version.checkstyle>10.1</version.checkstyle>
         <version.revapi.plugin>0.11.5</version.revapi.plugin>
         <version.jandex>1.0.8</version.jandex>
         <version.revapi-java.plugin>0.21.0</version.revapi-java.plugin>
@@ -89,16 +93,17 @@
         <release.endpoint>https://s01.oss.sonatype.org/</release.endpoint>
 
         <!-- Kafka and it's dependencies MUST reflect what the Kafka version uses -->
-        <version.kafka>2.7.0</version.kafka>
-        <version.curator>4.2.0</version.curator>
-        <version.zookeeper>3.5.8</version.zookeeper>
-        <version.jackson>2.10.5</version.jackson>
-        <version.org.slf4j>1.7.30</version.org.slf4j>
-        <version.log4j>1.2.17</version.log4j>
-        <version.netty>4.1.51.Final</version.netty>
+        <version.kafka>3.3.1</version.kafka>
+        <version.zookeeper>3.6.3</version.zookeeper>
+        <!-- Kafka uses 2.12.6 but we need to bump due to CVE-2020-36518 before Kafka fixes it -->
+        <!-- NOTE: These two versions are maintained separately due to decoupling jackson and databind for downstream -->
+        <version.jackson>2.13.3</version.jackson>
+        <version.jackson.databind>2.13.3</version.jackson.databind>
+        <version.org.slf4j>1.7.36</version.org.slf4j>
+        <version.netty>4.1.78.Final</version.netty>
 
         <!-- Scala version used to build Kafka -->
-        <version.kafka.scala>2.12</version.kafka.scala>
+        <version.kafka.scala>2.13</version.kafka.scala>
 
         <!-- ANTLR -->
         <!-- Align with Antlr runtime version pulled in via Quarkus -->
@@ -106,13 +111,30 @@
         <version.antlr4test.plugin>1.18</version.antlr4test.plugin>
 
         <!-- Quarkus -->
-        <quarkus.version>2.0.0.Final</quarkus.version>
+        <!-- Must be aligned with Apicurio version below -->
+        <quarkus.version>2.14.0.Final</quarkus.version>
 
-        <!-- Databases, should align with database drivers in debezium-bom -->
+        <!-- Apicurio -->
+        <version.apicurio>2.2.5.Final</version.apicurio>
+
+        <!-- Database drivers, should align with databases -->
+        <version.postgresql.driver>42.5.0</version.postgresql.driver>
+        <version.mysql.driver>8.0.29</version.mysql.driver>
+        <version.mysql.binlog>0.27.2</version.mysql.binlog>
+        <version.mongo.driver>4.7.1</version.mongo.driver>
+        <version.sqlserver.driver>10.2.1.jre8</version.sqlserver.driver>
+        <version.oracle.driver>21.6.0.0</version.oracle.driver>
+        <version.db2.driver>11.5.0.0</version.db2.driver>
+        <version.cassandra.driver>4.14.0</version.cassandra.driver>
+
+        <!-- Databases, should align with database drivers -->
         <version.mysql.server>5.7</version.mysql.server>
-        <version.mongo.server>3.6</version.mongo.server>
-        <version.cassandra>3.11.10</version.cassandra>
+        <version.mongo.server>6.0</version.mongo.server>
+        <version.cassandra3>3.11.12</version.cassandra3>
+        <version.cassandra4>4.0.2</version.cassandra4>
 
+        <!-- Required in protoc plug-in config, too; can't be in BOM therefore -->
+        <version.com.google.protobuf>3.19.6</version.com.google.protobuf>
     </properties>
 
     <modules>
@@ -130,11 +152,16 @@
         <module>debezium-connector-postgres</module>
         <module>debezium-connector-mongodb</module>
         <module>debezium-connector-sqlserver</module>
+        <module>debezium-connector-oracle</module>
         <module>debezium-microbenchmark</module>
+        <module>debezium-microbenchmark-oracle</module>
         <module>debezium-quarkus-outbox</module>
         <module>debezium-scripting</module>
         <module>debezium-server</module>
         <module>debezium-testing</module>
+        <module>debezium-connect-rest-extension</module>
+        <module>debezium-schema-generator</module>
+        <module>debezium-storage</module>
     </modules>
 
     <distributionManagement>
@@ -229,11 +256,6 @@
                     <version>${version.resources.plugin}</version>
                 </plugin>
                 <plugin>
-                    <groupId>org.apache.maven.shared</groupId>
-                    <artifactId>maven-filtering</artifactId>
-                    <version>${version.filtering.plugin}</version>
-                </plugin>
-                <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-dependency-plugin</artifactId>
                     <version>${version.dependency.plugin}</version>
@@ -297,7 +319,7 @@
                         <configuration>
                             <rules>
                                 <requireMavenVersion>
-                                    <version>3.6.3</version>
+                                    <version>[${version.maven},3.8.5),[3.8.6,)</version>
                                 </requireMavenVersion>
                             </rules>
                         </configuration>
@@ -363,6 +385,12 @@
                         <configuration>
                             <show>private</show>
                             <nohelp>true</nohelp>
+                            <!--
+                                Tests are compiled with newer Java version so this must
+                                be reflected in Javadoc, otherwise the plug-in would fail.
+                            -->
+                            <release>${maven.compiler.testRelease}</release>
+                            <debug>true</debug>
                         </configuration>
                         <executions>
                             <execution>
@@ -413,23 +441,6 @@
                     </plugin>
                 </plugins>
             </build>
-        </profile>
-        <profile>
-            <id>jdk11</id>
-            <activation>
-                <jdk>11</jdk>
-            </activation>
-            <properties>
-                <modules.argline>--illegal-access=permit</modules.argline>
-                <maven.compiler.release>8</maven.compiler.release>
-            </properties>
-        </profile>
-        <profile>
-            <id>oracle</id>
-            <modules>
-                <module>debezium-connector-oracle</module>
-                <module>debezium-microbenchmark-oracle</module>
-            </modules>
         </profile>
     </profiles>
 </project>

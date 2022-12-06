@@ -10,9 +10,12 @@ import java.util.HashMap;
 import java.util.Map;
 
 import org.apache.kafka.connect.data.Struct;
-import org.bson.Document;
+import org.bson.BsonDocument;
 
-import io.debezium.annotation.ThreadSafe;
+import com.mongodb.client.model.changestream.ChangeStreamDocument;
+import com.mongodb.client.model.changestream.OperationType;
+
+import io.debezium.annotation.Immutable;
 import io.debezium.data.Envelope.FieldName;
 import io.debezium.data.Envelope.Operation;
 import io.debezium.pipeline.AbstractChangeRecordEmitter;
@@ -20,90 +23,70 @@ import io.debezium.pipeline.spi.OffsetContext;
 import io.debezium.util.Clock;
 
 /**
- * Emits change data based on a collection document.
+ * Emits change data based on a change stream change.
  *
- * @author Chris Cranford
+ * @author Jiri Pechanec
  */
-public class MongoDbChangeRecordEmitter extends AbstractChangeRecordEmitter<MongoDbCollectionSchema> {
+public class MongoDbChangeRecordEmitter extends AbstractChangeRecordEmitter<MongoDbPartition, MongoDbCollectionSchema> {
 
-    private final Document oplogEvent;
+    private final ChangeStreamDocument<BsonDocument> changeStreamEvent;
 
-    /**
-     * Whether this event originates from a snapshot.
-     */
-    private final boolean isSnapshot;
-
-    @ThreadSafe
-    private static final Map<String, Operation> OPERATION_LITERALS;
+    @Immutable
+    private static final Map<OperationType, Operation> OPERATION_LITERALS;
 
     static {
-        Map<String, Operation> literals = new HashMap<>();
+        Map<OperationType, Operation> literals = new HashMap<>();
 
-        literals.put("i", Operation.CREATE);
-        literals.put("u", Operation.UPDATE);
-        literals.put("d", Operation.DELETE);
+        literals.put(OperationType.INSERT, Operation.CREATE);
+        literals.put(OperationType.UPDATE, Operation.UPDATE);
+        literals.put(OperationType.REPLACE, Operation.UPDATE);
+        literals.put(OperationType.DELETE, Operation.DELETE);
 
         OPERATION_LITERALS = Collections.unmodifiableMap(literals);
     }
 
-    public MongoDbChangeRecordEmitter(OffsetContext offsetContext, Clock clock, Document oplogEvent, boolean isSnapshot) {
-        super(offsetContext, clock);
-        this.oplogEvent = oplogEvent;
-        this.isSnapshot = isSnapshot;
+    public MongoDbChangeRecordEmitter(MongoDbPartition partition, OffsetContext offsetContext, Clock clock,
+                                      ChangeStreamDocument<BsonDocument> changeStreamEvent) {
+        super(partition, offsetContext, clock);
+        this.changeStreamEvent = changeStreamEvent;
     }
 
     @Override
-    protected Operation getOperation() {
-        if (isSnapshot || oplogEvent.getString("op") == null) {
-            return Operation.READ;
-        }
-        return OPERATION_LITERALS.get(oplogEvent.getString("op"));
+    public Operation getOperation() {
+        return OPERATION_LITERALS.get(changeStreamEvent.getOperationType());
     }
 
     @Override
-    protected void emitReadRecord(Receiver receiver, MongoDbCollectionSchema schema) throws InterruptedException {
-        final Object newKey = schema.keyFromDocument(oplogEvent);
+    protected void emitReadRecord(Receiver<MongoDbPartition> receiver, MongoDbCollectionSchema schema) throws InterruptedException {
+        // TODO Handled in MongoDbChangeSnapshotOplogRecordEmitter
+        // It might be worthy haveing three classes - one for Snapshot, one for oplog and one for change streams
+    }
+
+    @Override
+    protected void emitCreateRecord(Receiver<MongoDbPartition> receiver, MongoDbCollectionSchema schema) throws InterruptedException {
+        createAndEmitChangeRecord(receiver, schema);
+    }
+
+    @Override
+    protected void emitUpdateRecord(Receiver<MongoDbPartition> receiver, MongoDbCollectionSchema schema) throws InterruptedException {
+        createAndEmitChangeRecord(receiver, schema);
+    }
+
+    @Override
+    protected void emitDeleteRecord(Receiver<MongoDbPartition> receiver, MongoDbCollectionSchema schema) throws InterruptedException {
+        createAndEmitChangeRecord(receiver, schema);
+    }
+
+    private void createAndEmitChangeRecord(Receiver<MongoDbPartition> receiver, MongoDbCollectionSchema schema) throws InterruptedException {
+        final Object newKey = schema.keyFromDocument(changeStreamEvent.getDocumentKey());
         assert newKey != null;
 
-        final Struct value = schema.valueFromDocument(oplogEvent, null, getOperation());
+        final Struct value = schema.valueFromDocumentChangeStream(changeStreamEvent, getOperation());
         value.put(FieldName.SOURCE, getOffset().getSourceInfo());
         value.put(FieldName.OPERATION, getOperation().code());
         value.put(FieldName.TIMESTAMP, getClock().currentTimeAsInstant().toEpochMilli());
 
-        receiver.changeRecord(schema, getOperation(), newKey, value, getOffset(), null);
-    }
-
-    @Override
-    protected void emitCreateRecord(Receiver receiver, MongoDbCollectionSchema schema) throws InterruptedException {
-        createAndEmitChangeRecord(receiver, schema);
-    }
-
-    @Override
-    protected void emitUpdateRecord(Receiver receiver, MongoDbCollectionSchema schema) throws InterruptedException {
-        createAndEmitChangeRecord(receiver, schema);
-    }
-
-    @Override
-    protected void emitDeleteRecord(Receiver receiver, MongoDbCollectionSchema schema) throws InterruptedException {
-        createAndEmitChangeRecord(receiver, schema);
-    }
-
-    private void createAndEmitChangeRecord(Receiver receiver, MongoDbCollectionSchema schema) throws InterruptedException {
-        Document patchObject = oplogEvent.get("o", Document.class);
-        // Updates have an 'o2' field, since the updated object in 'o' might not have the ObjectID
-        Document queryObject = oplogEvent.get("o2", Document.class);
-
-        final Document filter = queryObject != null ? queryObject : patchObject;
-
-        final Object newKey = schema.keyFromDocument(filter);
-        assert newKey != null;
-
-        final Struct value = schema.valueFromDocument(patchObject, filter, getOperation());
-        value.put(FieldName.SOURCE, getOffset().getSourceInfo());
-        value.put(FieldName.OPERATION, getOperation().code());
-        value.put(FieldName.TIMESTAMP, getClock().currentTimeAsInstant().toEpochMilli());
-
-        receiver.changeRecord(schema, getOperation(), newKey, value, getOffset(), null);
+        receiver.changeRecord(getPartition(), schema, getOperation(), newKey, value, getOffset(), null);
     }
 
     public static boolean isValidOperation(String operation) {

@@ -8,7 +8,7 @@ package io.debezium.connector.sqlserver;
 
 import java.sql.SQLException;
 
-import org.fest.assertions.Assertions;
+import org.assertj.core.api.Assertions;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -40,7 +40,7 @@ public class TablesWithoutPrimaryKeyIT extends AbstractConnectorTest {
         TestHelper.createTestDatabase();
         initializeConnectorTestFramework();
 
-        Testing.Files.delete(TestHelper.DB_HISTORY_PATH);
+        Testing.Files.delete(TestHelper.SCHEMA_HISTORY_PATH);
     }
 
     @After
@@ -68,11 +68,11 @@ public class TablesWithoutPrimaryKeyIT extends AbstractConnectorTest {
         final int expectedRecordsCount = 1 + 1 + 1;
 
         final SourceRecords records = consumeRecordsByTopic(expectedRecordsCount);
-        Assertions.assertThat(records.recordsForTopic("server1.dbo.t1").get(0).keySchema().field("pk")).isNotNull();
-        Assertions.assertThat(records.recordsForTopic("server1.dbo.t1").get(0).keySchema().fields()).hasSize(1);
-        Assertions.assertThat(records.recordsForTopic("server1.dbo.t2").get(0).keySchema().field("pk")).isNotNull();
-        Assertions.assertThat(records.recordsForTopic("server1.dbo.t2").get(0).keySchema().fields()).hasSize(1);
-        Assertions.assertThat(records.recordsForTopic("server1.dbo.t3").get(0).keySchema()).isNull();
+        Assertions.assertThat(records.recordsForTopic("server1.testDB1.dbo.t1").get(0).keySchema().field("pk")).isNotNull();
+        Assertions.assertThat(records.recordsForTopic("server1.testDB1.dbo.t1").get(0).keySchema().fields()).hasSize(1);
+        Assertions.assertThat(records.recordsForTopic("server1.testDB1.dbo.t2").get(0).keySchema().field("pk")).isNotNull();
+        Assertions.assertThat(records.recordsForTopic("server1.testDB1.dbo.t2").get(0).keySchema().fields()).hasSize(1);
+        Assertions.assertThat(records.recordsForTopic("server1.testDB1.dbo.t3").get(0).keySchema()).isNull();
     }
 
     @Test
@@ -120,10 +120,10 @@ public class TablesWithoutPrimaryKeyIT extends AbstractConnectorTest {
         final int expectedRecordsCount = 1 + 1 + 1;
 
         final SourceRecords records = consumeRecordsByTopic(expectedRecordsCount, 24);
-        Assertions.assertThat(records.recordsForTopic("server1.dbo.t1").get(0).keySchema().field("pk")).isNotNull();
-        Assertions.assertThat(records.recordsForTopic("server1.dbo.t1").get(0).keySchema().fields()).hasSize(1);
-        Assertions.assertThat(records.recordsForTopic("server1.dbo.t2").get(0).keySchema().field("pk")).isNotNull();
-        Assertions.assertThat(records.recordsForTopic("server1.dbo.t2").get(0).keySchema().fields()).hasSize(1);
-        Assertions.assertThat(records.recordsForTopic("server1.dbo.t3").get(0).keySchema()).isNull();
+        Assertions.assertThat(records.recordsForTopic("server1.testDB1.dbo.t1").get(0).keySchema().field("pk")).isNotNull();
+        Assertions.assertThat(records.recordsForTopic("server1.testDB1.dbo.t1").get(0).keySchema().fields()).hasSize(1);
+        Assertions.assertThat(records.recordsForTopic("server1.testDB1.dbo.t2").get(0).keySchema().field("pk")).isNotNull();
+        Assertions.assertThat(records.recordsForTopic("server1.testDB1.dbo.t2").get(0).keySchema().fields()).hasSize(1);
+        Assertions.assertThat(records.recordsForTopic("server1.testDB1.dbo.t3").get(0).keySchema()).isNull();
     }
 }

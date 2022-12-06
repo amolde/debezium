@@ -5,7 +5,7 @@
  */
 package io.debezium.embedded;
 
-import static org.fest.assertions.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import java.io.File;
 import java.io.IOException;
@@ -26,6 +26,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.connect.connector.Task;
@@ -36,9 +38,10 @@ import org.apache.kafka.connect.runtime.standalone.StandaloneConfig;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.apache.kafka.connect.storage.OffsetBackingStore;
 import org.apache.kafka.connect.transforms.Transformation;
+import org.apache.kafka.connect.transforms.predicates.Predicate;
 import org.apache.kafka.connect.util.Callback;
 import org.apache.kafka.connect.util.SafeObjectInputStream;
-import org.fest.assertions.Assertions;
+import org.assertj.core.api.Assertions;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -57,6 +60,7 @@ import io.debezium.engine.spi.OffsetCommitPolicy;
 import io.debezium.util.Collect;
 import io.debezium.util.LoggingContext;
 import io.debezium.util.Testing;
+import io.debezium.util.Throwables;
 
 /**
  * @author Randall Hauch
@@ -81,16 +85,40 @@ public class EmbeddedEngineTest extends AbstractConnectorTest {
 
         @Override
         public SourceRecord apply(SourceRecord record) {
-            return ((String) record.value()).equals("Generated line number 1") ? null : record;
+            final String payload = (String) record.value();
+            return payload.equals("Generated line number 1") || payload.equals("Generated line number 2") ? null
+                    : record;
         }
 
         @Override
         public ConfigDef config() {
-            return null;
+            return new ConfigDef();
         }
 
         @Override
         public void close() {
+        }
+    }
+
+    public static class FilterPredicate implements Predicate<SourceRecord> {
+        @Override
+        public ConfigDef config() {
+            return new ConfigDef();
+        }
+
+        @Override
+        public boolean test(SourceRecord sourceRecord) {
+            return sourceRecord.value().equals("Generated line number 1");
+        }
+
+        @Override
+        public void close() {
+
+        }
+
+        @Override
+        public void configure(Map<String, ?> map) {
+
         }
     }
 
@@ -105,6 +133,54 @@ public class EmbeddedEngineTest extends AbstractConnectorTest {
                 .with(FileStreamSourceConnector.FILE_CONFIG, TEST_FILE_PATH)
                 .with(FileStreamSourceConnector.TOPIC_CONFIG, "topicX")
                 .build();
+    }
+
+    @Test
+    public void verifyNonAsciiContentHandledCorrectly() throws Exception {
+
+        appendLinesToSource("Ñ ñ", NUMBER_OF_LINES);
+
+        final Properties props = new Properties();
+        props.setProperty("name", "debezium-engine");
+        props.setProperty("connector.class", "org.apache.kafka.connect.file.FileStreamSourceConnector");
+        props.setProperty(StandaloneConfig.OFFSET_STORAGE_FILE_FILENAME_CONFIG, OFFSET_STORE_PATH.toAbsolutePath().toString());
+        props.setProperty("offset.flush.interval.ms", "0");
+        props.setProperty("file", TEST_FILE_PATH.toAbsolutePath().toString());
+        props.setProperty("topic", "topicX");
+
+        CountDownLatch firstLatch = new CountDownLatch(1);
+
+        // create an engine with our custom class
+        final DebeziumEngine<ChangeEvent<String, String>> engine = DebeziumEngine.create(Json.class, Json.class)
+                .using(props)
+                .notifying((records, committer) -> {
+                    assertThat(records.size()).isGreaterThanOrEqualTo(NUMBER_OF_LINES);
+                    for (ChangeEvent<String, String> record : records) {
+                        assertThat(record.value()).contains("Ñ");
+                    }
+
+                    for (ChangeEvent<String, String> r : records) {
+                        committer.markProcessed(r);
+                    }
+
+                    committer.markBatchFinished();
+                    firstLatch.countDown();
+                })
+                .using(this.getClass().getClassLoader())
+                .build();
+
+        ExecutorService exec = Executors.newFixedThreadPool(1);
+        exec.execute(() -> {
+            LoggingContext.forConnector(getClass().getSimpleName(), "", "engine");
+            engine.run();
+        });
+
+        firstLatch.await(5000, TimeUnit.MILLISECONDS);
+        assertThat(firstLatch.getCount()).isEqualTo(0);
+
+        // Stop the connector ..
+        stopConnector();
+
     }
 
     @Test
@@ -422,11 +498,14 @@ public class EmbeddedEngineTest extends AbstractConnectorTest {
         props.setProperty("offset.flush.interval.ms", "0");
         props.setProperty("file", TEST_FILE_PATH.toAbsolutePath().toString());
         props.setProperty("topic", "topicX");
+        props.setProperty("predicates", "filter");
+        props.setProperty("predicates.filter.type", FilterPredicate.class.getName());
         props.setProperty("transforms", "filter, router");
         props.setProperty("transforms.router.type", "org.apache.kafka.connect.transforms.RegexRouter");
         props.setProperty("transforms.router.regex", "(.*)");
         props.setProperty("transforms.router.replacement", "trf$1");
         props.setProperty("transforms.filter.type", "io.debezium.embedded.EmbeddedEngineTest$FilterTransform");
+        props.setProperty("transforms.filter.predicate", "filter");
 
         CountDownLatch firstLatch = new CountDownLatch(1);
         CountDownLatch allLatch = new CountDownLatch(5);
@@ -570,8 +649,21 @@ public class EmbeddedEngineTest extends AbstractConnectorTest {
         linesAdded += numberOfLines;
     }
 
+    protected void appendLinesToSource(String linePrefix, int numberOfLines) throws IOException {
+        CharSequence[] lines = new CharSequence[numberOfLines];
+        for (int i = 0; i != numberOfLines; ++i) {
+            lines[i] = generateLine(linePrefix, linesAdded + i + 1);
+        }
+        java.nio.file.Files.write(inputFile.toPath(), Collect.arrayListOf(lines), UTF8, StandardOpenOption.APPEND);
+        linesAdded += numberOfLines;
+    }
+
     protected String generateLine(int lineNumber) {
-        return "Generated line number " + lineNumber;
+        return generateLine("Generated line number ", lineNumber);
+    }
+
+    protected String generateLine(String linePrefix, int lineNumber) {
+        return linePrefix + lineNumber;
     }
 
     protected void consumeLines(int numberOfLines) throws InterruptedException {
@@ -581,6 +673,58 @@ public class EmbeddedEngineTest extends AbstractConnectorTest {
             ++nextConsumedLineNumber;
         },
                 false);
+    }
+
+    @Test
+    @FixFor("DBZ-5583")
+    public void verifyBadCommitPolicyClassName() {
+
+        Configuration config = Configuration.create()
+                .with(EmbeddedEngine.ENGINE_NAME, "testing-connector")
+                .with(EmbeddedEngine.CONNECTOR_CLASS, SimpleSourceConnector.class)
+                .with(StandaloneConfig.OFFSET_STORAGE_FILE_FILENAME_CONFIG, OFFSET_STORE_PATH)
+                .with(EmbeddedEngine.OFFSET_COMMIT_POLICY, "badclassname") // force ClassNotFoundException
+                .build();
+
+        final AtomicBoolean exceptionCaught = new AtomicBoolean(false);
+
+        engine = EmbeddedEngine.create()
+                .using(config)
+                .notifying((records, committer) -> {
+                })
+                .using(this.getClass().getClassLoader())
+                .using((success, message, error) -> {
+                    Throwable rootCause = Throwables.getRootCause(error);
+                    assertThat(rootCause).isInstanceOf(ClassNotFoundException.class);
+                    assertThat(rootCause.getMessage()).contains("badclassname");
+                    exceptionCaught.set(true);
+                })
+                .build();
+
+        engine.run();
+
+        assertThat(exceptionCaught.get()).isTrue();
+    }
+
+    @FixFor("DBZ-4720")
+    @Test
+    public void validationThrowsException() throws Exception {
+        // Add initial content to the file ...
+        appendLinesToSource(NUMBER_OF_LINES);
+
+        // Start the connector ...
+        AtomicReference<String> errorReference = new AtomicReference<>();
+        start(FileStreamSourceConnector.class, Configuration.from(new Properties()), (success, message, error) -> {
+            if (message != null) {
+                errorReference.set(message);
+            }
+        });
+
+        assertNoRecordsToConsume();
+
+        assertThat(errorReference.get()).isNotNull();
+        assertThat(errorReference.get()).contains("Connector configuration is not valid. ");
+        assertThat(this.engine.isRunning()).isFalse();
     }
 }
 

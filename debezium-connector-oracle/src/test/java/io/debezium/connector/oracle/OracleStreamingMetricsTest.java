@@ -7,7 +7,7 @@ package io.debezium.connector.oracle;
 
 import static io.debezium.config.CommonConnectorConfig.DEFAULT_MAX_BATCH_SIZE;
 import static io.debezium.config.CommonConnectorConfig.DEFAULT_MAX_QUEUE_SIZE;
-import static org.fest.assertions.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
 import java.time.Clock;
@@ -125,8 +125,6 @@ public class OracleStreamingMetricsTest {
 
         assertThat(metrics.toString().contains("logMinerQueryCount"));
 
-        assertThat(metrics.getRecordMiningHistory()).isFalse();
-
         metrics.incrementNetworkConnectionProblemsCounter();
         assertThat(metrics.getNetworkConnectionProblemsCounter()).isEqualTo(1);
 
@@ -147,15 +145,15 @@ public class OracleStreamingMetricsTest {
         lag = metrics.getLagFromSourceInMilliseconds();
         assertThat(lag).isEqualTo(2000);
         assertThat(metrics.getMaxLagFromSourceInMilliseconds()).isEqualTo(2000);
-        assertThat(metrics.getMinLagFromSourceInMilliseconds()).isEqualTo(0);
+        assertThat(metrics.getMinLagFromSourceInMilliseconds()).isEqualTo(2000);
 
         // not realistic scenario
-        dbEventTime = fixedClock.instant().plusMillis(2000);
+        dbEventTime = fixedClock.instant().plusMillis(3000);
         metrics.calculateLagMetrics(dbEventTime);
         lag = metrics.getLagFromSourceInMilliseconds();
-        assertThat(lag).isEqualTo(2000);
-        assertThat(metrics.getMaxLagFromSourceInMilliseconds()).isEqualTo(2000);
-        assertThat(metrics.getMinLagFromSourceInMilliseconds()).isEqualTo(0);
+        assertThat(lag).isEqualTo(3000);
+        assertThat(metrics.getMaxLagFromSourceInMilliseconds()).isEqualTo(3000);
+        assertThat(metrics.getMinLagFromSourceInMilliseconds()).isEqualTo(2000);
 
         metrics.reset();
 
@@ -169,14 +167,14 @@ public class OracleStreamingMetricsTest {
         lag = metrics.getLagFromSourceInMilliseconds();
         assertThat(lag).isEqualTo(3000);
         assertThat(metrics.getMaxLagFromSourceInMilliseconds()).isEqualTo(3000);
-        assertThat(metrics.getMinLagFromSourceInMilliseconds()).isEqualTo(0);
+        assertThat(metrics.getMinLagFromSourceInMilliseconds()).isEqualTo(3000);
 
         dbEventTime = Instant.parse("2021-05-16T00:29:57.00Z");
         metrics.calculateLagMetrics(dbEventTime);
         lag = metrics.getLagFromSourceInMilliseconds();
         assertThat(lag).isEqualTo(4000);
         assertThat(metrics.getMaxLagFromSourceInMilliseconds()).isEqualTo(4000);
-        assertThat(metrics.getMinLagFromSourceInMilliseconds()).isEqualTo(0);
+        assertThat(metrics.getMinLagFromSourceInMilliseconds()).isEqualTo(3000);
 
         metrics.reset();
 
@@ -190,14 +188,14 @@ public class OracleStreamingMetricsTest {
         lag = metrics.getLagFromSourceInMilliseconds();
         assertThat(lag).isEqualTo(3000);
         assertThat(metrics.getMaxLagFromSourceInMilliseconds()).isEqualTo(3000);
-        assertThat(metrics.getMinLagFromSourceInMilliseconds()).isEqualTo(0);
+        assertThat(metrics.getMinLagFromSourceInMilliseconds()).isEqualTo(3000);
 
         dbEventTime = Instant.parse("2021-05-15T12:29:57.00Z");
         metrics.calculateLagMetrics(dbEventTime);
         lag = metrics.getLagFromSourceInMilliseconds();
         assertThat(lag).isEqualTo(4000);
         assertThat(metrics.getMaxLagFromSourceInMilliseconds()).isEqualTo(4000);
-        assertThat(metrics.getMinLagFromSourceInMilliseconds()).isEqualTo(0);
+        assertThat(metrics.getMinLagFromSourceInMilliseconds()).isEqualTo(3000);
 
         metrics.reset();
 
@@ -211,14 +209,14 @@ public class OracleStreamingMetricsTest {
         lag = metrics.getLagFromSourceInMilliseconds();
         assertThat(lag).isEqualTo(3000);
         assertThat(metrics.getMaxLagFromSourceInMilliseconds()).isEqualTo(3000);
-        assertThat(metrics.getMinLagFromSourceInMilliseconds()).isEqualTo(0);
+        assertThat(metrics.getMinLagFromSourceInMilliseconds()).isEqualTo(3000);
 
         dbEventTime = Instant.parse("2021-05-15T00:29:57.00Z");
         metrics.calculateLagMetrics(dbEventTime);
         lag = metrics.getLagFromSourceInMilliseconds();
         assertThat(lag).isEqualTo(4000);
         assertThat(metrics.getMaxLagFromSourceInMilliseconds()).isEqualTo(4000);
-        assertThat(metrics.getMinLagFromSourceInMilliseconds()).isEqualTo(0);
+        assertThat(metrics.getMinLagFromSourceInMilliseconds()).isEqualTo(3000);
 
         metrics.reset();
 
@@ -232,7 +230,7 @@ public class OracleStreamingMetricsTest {
         lag = metrics.getLagFromSourceInMilliseconds();
         assertThat(lag).isEqualTo(1000);
         assertThat(metrics.getMaxLagFromSourceInMilliseconds()).isEqualTo(1000);
-        assertThat(metrics.getMinLagFromSourceInMilliseconds()).isEqualTo(0);
+        assertThat(metrics.getMinLagFromSourceInMilliseconds()).isEqualTo(1000);
 
         // ##########################
         // the database time is behind 1s and has an offset of +0h (UTC)
@@ -244,7 +242,7 @@ public class OracleStreamingMetricsTest {
         lag = metrics.getLagFromSourceInMilliseconds();
         assertThat(lag).isEqualTo(1000);
         assertThat(metrics.getMaxLagFromSourceInMilliseconds()).isEqualTo(1000);
-        assertThat(metrics.getMinLagFromSourceInMilliseconds()).isEqualTo(0);
+        assertThat(metrics.getMinLagFromSourceInMilliseconds()).isEqualTo(1000);
 
         // ##########################
         // the database time is behind 1s and has an offset of -12h
@@ -256,7 +254,7 @@ public class OracleStreamingMetricsTest {
         lag = metrics.getLagFromSourceInMilliseconds();
         assertThat(lag).isEqualTo(1000);
         assertThat(metrics.getMaxLagFromSourceInMilliseconds()).isEqualTo(1000);
-        assertThat(metrics.getMinLagFromSourceInMilliseconds()).isEqualTo(0);
+        assertThat(metrics.getMinLagFromSourceInMilliseconds()).isEqualTo(1000);
     }
 
     @Test
@@ -278,6 +276,9 @@ public class OracleStreamingMetricsTest {
         assertThat(metrics.getRegisteredDmlCount()).isEqualTo(1000);
         assertThat(metrics.getNumberOfCommittedTransactions()).isEqualTo(1000);
         assertThat(metrics.getCommitThroughput()).isGreaterThanOrEqualTo(1_000);
+
+        metrics.incrementOversizedTransactions();
+        assertThat(metrics.getNumberOfOversizedTransactions()).isEqualTo(1);
 
         metrics.incrementRolledBackTransactions();
         assertThat(metrics.getNumberOfRolledBackTransactions()).isEqualTo(1);
@@ -316,6 +317,48 @@ public class OracleStreamingMetricsTest {
     public void testCustomTransactionRetention() throws Exception {
         init(TestHelper.defaultConfig().with(OracleConnectorConfig.LOG_MINING_TRANSACTION_RETENTION, 3));
         assertThat(metrics.getHoursToKeepTransactionInBuffer()).isEqualTo(3);
+    }
+
+    @Test
+    @FixFor("DBZ-5179")
+    public void testRollbackTransactionIdSetSizeLimit() throws Exception {
+        init(TestHelper.defaultConfig().with(OracleConnectorConfig.LOG_MINING_TRANSACTION_RETENTION, 3));
+
+        // Check state up to maximum size
+        for (int i = 1; i <= 10; ++i) {
+            metrics.addRolledBackTransactionId(String.valueOf(i));
+        }
+        assertThat(metrics.getRolledBackTransactionIds()).containsOnly("1", "2", "3", "4", "5", "6", "7", "8", "9", "10");
+
+        // Add another rollback transaction, does not exist in set
+        metrics.addRolledBackTransactionId("11");
+        assertThat(metrics.getRolledBackTransactionIds()).containsOnly("2", "3", "4", "5", "6", "7", "8", "9", "10", "11");
+
+        // Add another rollback transaction, this time the same as before
+        // Set should be unchanged.
+        metrics.addRolledBackTransactionId("11");
+        assertThat(metrics.getRolledBackTransactionIds()).containsOnly("2", "3", "4", "5", "6", "7", "8", "9", "10", "11");
+    }
+
+    @Test
+    @FixFor("DBZ-5179")
+    public void testAbandonedTransactionIdSetSizeLimit() throws Exception {
+        init(TestHelper.defaultConfig().with(OracleConnectorConfig.LOG_MINING_TRANSACTION_RETENTION, 3));
+
+        // Check state up to maximum size
+        for (int i = 1; i <= 10; ++i) {
+            metrics.addAbandonedTransactionId(String.valueOf(i));
+        }
+        assertThat(metrics.getAbandonedTransactionIds()).containsOnly("1", "2", "3", "4", "5", "6", "7", "8", "9", "10");
+
+        // Add another abandoned transaction, does not exist in set
+        metrics.addAbandonedTransactionId("11");
+        assertThat(metrics.getAbandonedTransactionIds()).containsOnly("2", "3", "4", "5", "6", "7", "8", "9", "10", "11");
+
+        // Add another abandoned transaction, this time the same as before
+        // Set should be unchanged.
+        metrics.addAbandonedTransactionId("11");
+        assertThat(metrics.getAbandonedTransactionIds()).containsOnly("2", "3", "4", "5", "6", "7", "8", "9", "10", "11");
     }
 
     private void init(Configuration.Builder builder) {

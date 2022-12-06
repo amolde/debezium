@@ -6,28 +6,25 @@
 package io.debezium.connector.sqlserver;
 
 import java.time.Instant;
-import java.util.Collections;
 import java.util.Map;
 
 import org.apache.kafka.connect.data.Schema;
-import org.apache.kafka.connect.data.Struct;
 
 import io.debezium.connector.SnapshotRecord;
+import io.debezium.pipeline.CommonOffsetContext;
 import io.debezium.pipeline.source.snapshot.incremental.IncrementalSnapshotContext;
+import io.debezium.pipeline.source.snapshot.incremental.SignalBasedIncrementalSnapshotContext;
 import io.debezium.pipeline.spi.OffsetContext;
 import io.debezium.pipeline.txmetadata.TransactionContext;
 import io.debezium.relational.TableId;
-import io.debezium.schema.DataCollectionId;
+import io.debezium.spi.schema.DataCollectionId;
 import io.debezium.util.Collect;
 
-public class SqlServerOffsetContext implements OffsetContext {
+public class SqlServerOffsetContext extends CommonOffsetContext<SourceInfo> {
 
-    private static final String SERVER_PARTITION_KEY = "server";
     private static final String SNAPSHOT_COMPLETED_KEY = "snapshot_completed";
 
     private final Schema sourceInfoSchema;
-    private final SourceInfo sourceInfo;
-    private final Map<String, String> partition;
     private boolean snapshotCompleted;
     private final TransactionContext transactionContext;
     private final IncrementalSnapshotContext<TableId> incrementalSnapshotContext;
@@ -40,8 +37,7 @@ public class SqlServerOffsetContext implements OffsetContext {
     public SqlServerOffsetContext(SqlServerConnectorConfig connectorConfig, TxLogPosition position, boolean snapshot,
                                   boolean snapshotCompleted, long eventSerialNo, TransactionContext transactionContext,
                                   IncrementalSnapshotContext<TableId> incrementalSnapshotContext) {
-        partition = Collections.singletonMap(SERVER_PARTITION_KEY, connectorConfig.getLogicalName());
-        sourceInfo = new SourceInfo(connectorConfig);
+        super(new SourceInfo(connectorConfig));
 
         sourceInfo.setCommitLsn(position.getCommitLsn());
         sourceInfo.setChangeLsn(position.getInTxLsn());
@@ -60,12 +56,7 @@ public class SqlServerOffsetContext implements OffsetContext {
     }
 
     public SqlServerOffsetContext(SqlServerConnectorConfig connectorConfig, TxLogPosition position, boolean snapshot, boolean snapshotCompleted) {
-        this(connectorConfig, position, snapshot, snapshotCompleted, 1, new TransactionContext(), new IncrementalSnapshotContext<>());
-    }
-
-    @Override
-    public Map<String, ?> getPartition() {
-        return partition;
+        this(connectorConfig, position, snapshot, snapshotCompleted, 1, new TransactionContext(), new SignalBasedIncrementalSnapshotContext<>());
     }
 
     @Override
@@ -88,11 +79,6 @@ public class SqlServerOffsetContext implements OffsetContext {
     @Override
     public Schema getSourceInfoSchema() {
         return sourceInfoSchema;
-    }
-
-    @Override
-    public Struct getSourceInfo() {
-        return sourceInfo.struct();
     }
 
     public TxLogPosition getChangePosition() {
@@ -135,22 +121,12 @@ public class SqlServerOffsetContext implements OffsetContext {
         snapshotCompleted = true;
     }
 
-    @Override
-    public void postSnapshotCompletion() {
-        sourceInfo.setSnapshot(SnapshotRecord.FALSE);
-    }
-
     public static class Loader implements OffsetContext.Loader<SqlServerOffsetContext> {
 
         private final SqlServerConnectorConfig connectorConfig;
 
         public Loader(SqlServerConnectorConfig connectorConfig) {
             this.connectorConfig = connectorConfig;
-        }
-
-        @Override
-        public Map<String, ?> getPartition() {
-            return Collections.singletonMap(SERVER_PARTITION_KEY, connectorConfig.getLogicalName());
         }
 
         @Override
@@ -167,7 +143,7 @@ public class SqlServerOffsetContext implements OffsetContext {
             }
 
             return new SqlServerOffsetContext(connectorConfig, TxLogPosition.valueOf(commitLsn, changeLsn), snapshot, snapshotCompleted, eventSerialNo,
-                    TransactionContext.load(offset), IncrementalSnapshotContext.load(offset, TableId.class));
+                    TransactionContext.load(offset), SignalBasedIncrementalSnapshotContext.load(offset));
         }
     }
 
@@ -176,15 +152,9 @@ public class SqlServerOffsetContext implements OffsetContext {
         return "SqlServerOffsetContext [" +
                 "sourceInfoSchema=" + sourceInfoSchema +
                 ", sourceInfo=" + sourceInfo +
-                ", partition=" + partition +
                 ", snapshotCompleted=" + snapshotCompleted +
                 ", eventSerialNo=" + eventSerialNo +
                 "]";
-    }
-
-    @Override
-    public void markLastSnapshotRecord() {
-        sourceInfo.setSnapshot(SnapshotRecord.LAST);
     }
 
     @Override
@@ -196,11 +166,6 @@ public class SqlServerOffsetContext implements OffsetContext {
     @Override
     public TransactionContext getTransactionContext() {
         return transactionContext;
-    }
-
-    @Override
-    public void incrementalSnapshotEvents() {
-        sourceInfo.setSnapshot(SnapshotRecord.INCREMENTAL);
     }
 
     @Override

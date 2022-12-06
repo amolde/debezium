@@ -5,9 +5,10 @@
  */
 package io.debezium.connector.oracle;
 
-import static org.fest.assertions.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.sql.Clob;
 import java.sql.NClob;
 import java.sql.SQLException;
@@ -100,6 +101,7 @@ public abstract class AbstractOracleDatatypesTest extends AbstractConnectorTest 
             "  val_number_4_negative_scale number(2, -2), " +
             "  val_number_9_negative_scale number(8, -1), " +
             "  val_number_18_negative_scale number(16, -2), " +
+            "  val_number_36_negative_scale number(36, -2), " +
             "  val_decimal decimal(10), " +
             "  val_numeric numeric(10), " +
             "  val_number_1 number(1), " +
@@ -128,6 +130,12 @@ public abstract class AbstractOracleDatatypesTest extends AbstractConnectorTest 
             "  val_nclob_short nclob, " +
             "  val_clob_long clob, " +
             "  val_nclob_long nclob, " +
+            "  primary key (id)" +
+            ")";
+
+    private static final String DDL_GEOMETRY = "create table debezium.type_geometry (" +
+            "  id numeric(9,0) not null, " +
+            "  location sdo_geometry, " +
             "  primary key (id)" +
             ")";
 
@@ -193,6 +201,10 @@ public abstract class AbstractOracleDatatypesTest extends AbstractConnectorTest 
             new SchemaAndValueField("VAL_NUMBER_4_NEGATIVE_SCALE", Schema.OPTIONAL_INT16_SCHEMA, (short) 9900),
             new SchemaAndValueField("VAL_NUMBER_9_NEGATIVE_SCALE", Schema.OPTIONAL_INT32_SCHEMA, 9999_99990),
             new SchemaAndValueField("VAL_NUMBER_18_NEGATIVE_SCALE", Schema.OPTIONAL_INT64_SCHEMA, 999_99999_99999_99900L),
+            new SchemaAndValueField("VAL_NUMBER_36_NEGATIVE_SCALE", Decimal.builder(-2).optional()
+                    .parameter(PRECISION_PARAMETER_KEY, "36").build(),
+                    new BigDecimal(
+                            new BigInteger("999999999999999999999999999999999999"), -2)),
             new SchemaAndValueField("VAL_DECIMAL", Schema.OPTIONAL_INT64_SCHEMA, 99999_99999L),
             new SchemaAndValueField("VAL_NUMERIC", Schema.OPTIONAL_INT64_SCHEMA, 99999_99999L),
             new SchemaAndValueField("VAL_NUMBER_1", Schema.OPTIONAL_INT8_SCHEMA, (byte) 1));
@@ -251,12 +263,15 @@ public abstract class AbstractOracleDatatypesTest extends AbstractConnectorTest 
             new SchemaAndValueField("VAL_CLOB_LONG", Schema.OPTIONAL_STRING_SCHEMA, part(CLOB_JSON, 1, 5000)),
             new SchemaAndValueField("VAL_NCLOB_LONG", Schema.OPTIONAL_STRING_SCHEMA, part(NCLOB_JSON, 1, 5000)));
 
+    private static final List<SchemaAndValueField> EXPECTED_GEOMETRY = Arrays.asList();
+
     private static final String[] ALL_TABLES = {
             "debezium.type_string",
             "debezium.type_fp",
             "debezium.type_int",
             "debezium.type_time",
-            "debezium.type_clob"
+            "debezium.type_clob",
+            "debezium.type_geometry"
     };
 
     private static final String[] ALL_DDLS = {
@@ -264,7 +279,8 @@ public abstract class AbstractOracleDatatypesTest extends AbstractConnectorTest 
             DDL_FP,
             DDL_INT,
             DDL_TIME,
-            DDL_CLOB
+            DDL_CLOB,
+            DDL_GEOMETRY
     };
 
     @Rule
@@ -638,6 +654,40 @@ public abstract class AbstractOracleDatatypesTest extends AbstractConnectorTest 
         }
     }
 
+    @Test
+    @FixFor("DBZ-4206")
+    public void geometryTypes() throws Exception {
+        int expectedRecordCount = 0;
+
+        if (insertRecordsDuringTest()) {
+            insertGeometryTypes();
+        }
+
+        Testing.debug("Inserted");
+        expectedRecordCount++;
+
+        SourceRecords records = consumeRecordsByTopic(expectedRecordCount);
+
+        List<SourceRecord> testTableRecords = records.recordsForTopic("server1.DEBEZIUM.TYPE_GEOMETRY");
+        assertThat(testTableRecords).hasSize(expectedRecordCount);
+        SourceRecord record = testTableRecords.get(0);
+
+        VerifyRecord.isValid(record);
+
+        // insert
+        if (insertRecordsDuringTest()) {
+            VerifyRecord.isValidInsert(record, "ID", 1);
+        }
+        else {
+            VerifyRecord.isValidRead(record, "ID", 1);
+        }
+
+        Struct after = (Struct) ((Struct) record.value()).get("after");
+        // Verify that the SDO_GEOMETRY field is not being emitted as its current unsupported
+        assertThat(after.schema().field("LOCATION")).isNull();
+        assertRecord(after, EXPECTED_GEOMETRY);
+    }
+
     protected static void insertStringTypes() throws SQLException {
         connection.execute("INSERT INTO debezium.type_string VALUES (1, 'v\u010d2', 'v\u010d2', 'nv\u010d2', 'c', 'n\u010d')");
         connection.execute("COMMIT");
@@ -650,7 +700,7 @@ public abstract class AbstractOracleDatatypesTest extends AbstractConnectorTest 
 
     protected static void insertIntTypes() throws SQLException {
         connection.execute(
-                "INSERT INTO debezium.type_int VALUES (1, 1, 22, 333, 4444, 5555, 99, 9999, 999999999, 999999999999999999, 94, 9949, 999999994, 999999999999999949, 9999999999, 9999999999, 1)");
+                "INSERT INTO debezium.type_int VALUES (1, 1, 22, 333, 4444, 5555, 99, 9999, 999999999, 999999999999999999, 94, 9949, 999999994, 999999999999999949, 99999999999999999999999999999999999949, 9999999999, 9999999999, 1)");
         connection.execute("COMMIT");
     }
 
@@ -717,6 +767,13 @@ public abstract class AbstractOracleDatatypesTest extends AbstractConnectorTest 
                     ps.setNClob(6, nclob2);
                 }, null);
         connection.commit();
+    }
+
+    protected static void insertGeometryTypes() throws SQLException {
+        connection.execute("INSERT INTO debezium.type_geometry VALUES ("
+                + "1"
+                + ", SDO_GEOMETRY(2003, NULL, NULL, SDO_ELEM_INFO_ARRAY(1, 1003, 3), SDO_ORDINATE_ARRAY(1, 1, 5, 7))"
+                + ")");
     }
 
     private static String part(String text, int start, int length) {

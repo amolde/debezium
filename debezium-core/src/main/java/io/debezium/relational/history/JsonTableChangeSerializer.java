@@ -6,6 +6,7 @@
 package io.debezium.relational.history;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
 
@@ -13,6 +14,7 @@ import io.debezium.document.Array;
 import io.debezium.document.Array.Entry;
 import io.debezium.document.Document;
 import io.debezium.document.Value;
+import io.debezium.relational.Attribute;
 import io.debezium.relational.Column;
 import io.debezium.relational.ColumnEditor;
 import io.debezium.relational.Table;
@@ -44,7 +46,12 @@ public class JsonTableChangeSerializer implements TableChanges.TableChangesSeria
 
         document.setString("type", tableChange.getType().name());
         document.setString("id", tableChange.getId().toDoubleQuotedString());
+        if (tableChange.getPreviousId() != null) {
+            document.setString("previousId", tableChange.getPreviousId().toDoubleQuotedString());
+        }
         document.setDocument("table", toDocument(tableChange.getTable()));
+        document.setString("comment", tableChange.getTable().comment());
+
         return document;
     }
 
@@ -60,6 +67,13 @@ public class JsonTableChangeSerializer implements TableChanges.TableChangesSeria
                 .collect(Collectors.toList());
 
         document.setArray("columns", Array.create(columns));
+
+        List<Document> attributes = table.attributes()
+                .stream()
+                .map(this::toDocument)
+                .collect(Collectors.toList());
+
+        document.setArray("attributes", Array.create(attributes));
 
         return document;
     }
@@ -88,7 +102,22 @@ public class JsonTableChangeSerializer implements TableChanges.TableChangesSeria
         document.setBoolean("optional", column.isOptional());
         document.setBoolean("autoIncremented", column.isAutoIncremented());
         document.setBoolean("generated", column.isGenerated());
+        document.setString("comment", column.comment());
+        document.setBoolean("hasDefaultValue", column.hasDefaultValue());
 
+        column.defaultValueExpression().ifPresent(d -> document.setString("defaultValueExpression", d));
+
+        Optional.ofNullable(column.enumValues())
+                .map(List::toArray)
+                .ifPresent(enums -> document.setArray("enumValues", enums));
+
+        return document;
+    }
+
+    private Document toDocument(Attribute attribute) {
+        final Document document = Document.create();
+        document.setString("name", attribute.name());
+        document.setString("value", attribute.value());
         return document;
     }
 
@@ -103,7 +132,7 @@ public class JsonTableChangeSerializer implements TableChanges.TableChangesSeria
                 tableChanges.create(change.getTable());
             }
             else if (change.getType() == TableChangeType.ALTER) {
-                tableChanges.alter(change.getTable());
+                tableChanges.alter(change);
             }
             else if (change.getType() == TableChangeType.DROP) {
                 tableChanges.drop(change.getTable());
@@ -117,6 +146,9 @@ public class JsonTableChangeSerializer implements TableChanges.TableChangesSeria
         TableEditor editor = Table.editor()
                 .tableId(id)
                 .setDefaultCharsetName(document.getString("defaultCharsetName"));
+        if (document.getString("comment") != null) {
+            editor.setComment(document.getString("comment"));
+        }
 
         document.getArray("columns")
                 .streamValues()
@@ -144,6 +176,28 @@ public class JsonTableChangeSerializer implements TableChanges.TableChangesSeria
                         columnEditor.scale(scale);
                     }
 
+                    String columnComment = v.getString("comment");
+                    if (columnComment != null) {
+                        columnEditor.comment(columnComment);
+                    }
+
+                    Boolean hasDefaultValue = v.getBoolean("hasDefaultValue");
+                    String defaultValueExpression = v.getString("defaultValueExpression");
+                    if (defaultValueExpression != null) {
+                        columnEditor.defaultValueExpression(defaultValueExpression);
+                    }
+                    else if (Boolean.TRUE.equals(hasDefaultValue)) {
+                        columnEditor.defaultValueExpression(null);
+                    }
+
+                    Array enumValues = v.getArray("enumValues");
+                    if (enumValues != null && !enumValues.isEmpty()) {
+                        List<String> enumValueList = enumValues.streamValues()
+                                .map(Value::asString)
+                                .collect(Collectors.toList());
+                        columnEditor.enumValues(enumValueList);
+                    }
+
                     columnEditor.position(v.getInteger("position"))
                             .optional(v.getBoolean("optional"))
                             .autoIncremented(v.getBoolean("autoIncremented"))
@@ -152,6 +206,12 @@ public class JsonTableChangeSerializer implements TableChanges.TableChangesSeria
                     return columnEditor.create();
                 })
                 .forEach(editor::addColumn);
+
+        document.getOrCreateArray("attributes")
+                .streamValues()
+                .map(Value::asDocument)
+                .map(v -> Attribute.editor().name(v.getString("name")).value(v.getString("value")).create())
+                .forEach(editor::addAttribute);
 
         editor.setPrimaryKeyNames(document.getArray("primaryKeyColumnNames")
                 .streamValues()
@@ -164,6 +224,10 @@ public class JsonTableChangeSerializer implements TableChanges.TableChangesSeria
     public static TableChange fromDocument(Document document, boolean useCatalogBeforeSchema) {
         TableChangeType type = TableChangeType.valueOf(document.getString("type"));
         TableId id = TableId.parse(document.getString("id"), useCatalogBeforeSchema);
+        TableId previousId = null;
+        if (document.has("previousId")) {
+            previousId = TableId.parse(document.getString("previousId"), useCatalogBeforeSchema);
+        }
         Table table = null;
 
         if (type == TableChangeType.CREATE || type == TableChangeType.ALTER) {
@@ -172,6 +236,6 @@ public class JsonTableChangeSerializer implements TableChanges.TableChangesSeria
         else {
             table = Table.editor().tableId(id).create();
         }
-        return new TableChange(type, table);
+        return new TableChange(type, table, previousId);
     }
 }

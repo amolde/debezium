@@ -5,8 +5,12 @@
  */
 package io.debezium.connector.mongodb;
 
+import java.util.Collections;
+import java.util.List;
+
 import io.debezium.annotation.Immutable;
-import io.debezium.schema.DataCollectionId;
+import io.debezium.spi.schema.DataCollectionId;
+import io.debezium.util.Collect;
 
 /**
  * A simple identifier for collections in a replica set.
@@ -15,6 +19,26 @@ import io.debezium.schema.DataCollectionId;
  */
 @Immutable
 public final class CollectionId implements DataCollectionId {
+
+    /**
+     * Parse the supplied {@code <replicaset_name>.<database_name>.<collection_name>} string.
+     * The {@code collection_name} can also contain dots in its value.
+     *
+     * @param str the string representation of the collection identifier; may not be null
+     * @return the collection ID, or null if it could not be parsed
+     */
+    public static CollectionId parse(String str) {
+        final int rsDotPosition = str.indexOf('.');
+        if (rsDotPosition == -1 || (rsDotPosition + 1) == str.length() || rsDotPosition == 0) {
+            return null;
+        }
+        final int dbDotPosition = str.indexOf('.', rsDotPosition + 1);
+        if (dbDotPosition == -1 || (dbDotPosition + 1) == str.length() || dbDotPosition == rsDotPosition + 1) {
+            return null;
+        }
+        return new CollectionId(str.substring(0, rsDotPosition), str.substring(rsDotPosition + 1, dbDotPosition),
+                str.substring(dbDotPosition + 1));
+    }
 
     /**
      * Parse the supplied {@code <database_name>.<collection_name>} string.
@@ -82,6 +106,21 @@ public final class CollectionId implements DataCollectionId {
     @Override
     public String identifier() {
         return replicaSetName + "." + dbName + "." + name;
+    }
+
+    @Override
+    public List<String> parts() {
+        return Collect.arrayListOf(replicaSetName, dbName, name);
+    }
+
+    @Override
+    public List<String> databaseParts() {
+        return Collect.arrayListOf(dbName, name);
+    }
+
+    @Override
+    public List<String> schemaParts() {
+        return Collections.emptyList();
     }
 
     @Override

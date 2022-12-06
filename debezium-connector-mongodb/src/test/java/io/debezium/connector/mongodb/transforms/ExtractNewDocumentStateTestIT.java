@@ -5,21 +5,19 @@
  */
 package io.debezium.connector.mongodb.transforms;
 
-import static org.fest.assertions.Assertions.assertThat;
-import static org.junit.Assert.fail;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Schema;
@@ -28,14 +26,13 @@ import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.errors.DataException;
 import org.apache.kafka.connect.header.Header;
 import org.apache.kafka.connect.source.SourceRecord;
+import org.assertj.core.api.Assertions;
 import org.bson.Document;
 import org.bson.RawBsonDocument;
 import org.bson.types.ObjectId;
-import org.fest.assertions.Assertions;
 import org.junit.Test;
 
 import io.debezium.connector.mongodb.MongoDbFieldName;
-import io.debezium.connector.mongodb.TestHelper;
 import io.debezium.data.Envelope;
 import io.debezium.data.Envelope.Operation;
 import io.debezium.data.SchemaUtil;
@@ -43,8 +40,6 @@ import io.debezium.data.VerifyRecord;
 import io.debezium.doc.FixFor;
 import io.debezium.transforms.ExtractNewRecordStateConfigDefinition;
 import io.debezium.util.Collect;
-import io.debezium.util.IoUtil;
-import io.debezium.util.Testing;
 
 /**
  * Integration test for {@link ExtractNewDocumentState}. It sends operations into
@@ -61,9 +56,7 @@ public class ExtractNewDocumentStateTestIT extends AbstractExtractNewDocumentSta
     private static final String HANDLE_DELETES = "delete.handling.mode";
     private static final String FLATTEN_STRUCT = "flatten.struct";
     private static final String DELIMITER = "flatten.struct.delimiter";
-    private static final String OPERATION_HEADER = "operation.header";
     private static final String DROP_TOMBSTONE = "drop.tombstones";
-    private static final String ADD_SOURCE_FIELDS = "add.source.fields";
     private static final String ADD_HEADERS = "add.headers";
     private static final String ADD_FIELDS = "add.fields";
     private static final String ADD_FIELDS_PREFIX = ADD_FIELDS + ".prefix";
@@ -116,7 +109,7 @@ public class ExtractNewDocumentStateTestIT extends AbstractExtractNewDocumentSta
 
         // Test insert
         primary().execute("insert", client -> {
-            long timestamp = ZonedDateTime.of(2020, 1, 28, 10, 00, 33, 0, ZoneId.of("UTC")).toEpochSecond();
+            long timestamp = ZonedDateTime.of(2020, 1, 28, 10, 0, 33, 0, ZoneId.of("UTC")).toEpochSecond();
             client.getDatabase(DB_NAME).getCollection(this.getCollectionName())
                     .insertOne(Document.parse(
                             "{"
@@ -136,16 +129,16 @@ public class ExtractNewDocumentStateTestIT extends AbstractExtractNewDocumentSta
         final SourceRecord transformedInsert = transformation.apply(insertRecord);
         final Struct transformedInsertValue = (Struct) transformedInsert.value();
 
-        assertThat(transformedInsert.valueSchema().field("id").schema()).isEqualTo(Schema.OPTIONAL_INT32_SCHEMA);
+        assertThat(transformedInsert.valueSchema().field("_id").schema()).isEqualTo(Schema.OPTIONAL_INT32_SCHEMA);
         assertThat(transformedInsert.valueSchema().field("dataStr").schema()).isEqualTo(Schema.OPTIONAL_STRING_SCHEMA);
         assertThat(transformedInsert.valueSchema().field("dataInt").schema()).isEqualTo(Schema.OPTIONAL_INT32_SCHEMA);
         assertThat(transformedInsert.valueSchema().field("dataLong").schema()).isEqualTo(Schema.OPTIONAL_INT64_SCHEMA);
-        assertThat(transformedInsertValue.get("id")).isEqualTo(1);
+        assertThat(transformedInsertValue.get("_id")).isEqualTo(1);
         assertThat(transformedInsertValue.get("dataStr")).isEqualTo("hello");
         assertThat(transformedInsertValue.get("dataInt")).isEqualTo(123);
         assertThat(transformedInsertValue.get("dataLong")).isEqualTo(80_000_000_000l);
         assertThat(transformedInsertValue.get("dataDate")).isEqualTo(Date.from(Instant.from(ZonedDateTime.of(2020, 1, 27, 10, 47, 12, 311000000, ZoneId.of("UTC")))));
-        assertThat(transformedInsertValue.get("dataTimestamp")).isEqualTo(Date.from(Instant.from(ZonedDateTime.of(2020, 1, 28, 10, 00, 33, 0, ZoneId.of("UTC")))));
+        assertThat(transformedInsertValue.get("dataTimestamp")).isEqualTo(Date.from(Instant.from(ZonedDateTime.of(2020, 1, 28, 10, 0, 33, 0, ZoneId.of("UTC")))));
 
         // Test update
         primary().execute("update", client -> {
@@ -166,9 +159,9 @@ public class ExtractNewDocumentStateTestIT extends AbstractExtractNewDocumentSta
         final SourceRecord transformedUpdate = transformation.apply(updateRecord);
         final Struct transformedUpdateValue = (Struct) transformedUpdate.value();
 
-        assertThat(transformedUpdate.valueSchema().field("id").schema()).isEqualTo(Schema.OPTIONAL_INT32_SCHEMA);
+        assertThat(transformedUpdate.valueSchema().field("_id").schema()).isEqualTo(Schema.OPTIONAL_INT32_SCHEMA);
         assertThat(transformedUpdate.valueSchema().field("dataStr").schema()).isEqualTo(Schema.OPTIONAL_STRING_SCHEMA);
-        assertThat(transformedUpdateValue.get("id")).isEqualTo(1);
+        assertThat(transformedUpdateValue.get("_id")).isEqualTo(1);
         assertThat(transformedUpdateValue.get("dataStr")).isEqualTo("bye");
 
         // Test Update Multiple Fields
@@ -184,10 +177,10 @@ public class ExtractNewDocumentStateTestIT extends AbstractExtractNewDocumentSta
         final SourceRecord transformedMultipleUpdate = transformation.apply(updateMultipleRecord);
         final Struct transformedMultipleUpdateValue = (Struct) transformedMultipleUpdate.value();
 
-        assertThat(transformedMultipleUpdate.valueSchema().field("id").schema()).isEqualTo(Schema.OPTIONAL_INT32_SCHEMA);
+        assertThat(transformedMultipleUpdate.valueSchema().field("_id").schema()).isEqualTo(Schema.OPTIONAL_INT32_SCHEMA);
         assertThat(transformedMultipleUpdate.valueSchema().field("newStr").schema()).isEqualTo(Schema.OPTIONAL_STRING_SCHEMA);
         assertThat(transformedMultipleUpdate.valueSchema().field("dataInt").schema()).isEqualTo(Schema.OPTIONAL_INT32_SCHEMA);
-        assertThat(transformedMultipleUpdateValue.get("id")).isEqualTo(1);
+        assertThat(transformedMultipleUpdateValue.get("_id")).isEqualTo(1);
         assertThat(transformedMultipleUpdateValue.get("newStr")).isEqualTo("hello");
         assertThat(transformedMultipleUpdateValue.get("dataInt")).isEqualTo(456);
 
@@ -204,10 +197,9 @@ public class ExtractNewDocumentStateTestIT extends AbstractExtractNewDocumentSta
         final SourceRecord transformedUnsetUpdate = transformation.apply(updateUnsetRecord);
         final Struct transformedUnsetUpdateValue = (Struct) transformedUnsetUpdate.value();
 
-        assertThat(transformedUnsetUpdate.valueSchema().field("id").schema()).isEqualTo(Schema.OPTIONAL_INT32_SCHEMA);
-        assertThat(transformedUnsetUpdate.valueSchema().field("newStr").schema()).isEqualTo(Schema.OPTIONAL_STRING_SCHEMA);
-        assertThat(transformedUnsetUpdateValue.get("id")).isEqualTo(1);
-        assertThat(transformedUnsetUpdateValue.get("newStr")).isEqualTo(null);
+        assertThat(transformedUnsetUpdate.valueSchema().field("_id").schema()).isEqualTo(Schema.OPTIONAL_INT32_SCHEMA);
+        assertThat(transformedUnsetUpdateValue.get("_id")).isEqualTo(1);
+        assertThat(transformedUnsetUpdateValue.schema().field("newStr")).isNull();
 
         // Test FullUpdate
         primary().execute("update", client -> {
@@ -228,9 +220,9 @@ public class ExtractNewDocumentStateTestIT extends AbstractExtractNewDocumentSta
         final SourceRecord transformedFullUpdate = transformation.apply(FullUpdateRecord);
         final Struct transformedFullUpdateValue = (Struct) transformedFullUpdate.value();
 
-        assertThat(transformedFullUpdate.valueSchema().field("id").schema()).isEqualTo(Schema.OPTIONAL_INT32_SCHEMA);
+        assertThat(transformedFullUpdate.valueSchema().field("_id").schema()).isEqualTo(Schema.OPTIONAL_INT32_SCHEMA);
         assertThat(transformedFullUpdate.valueSchema().field("dataStr").schema()).isEqualTo(Schema.OPTIONAL_STRING_SCHEMA);
-        assertThat(transformedFullUpdateValue.get("id")).isEqualTo(1);
+        assertThat(transformedFullUpdateValue.get("_id")).isEqualTo(1);
         assertThat(transformedFullUpdateValue.get("dataStr")).isEqualTo("Hi again");
 
         // Test Delete
@@ -320,11 +312,11 @@ public class ExtractNewDocumentStateTestIT extends AbstractExtractNewDocumentSta
 
     @Test
     @FixFor("DBZ-1442")
-    public void shouldAddSourceFields() throws InterruptedException {
+    public void shouldAddFields() throws InterruptedException {
         waitForStreamingRunning();
 
         final Map<String, String> props = new HashMap<>();
-        props.put(ADD_SOURCE_FIELDS, "h,ts_ms,ord , db,rs");
+        props.put(ADD_FIELDS, "ord , db,rs");
         transformation.configure(props);
 
         // insert
@@ -358,8 +350,6 @@ public class ExtractNewDocumentStateTestIT extends AbstractExtractNewDocumentSta
 
         // assert source fields' values
         final Struct value = (Struct) transformed.value();
-        assertThat(value.get("__h")).isEqualTo(source.getInt64("h"));
-        assertThat(value.get("__ts_ms")).isEqualTo(source.getInt64("ts_ms"));
         assertThat(value.get("__ord")).isEqualTo(source.getInt32("ord"));
         assertThat(value.get("__db")).isEqualTo(source.getString("db"));
         assertThat(value.get("__rs")).isEqualTo(source.getString("rs"));
@@ -369,11 +359,11 @@ public class ExtractNewDocumentStateTestIT extends AbstractExtractNewDocumentSta
 
     @Test
     @FixFor("DBZ-1442")
-    public void shouldAddSourceFieldsForRewriteDeleteEvent() throws InterruptedException {
+    public void shouldAddFieldsForRewriteDeleteEvent() throws InterruptedException {
         waitForStreamingRunning();
 
         final Map<String, String> props = new HashMap<>();
-        props.put(ADD_SOURCE_FIELDS, "h,ts_ms,ord,db,rs");
+        props.put(ADD_FIELDS, "ord,db,rs");
         props.put(HANDLE_DELETES, "rewrite");
         transformation.configure(props);
 
@@ -407,8 +397,6 @@ public class ExtractNewDocumentStateTestIT extends AbstractExtractNewDocumentSta
 
         // assert source fields' values
         final Struct value = (Struct) transformed.value();
-        assertThat(value.get("__h")).isEqualTo(source.getInt64("h"));
-        assertThat(value.get("__ts_ms")).isEqualTo(source.getInt64("ts_ms"));
         assertThat(value.get("__ord")).isEqualTo(source.getInt32("ord"));
         assertThat(value.get("__db")).isEqualTo(source.getString("db"));
         assertThat(value.get("__rs")).isEqualTo(source.getString("rs"));
@@ -421,7 +409,7 @@ public class ExtractNewDocumentStateTestIT extends AbstractExtractNewDocumentSta
         waitForStreamingRunning();
 
         final Map<String, String> props = new HashMap<>();
-        props.put(OPERATION_HEADER, "true");
+        props.put(ADD_HEADERS, "op");
         transformation.configure(props);
 
         ObjectId objId = new ObjectId();
@@ -465,12 +453,12 @@ public class ExtractNewDocumentStateTestIT extends AbstractExtractNewDocumentSta
         assertThat(value.schema().name()).isEqualTo(SERVER_NAME + "." + DB_NAME + "." + getCollectionName());
         assertThat(value.schema()).isSameAs(transformed.valueSchema());
         assertThat(value.get("name")).isEqualTo("Sally");
-        assertThat(value.get("id")).isEqualTo(objId.toString());
+        assertThat(value.get("_id")).isEqualTo(objId.toString());
         assertThat(value.get("phone")).isEqualTo(123L);
         assertThat(value.get("active")).isEqualTo(true);
         assertThat(value.get("scores")).isEqualTo(Arrays.asList(1.2, 3.4, 5.6));
 
-        assertThat(value.schema().field("id").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
+        assertThat(value.schema().field("_id").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
         assertThat(value.schema().field("name").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
         assertThat(value.schema().field("phone").schema()).isEqualTo(SchemaBuilder.OPTIONAL_INT64_SCHEMA);
         assertThat(value.schema().field("active").schema()).isEqualTo(SchemaBuilder.OPTIONAL_BOOLEAN_SCHEMA);
@@ -516,12 +504,12 @@ public class ExtractNewDocumentStateTestIT extends AbstractExtractNewDocumentSta
 
         // and then assert value and its schema
         assertThat(value.schema()).isSameAs(transformed.valueSchema());
-        assertThat(((Struct) value.get("id")).get("company")).isEqualTo(32);
-        assertThat(((Struct) value.get("id")).get("dept")).isEqualTo("home improvement");
+        assertThat(((Struct) value.get("_id")).get("company")).isEqualTo(32);
+        assertThat(((Struct) value.get("_id")).get("dept")).isEqualTo("home improvement");
         assertThat(value.get("name")).isEqualTo("Sally");
 
-        assertThat(value.schema().field("id").schema().field("company").schema()).isEqualTo(SchemaBuilder.OPTIONAL_INT32_SCHEMA);
-        assertThat(value.schema().field("id").schema().field("dept").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
+        assertThat(value.schema().field("_id").schema().field("company").schema()).isEqualTo(SchemaBuilder.OPTIONAL_INT32_SCHEMA);
+        assertThat(value.schema().field("_id").schema().field("dept").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
         assertThat(value.schema().field("name").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
         assertThat(value.schema().fields()).hasSize(2);
     }
@@ -531,7 +519,7 @@ public class ExtractNewDocumentStateTestIT extends AbstractExtractNewDocumentSta
         waitForStreamingRunning();
 
         final Map<String, String> props = new HashMap<>();
-        props.put(OPERATION_HEADER, "true");
+        props.put(ADD_HEADERS, "op");
         transformation.configure(props);
 
         ObjectId objId = new ObjectId();
@@ -584,9 +572,9 @@ public class ExtractNewDocumentStateTestIT extends AbstractExtractNewDocumentSta
         // and then assert value and its schema
         assertThat(value.schema()).isSameAs(transformed.valueSchema());
         assertThat(value.get("name")).isEqualTo("Sally");
-        assertThat(value.get("id")).isEqualTo(objId.toString());
+        assertThat(value.get("_id")).isEqualTo(objId.toString());
 
-        assertThat(value.schema().field("id").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
+        assertThat(value.schema().field("_id").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
         assertThat(value.schema().field("name").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
         assertThat(value.schema().fields()).hasSize(2);
     }
@@ -638,10 +626,8 @@ public class ExtractNewDocumentStateTestIT extends AbstractExtractNewDocumentSta
         // and then assert value and its schema
         assertThat(value.schema()).isSameAs(transformed.valueSchema());
         assertThat(value.get("name")).isEqualTo("Sally");
-        assertThat(value.get("phone")).isEqualTo(null);
-
-        assertThat(value.schema().field("phone").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
-        assertThat(value.schema().fields()).hasSize(4);
+        assertThat(value.schema().field("phone")).isNull();
+        assertThat(value.schema().fields()).hasSize(2);
     }
 
     @Test
@@ -689,10 +675,8 @@ public class ExtractNewDocumentStateTestIT extends AbstractExtractNewDocumentSta
 
         // and then assert value and its schema
         assertThat(value.schema()).isSameAs(transformed.valueSchema());
-        assertThat(value.get("phone")).isEqualTo(null);
-
-        assertThat(value.schema().field("phone").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
-        assertThat(value.schema().fields()).hasSize(3);
+        assertThat(value.schema().field("phone")).isNull();
+        assertThat(value.schema().fields()).hasSize(2);
     }
 
     @Test
@@ -754,7 +738,7 @@ public class ExtractNewDocumentStateTestIT extends AbstractExtractNewDocumentSta
         waitForStreamingRunning();
 
         final Map<String, String> props = new HashMap<>();
-        props.put(OPERATION_HEADER, "true");
+        props.put(ADD_HEADERS, "op");
         props.put(DROP_TOMBSTONE, "false");
         transformation.configure(props);
 
@@ -935,7 +919,7 @@ public class ExtractNewDocumentStateTestIT extends AbstractExtractNewDocumentSta
         waitForStreamingRunning();
 
         final Map<String, String> props = new HashMap<>();
-        props.put(OPERATION_HEADER, "true");
+        props.put(ADD_HEADERS, "op");
         props.put(HANDLE_DELETES, "none");
         transformation.configure(props);
 
@@ -1060,11 +1044,11 @@ public class ExtractNewDocumentStateTestIT extends AbstractExtractNewDocumentSta
         // and then assert value and its schema
         assertThat(value.schema()).isSameAs(transformed.valueSchema());
         assertThat(value.get("name")).isEqualTo("Sally");
-        assertThat(value.get("id")).isEqualTo(objId.toString());
+        assertThat(value.get("_id")).isEqualTo(objId.toString());
         assertThat(value.get("address")).isEqualTo(new Struct(value.schema().field("address").schema())
                 .put("street", "Morris Park Ave").put("zipcode", "10462"));
 
-        assertThat(value.schema().field("id").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
+        assertThat(value.schema().field("_id").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
         assertThat(value.schema().field("name").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
         assertThat(value.schema().field("address").schema()).isEqualTo(
                 SchemaBuilder.struct()
@@ -1115,11 +1099,11 @@ public class ExtractNewDocumentStateTestIT extends AbstractExtractNewDocumentSta
         // and then assert value and its schema
         assertThat(value.schema()).isSameAs(transformed.valueSchema());
         assertThat(value.get("name")).isEqualTo("Sally");
-        assertThat(value.get("id")).isEqualTo(objId.toString());
+        assertThat(value.get("_id")).isEqualTo(objId.toString());
         assertThat(value.get("address_street")).isEqualTo("Morris Park Ave");
         assertThat(value.get("address_zipcode")).isEqualTo("10462");
 
-        assertThat(value.schema().field("id").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
+        assertThat(value.schema().field("_id").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
         assertThat(value.schema().field("name").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
         assertThat(value.schema().field("address_street").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
         assertThat(value.schema().field("address_zipcode").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
@@ -1166,11 +1150,11 @@ public class ExtractNewDocumentStateTestIT extends AbstractExtractNewDocumentSta
         // and then assert value and its schema
         assertThat(value.schema()).isSameAs(transformed.valueSchema());
         assertThat(value.get("name")).isEqualTo("Sally");
-        assertThat(value.get("id")).isEqualTo(objId.toString());
+        assertThat(value.get("_id")).isEqualTo(objId.toString());
         assertThat(value.get("address-street")).isEqualTo("Morris Park Ave");
         assertThat(value.get("address-zipcode")).isEqualTo("10462");
 
-        assertThat(value.schema().field("id").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
+        assertThat(value.schema().field("_id").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
         assertThat(value.schema().field("name").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
         assertThat(value.schema().field("address-street").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
         assertThat(value.schema().field("address-zipcode").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
@@ -1233,16 +1217,16 @@ public class ExtractNewDocumentStateTestIT extends AbstractExtractNewDocumentSta
 
         // and then assert value and its schema
         assertThat(value.schema()).isSameAs(transformed.valueSchema());
-        assertThat(value.get("id")).isEqualTo(objId.toString());
+        assertThat(value.get("_id")).isEqualTo(objId.toString());
         assertThat(value.get("address-city")).isEqualTo("Canberra");
         assertThat(value.get("address-name")).isEqualTo("James");
         assertThat(value.get("address-city2-part")).isEqualTo(3);
 
-        assertThat(value.schema().field("id").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
+        assertThat(value.schema().field("_id").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
         assertThat(value.schema().field("address-city").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
         assertThat(value.schema().field("address-name").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
         assertThat(value.schema().field("address-city2-part").schema()).isEqualTo(SchemaBuilder.OPTIONAL_INT32_SCHEMA);
-        assertThat(value.schema().fields()).hasSize(4);
+        assertThat(value.schema().fields()).hasSize(7);
     }
 
     @Test
@@ -1504,15 +1488,24 @@ public class ExtractNewDocumentStateTestIT extends AbstractExtractNewDocumentSta
 
         // and then assert value and its schema
         assertThat(value.schema()).isSameAs(transformed.valueSchema());
-        assertThat(value.get("id")).isEqualTo(objId.toString());
+        assertThat(value.get("_id")).isEqualTo(objId.toString());
         assertThat(value.get("a")).isEqualTo(22);
-        String valueJson = TestHelper.getDocumentWithoutLanguageVersion(value.getString("__patch")).toJson();
-        assertThat(valueJson).isEqualTo("{\"$set\": {\"a\": 22}}");
 
-        assertThat(value.schema().field("id").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
+        assertThat(value.schema().field("_id").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
         assertThat(value.schema().field("a").schema()).isEqualTo(SchemaBuilder.OPTIONAL_INT32_SCHEMA);
+
+        // 4 data fields + 1 __patch
+        assertThat(value.schema().fields()).hasSize(4 + 1);
+
         assertThat(value.schema().field("__patch").schema()).isEqualTo(io.debezium.data.Json.builder().optional().build());
-        assertThat(value.schema().fields()).hasSize(3);
+        assertThat(value.get("__patch")).isNull();
+
+        assertThat(value.get("b")).isEqualTo(2);
+        assertThat(value.schema().field("b").schema()).isEqualTo(SchemaBuilder.OPTIONAL_INT32_SCHEMA);
+
+        assertThat(value.get("c")).isEqualTo(3);
+        assertThat(value.schema().field("c").schema()).isEqualTo(SchemaBuilder.OPTIONAL_INT32_SCHEMA);
+
     }
 
     @Test(expected = DataException.class)
@@ -1693,6 +1686,113 @@ public class ExtractNewDocumentStateTestIT extends AbstractExtractNewDocumentSta
         assertThat(transformedInsertValue.get("matrix")).isEqualTo(struct);
     }
 
+    @Test
+    @FixFor("DBZ-5434")
+    public void shouldSupportNestedArrays() throws InterruptedException {
+        waitForStreamingRunning();
+
+        // Test insert
+        primary().execute("insert", client -> {
+            client.getDatabase(DB_NAME).getCollection(this.getCollectionName())
+                    .insertOne(Document.parse("{\"_id\":ObjectId(\"6182b1a25711ed59dd6a1d6c\"),\"f1\":{\"f2\":[{\"f3\":{}},{\"f3\":{\"f5\":5}}]}}"));
+        });
+
+        SourceRecords records = consumeRecordsByTopic(1);
+        assertThat(records.recordsForTopic(this.topicName()).size()).isEqualTo(1);
+
+        SourceRecord insertRecord = records.recordsForTopic(this.topicName()).get(0);
+        SourceRecord transformedInsert = transformation.apply(insertRecord);
+        Struct transformedInsertValue = (Struct) transformedInsert.value();
+        Schema transformedInsertSchema = transformedInsert.valueSchema();
+        transformedInsertSchema.field("f1").schema().field("f2");
+        assertThat(transformedInsertSchema.field("f1").schema()
+                .field("f2").schema().valueSchema()
+                .field("f3").schema()
+                .field("f5").schema().type()).isEqualTo(Schema.INT32_SCHEMA.type());
+        assertThat(transformedInsertValue.getStruct("f1").getArray("f2").size()).isEqualTo(2);
+
+        // Test delete
+        primary().execute("delete", client -> {
+            client.getDatabase(DB_NAME)
+                    .getCollection(this.getCollectionName())
+                    .deleteOne(RawBsonDocument.parse("{'_id' : ObjectId('6182b1a25711ed59dd6a1d6c')}"));
+        });
+
+        records = consumeRecordsByTopic(2);
+        assertThat(records.recordsForTopic(this.topicName()).size()).isEqualTo(2);
+
+        // Test insert
+        primary().execute("insert", client -> {
+            client.getDatabase(DB_NAME).getCollection(this.getCollectionName())
+                    .insertMany(Collect.arrayListOf(
+                            "{\"_id\":ObjectId(\"6182b1a25711ed59dd6a1d6c\"),\"f1\":{\"f2\":[{\"f3\":[]},{\"f3\":[{\"f5\":5}]}]}}",
+                            "{\"_id\":ObjectId(\"6182b1a25711ed59dd6a1d6d\"),\"f1\":{\"f2\":[{\"f3\":[]},{\"f3\":[]}]}}")
+                            .stream().map(Document::parse).collect(Collectors.toList()));
+        });
+
+        records = consumeRecordsByTopic(2);
+        assertThat(records.recordsForTopic(this.topicName()).size()).isEqualTo(2);
+
+        List<SourceRecord> transformedInserts = records.allRecordsInOrder().stream().map(m -> transformation.apply(m))
+                .collect(Collectors.toList());
+        transformedInsertValue = (Struct) transformedInserts.get(0).value();
+        assertThat(transformedInsertValue.getStruct("f1").getArray("f2").size()).isEqualTo(2);
+
+        transformedInsertValue = (Struct) transformedInserts.get(1).value();
+        List<Struct> f2 = transformedInsertValue.getStruct("f1").getArray("f2");
+        assertThat(f2.size()).isEqualTo(2);
+        assertThat(f2.get(0).getArray("f3").size()).isEqualTo(0);
+    }
+
+    @Test
+    @FixFor({ "DBZ-5834" })
+    public void shouldAddUpdateDescription() throws Exception {
+        waitForStreamingRunning();
+
+        final Map<String, String> props = new HashMap<>();
+        props.put(ADD_HEADERS, "updateDescription.updatedFields");
+        props.put(ADD_HEADERS_PREFIX, "prefix.");
+        transformation.configure(props);
+
+        ObjectId objId = new ObjectId();
+        Document obj = new Document()
+                .append("_id", objId)
+                .append("name", "Sally")
+                .append("address", new Document()
+                        .append("street", "Morris Park Ave")
+                        .append("zipcode", "10462"));
+
+        // insert
+        primary().execute("insert", client -> {
+            client.getDatabase(DB_NAME).getCollection(this.getCollectionName()).insertOne(obj);
+        });
+
+        SourceRecords records = consumeRecordsByTopic(1);
+        assertThat(records.recordsForTopic(this.topicName()).size()).isEqualTo(1);
+        assertNoRecordsToConsume();
+
+        // update
+        Document updateObj = new Document()
+                .append("$set", new Document(Collect.hashMapOf(
+                        "name", "Mary",
+                        "zipcode", "11111")));
+
+        primary().execute("update", client -> {
+            client.getDatabase(DB_NAME).getCollection(this.getCollectionName())
+                    .updateOne(RawBsonDocument.parse("{ '_id' : { '$oid' : '" + objId + "'}}"), updateObj);
+        });
+
+        SourceRecords updateRecords = consumeRecordsByTopic(1);
+        assertThat(updateRecords.recordsForTopic(this.topicName()).size()).isEqualTo(1);
+
+        // do the transform
+        final SourceRecord transformed = transformation.apply(updateRecords.recordsForTopic(this.topicName()).get(0));
+
+        // verify headers
+        final String expectedUpdateFields = "{\"name\": \"Mary\", \"zipcode\": \"11111\"}";
+        assertThat(getSourceRecordHeaderByKey(transformed, "prefix.updateDescription_updatedFields")).isEqualTo(expectedUpdateFields);
+    }
+
     private SourceRecords createCreateRecordFromJson(String pathOnClasspath) throws Exception {
         final List<Document> documents = loadTestDocuments(pathOnClasspath);
         primary().execute("Load JSON", client -> {
@@ -1706,22 +1806,6 @@ public class ExtractNewDocumentStateTestIT extends AbstractExtractNewDocumentSta
         assertNoRecordsToConsume();
 
         return records;
-    }
-
-    private List<Document> loadTestDocuments(String pathOnClasspath) {
-        final List<Document> documents = new ArrayList<>();
-        try (InputStream stream = Testing.Files.readResourceAsStream(pathOnClasspath)) {
-            assertThat(stream).isNotNull();
-            IoUtil.readLines(stream, line -> {
-                Document document = Document.parse(line);
-                assertThat(document.size()).isGreaterThan(0);
-                documents.add(document);
-            });
-        }
-        catch (IOException e) {
-            fail("Unable to find or read file '" + pathOnClasspath + "': " + e.getMessage());
-        }
-        return documents;
     }
 
     private SourceRecord createCreateRecord() throws Exception {

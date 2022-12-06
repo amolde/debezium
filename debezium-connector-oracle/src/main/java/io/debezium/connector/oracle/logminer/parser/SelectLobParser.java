@@ -9,8 +9,6 @@ import java.util.function.Consumer;
 
 import io.debezium.annotation.NotThreadSafe;
 import io.debezium.connector.oracle.logminer.LogMinerHelper;
-import io.debezium.connector.oracle.logminer.valueholder.LogMinerDmlEntry;
-import io.debezium.connector.oracle.logminer.valueholder.LogMinerDmlEntryImpl;
 import io.debezium.relational.Table;
 import io.debezium.text.ParsingException;
 
@@ -76,6 +74,8 @@ public class SelectLobParser {
                                 }
                             }
                         }
+
+                        ParserUtils.setColumnUnavailableValues(columnValues, table);
                     }
                 }
             }
@@ -152,7 +152,7 @@ public class SelectLobParser {
             else if (c == '\'') {
                 // skip over double single quote
                 if (inSingleQuotes && lookAhead == '\'') {
-                    index += 1;
+                    i += 1;
                     continue;
                 }
                 if (inSingleQuotes) {

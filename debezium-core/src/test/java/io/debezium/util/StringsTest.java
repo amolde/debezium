@@ -5,7 +5,7 @@
  */
 package io.debezium.util;
 
-import static org.fest.assertions.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 
@@ -364,6 +364,41 @@ public class StringsTest {
         assertThat(Strings.getBegin("delete from ", 7).toUpperCase()).isEqualTo("DELETE ");
     }
 
+    @Test
+    public void isBlankShouldReturnTrueForNull() {
+        assertThat(Strings.isNullOrBlank(null)).isTrue();
+    }
+
+    @Test
+    public void isBlankShouldReturnTrueForEmptyString() {
+        assertThat(Strings.isNullOrBlank("")).isTrue();
+    }
+
+    @Test
+    public void isBlankShouldReturnTrueForStringWithOnlyWhitespace() {
+        assertThat(Strings.isNullOrBlank("  \t ")).isTrue();
+    }
+
+    @Test
+    public void isBlankShouldReturnFalseForStringWithNonWhitespaceCharacters() {
+        assertThat(Strings.isNullOrBlank("not blank")).isFalse();
+    }
+
+    @Test
+    public void durationToString() {
+        assertThat(Strings.duration(0)).isEqualTo("00:00:00.0");
+        assertThat(Strings.duration(1)).isEqualTo("00:00:00.001");
+        assertThat(Strings.duration(10)).isEqualTo("00:00:00.01");
+        assertThat(Strings.duration(100)).isEqualTo("00:00:00.1");
+        assertThat(Strings.duration(1_000)).isEqualTo("00:00:01.0");
+        assertThat(Strings.duration(60_000)).isEqualTo("00:01:00.0");
+        assertThat(Strings.duration(61_010)).isEqualTo("00:01:01.01");
+        assertThat(Strings.duration(3_600_000)).isEqualTo("01:00:00.0");
+        assertThat(Strings.duration(36_000_000)).isEqualTo("10:00:00.0");
+        assertThat(Strings.duration(540_000_000)).isEqualTo("150:00:00.0");
+        assertThat(Strings.duration(541_934_321)).isEqualTo("150:32:14.321");
+    }
+
     protected void assertReplacement(String before, Map<String, String> replacements, String after) {
         String result = Strings.replaceVariables(before, replacements::get);
         assertThat(result).isEqualTo(after);
@@ -382,7 +417,7 @@ public class StringsTest {
 
         assertThat(regexSet.stream()
                 .map(Pattern::pattern)
-                .collect(Collectors.toSet())).containsOnly((Object[]) matches);
+                .collect(Collectors.toSet())).containsOnly(matches);
     }
 
     protected void assertRegexList(String patterns, String... matches) {

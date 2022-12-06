@@ -1,6 +1,8 @@
 import groovy.json.*
 import java.util.stream.*
 
+import com.cloudbees.groovy.cps.NonCPS
+
 if (
     !RELEASE_VERSION ||
     !DEVELOPMENT_VERSION ||
@@ -26,17 +28,30 @@ else if (DRY_RUN instanceof String) {
 }
 echo "Dry run: ${DRY_RUN}"
 
+if (IGNORE_SNAPSHOTS == null) {
+    IGNORE_SNAPSHOTS = false
+}
+else if (IGNORE_SNAPSHOTS instanceof String) {
+    IGNORE_SNAPSHOTS = Boolean.valueOf(IGNORE_SNAPSHOTS)
+}
+echo "Ignore snapshots: ${IGNORE_SNAPSHOTS}"
+
+if (CHECK_BACKPORTS == null) {
+    CHECK_BACKPORTS = false
+}
+else if (CHECK_BACKPORTS instanceof String) {
+    CHECK_BACKPORTS = Boolean.valueOf(CHECK_BACKPORTS)
+}
+
 GIT_CREDENTIALS_ID = 'debezium-github'
-JIRA_CREDENTIALS_ID = 'debezium-jira'
-HOME_DIR = '/home/cloud-user'
+JIRA_CREDENTIALS_ID = 'debezium-jira-pat'
+HOME_DIR = '/home/centos'
 GPG_DIR = 'gpg'
 
 DEBEZIUM_DIR = 'debezium'
 IMAGES_DIR = 'images'
 UI_DIR = 'ui'
 POSTGRES_DECODER_DIR = 'postgres-decoder'
-ORACLE_ARTIFACT_DIR = "$HOME_DIR/oracle-libs/21.1.0.0.0"
-ORACLE_ARTIFACT_VERSION = '21.1.0.0'
 
 VERSION_TAG = "v$RELEASE_VERSION"
 VERSION_PARTS = RELEASE_VERSION.split('\\.')
@@ -45,7 +60,7 @@ IMAGE_TAG = VERSION_MAJOR_MINOR
 PRODUCT_RELEASE = "${VERSION_MAJOR_MINOR}.GA"
 CANDIDATE_BRANCH = "candidate-$RELEASE_VERSION"
 
-POSTGRES_TAGS = ['9.6', '9.6-alpine', '10', '10-alpine', '11', '11-alpine', '12', '12-alpine', '13', '13-alpine']
+POSTGRES_TAGS = ['9.6', '9.6-alpine', '10', '10-alpine', '11', '11-alpine', '12', '12-alpine', '13', '13-alpine', '14', '14-alpine']
 CONNECTORS_PER_VERSION = [
     '0.8' : ['mongodb', 'mysql', 'postgres', 'oracle'],
     '0.9' : ['mongodb', 'mysql', 'postgres', 'sqlserver', 'oracle'],
@@ -56,7 +71,12 @@ CONNECTORS_PER_VERSION = [
     '1.3' : ['mongodb', 'mysql', 'postgres', 'sqlserver', 'oracle', 'cassandra', 'db2'],
     '1.4' : ['mongodb', 'mysql', 'postgres', 'sqlserver', 'oracle', 'cassandra', 'db2', 'vitess'],
     '1.5' : ['mongodb', 'mysql', 'postgres', 'sqlserver', 'oracle', 'cassandra', 'db2', 'vitess'],
-    '1.6' : ['mongodb', 'mysql', 'postgres', 'sqlserver', 'oracle', 'cassandra', 'db2', 'vitess']
+    '1.6' : ['mongodb', 'mysql', 'postgres', 'sqlserver', 'oracle', 'cassandra', 'db2', 'vitess'],
+    '1.7' : ['mongodb', 'mysql', 'postgres', 'sqlserver', 'oracle', 'cassandra', 'db2', 'vitess'],
+    '1.8' : ['mongodb', 'mysql', 'postgres', 'sqlserver', 'oracle', 'cassandra', 'db2', 'vitess'],
+    '1.9' : ['mongodb', 'mysql', 'postgres', 'sqlserver', 'oracle', 'cassandra-3', 'cassandra-4', 'db2', 'vitess'],
+    '2.0' : ['mongodb', 'mysql', 'postgres', 'sqlserver', 'oracle', 'cassandra-3', 'cassandra-4', 'db2', 'vitess'],
+    '2.1' : ['mongodb', 'mysql', 'postgres', 'sqlserver', 'oracle', 'cassandra-3', 'cassandra-4', 'db2', 'vitess']
 ]
 
 CONNECTORS = CONNECTORS_PER_VERSION[VERSION_MAJOR_MINOR]
@@ -72,16 +92,15 @@ DEBEZIUM_ADDITIONAL_REPOSITORIES.split().each {
     echo "Additional repository $repository will be used"
 }
 
-IMAGES = ['connect', 'connect-base', 'examples/mysql', 'examples/mysql-gtids', 'examples/postgres', 'examples/mongodb', 'kafka', 'server', 'zookeeper']
+IMAGES = ['connect', 'connect-base', 'examples/mysql', 'examples/mysql-gtids', 'examples/postgres', 'examples/mongodb', 'kafka', 'server', 'zookeeper', 'ui']
 MAVEN_CENTRAL = 'https://repo1.maven.org/maven2'
 STAGING_REPO = 'https://s01.oss.sonatype.org/content/repositories'
 STAGING_REPO_ID = null
 ADDITIONAL_STAGING_REPO_ID = [:]
 LOCAL_MAVEN_REPO = "$HOME_DIR/.m2/repository"
 
-withCredentials([usernamePassword(credentialsId: JIRA_CREDENTIALS_ID, passwordVariable: 'PASSWORD', usernameVariable: 'USERNAME')]) {
-    JIRA_USERNAME = USERNAME
-    JIRA_PASSWORD = PASSWORD
+withCredentials([string(credentialsId: JIRA_CREDENTIALS_ID, variable: 'PAT')]) {
+    JIRA_PAT = PAT
     JIRA_BASE_URL = "https://issues.redhat.com/rest/api/2"
 }
 
@@ -153,7 +172,7 @@ def jiraGET(path, params = [:]) {
         doOutput = true
         requestMethod = 'GET'
         setRequestProperty('Content-Type', 'application/json')
-        setRequestProperty('Authorization', 'Basic ' + "$JIRA_USERNAME:$JIRA_PASSWORD".bytes.encodeBase64().toString())
+        setRequestProperty('Authorization', "Bearer $JIRA_PAT")
         new JsonSlurper().parse(new StringReader(content.text))
     }
 }
@@ -164,7 +183,7 @@ def jiraUpdate(path, payload, method = 'POST') {
         doOutput = true
         requestMethod = method
         setRequestProperty('Content-Type', 'application/json')
-        setRequestProperty('Authorization', 'Basic ' + "$JIRA_USERNAME:$JIRA_PASSWORD".bytes.encodeBase64().toString())
+        setRequestProperty('Authorization', "Bearer $JIRA_PAT")
         outputStream.withWriter { writer ->
             writer << payload
         }
@@ -202,8 +221,13 @@ def closeJiraIssues() {
 }
 
 @NonCPS
+def findVersion(jiraVersion) {
+    jiraGET('project/DBZ/versions').find { it.name == jiraVersion }
+}
+
+@NonCPS
 def closeJiraRelease() {
-    jiraUpdate(jiraGET('project/DBZ/versions').find { it.name == JIRA_VERSION }.self, JIRA_CLOSE_RELEASE, 'PUT')
+    jiraUpdate(findVersion(JIRA_VERSION).self, JIRA_CLOSE_RELEASE, 'PUT')
 }
 
 @NonCPS
@@ -222,7 +246,7 @@ def setTargetReleaseForJiraIssues() {
 def mvnRelease(repoDir, repoName, branchName, buildArgs = '') {
     def repoId = null
     dir(repoDir) {
-        sh "mvn release:clean release:prepare -DreleaseVersion=$RELEASE_VERSION -Dtag=$VERSION_TAG -DdevelopmentVersion=$DEVELOPMENT_VERSION -DpushChanges=${!DRY_RUN} -Darguments=\"-DskipTests -DskipITs -Passembly $buildArgs\" $buildArgs"
+        sh "mvn release:clean release:prepare -DreleaseVersion=$RELEASE_VERSION -Dtag=$VERSION_TAG -DdevelopmentVersion=$DEVELOPMENT_VERSION -DpushChanges=${!DRY_RUN} -DignoreSnapshots=${IGNORE_SNAPSHOTS} -Darguments=\"-DskipTests -DskipITs -Passembly $buildArgs\" $buildArgs"
         if (!DRY_RUN) {
             withCredentials([usernamePassword(credentialsId: GIT_CREDENTIALS_ID, passwordVariable: 'GIT_PASSWORD', usernameVariable: 'GIT_USERNAME')]) {
                 sh "git push \"https://\${GIT_USERNAME}:\${GIT_PASSWORD}@${repoName}\" HEAD:$branchName --follow-tags"
@@ -314,6 +338,11 @@ node('Slave') {
             ]
             )
             echo "Images tagged with $IMAGE_TAG will be used"
+
+            dir(DEBEZIUM_DIR) {
+                ORACLE_ARTIFACT_VERSION = (readFile('pom.xml') =~ /(?ms)<version.oracle.driver>(.+)<\/version.oracle.driver>/)[0][1]
+                ORACLE_ARTIFACT_DIR = "$HOME_DIR/oracle-libs/${ORACLE_ARTIFACT_VERSION}.0"
+            }
             dir(ORACLE_ARTIFACT_DIR) {
                 sh "mvn install:install-file -DgroupId=com.oracle.instantclient -DartifactId=ojdbc8 -Dversion=$ORACLE_ARTIFACT_VERSION -Dpackaging=jar -Dfile=ojdbc8.jar"
                 sh "mvn install:install-file -DgroupId=com.oracle.instantclient -DartifactId=xstreams -Dversion=$ORACLE_ARTIFACT_VERSION -Dpackaging=jar -Dfile=xstreams.jar"
@@ -331,8 +360,29 @@ node('Slave') {
             }
         }
 
+        stage('Check missing backports') {
+            if (!DRY_RUN && CHECK_BACKPORTS) {
+                if (!BACKPORT_FROM_TAG || !BACKPORT_TO_TAG) {
+                    error "Backport from/to tags must be provided to perform backport checks"
+                }
+                dir(DEBEZIUM_DIR) {
+                    def rc = sh(script: "github-support/list-missing-commits-by-issue-key.sh $JIRA_VERSION $BACKPORT_FROM_TAG $BACKPORT_TO_TAG $JIRA_PAT", returnStatus: true)
+                    if (rc != 0) {
+                        error "Error, there are some missing backport commits."
+                    }
+                }
+            }
+        }
+
         stage('Check Jira') {
             if (!DRY_RUN) {
+                if (findVersion(JIRA_VERSION) == null) {
+                    error "Requested release does not exist"
+                }
+                if (findVersion(PRODUCT_RELEASE) == null) {
+                    error "Requested product release does not exist"
+                }
+
                 unresolvedIssues = unresolvedIssuesFromJira()
                 issuesWithoutComponents = issuesWithoutComponentsFromJira()
                 if (!resolvedIssuesFromJira()) {
@@ -380,9 +430,26 @@ node('Slave') {
         stage('Prepare release') {
             dir(DEBEZIUM_DIR) {
                 sh "git checkout -b $CANDIDATE_BRANCH"
-                sh "mvn clean install -DskipTests -DskipITs -Poracle"
+                sh "mvn clean install -DskipTests -DskipITs -Poracle-all"
+                modifyFile('debezium-testing/debezium-testing-system/pom.xml') {
+                    it.replaceFirst('<version.debezium.connector>.+</version.debezium.connector>', "<version.debezium.connector>$RELEASE_VERSION</version.debezium.connector>")
+                }
+                sh "git commit -a -m '[release] Stable $RELEASE_VERSION for testing module deps'"
             }
-            STAGING_REPO_ID = mvnRelease(DEBEZIUM_DIR, DEBEZIUM_REPOSITORY, CANDIDATE_BRANCH, '-Poracle')
+            STAGING_REPO_ID = mvnRelease(DEBEZIUM_DIR, DEBEZIUM_REPOSITORY, CANDIDATE_BRANCH, '-Poracle-all')
+            dir(DEBEZIUM_DIR) {
+                modifyFile('debezium-testing/debezium-testing-system/pom.xml') {
+                    it.replaceFirst('<version.debezium.connector>.+</version.debezium.connector>', '<version.debezium.connector>\\${project.version}</version.debezium.connector>')
+                }
+                sh "git commit -a -m '[release] Development version for testing module deps'"
+                if (!DRY_RUN) {
+                    withCredentials([usernamePassword(credentialsId: GIT_CREDENTIALS_ID, passwordVariable: 'GIT_PASSWORD', usernameVariable: 'GIT_USERNAME')]) {
+                        sh """
+                           git push https://\${GIT_USERNAME}:\${GIT_PASSWORD}@${DEBEZIUM_REPOSITORY} HEAD:${CANDIDATE_BRANCH}
+                        """
+                    }
+                }
+            }
             ADDITIONAL_REPOSITORIES.each { id, repo ->
                 dir(id) {
                     sh "git checkout -b $CANDIDATE_BRANCH"
@@ -421,6 +488,7 @@ node('Slave') {
             echo "MD5 sums calculated: ${sums}"
             def serverSum = sh(script: "md5sum -b $LOCAL_MAVEN_REPO/io/debezium/debezium-server-dist/$RELEASE_VERSION/debezium-server-dist-${RELEASE_VERSION}.tar.gz | awk '{print \$1}'", returnStdout: true).trim()
             sums['SCRIPTING'] = sh(script: "md5sum -b $LOCAL_MAVEN_REPO/io/debezium/debezium-scripting/$RELEASE_VERSION/debezium-scripting-${RELEASE_VERSION}.tar.gz | awk '{print \$1}'", returnStdout: true).trim()
+            sums['KCRESTEXT'] = sh(script: "md5sum -b $LOCAL_MAVEN_REPO/io/debezium/debezium-connect-rest-extension/$RELEASE_VERSION/debezium-connect-rest-extension-${RELEASE_VERSION}.tar.gz | awk '{print \$1}'", returnStdout: true).trim()
             dir("$IMAGES_DIR/connect/$IMAGE_TAG") {
                 echo "Modifying main Dockerfile"
                 def additionalRepoList = ADDITIONAL_REPOSITORIES.collect({ id, repo -> "${id.toUpperCase()}=$STAGING_REPO/${repo.mavenRepoId}" }).join(' ')
@@ -461,21 +529,30 @@ node('Slave') {
                 }
             }
             dir("$IMAGES_DIR") {
-                modifyFile('build-all.sh') {
+                modifyFile('build-all-multiplatform.sh') {
                     it.replaceFirst('DEBEZIUM_VERSION=\"\\S+\"', "DEBEZIUM_VERSION=\"$IMAGE_TAG\"")
                 }
             }
             dir(IMAGES_DIR) {
-                sh "env SKIP_UI=true ./build-all.sh"
+                script {
+                    env.DEBEZIUM_DOCKER_REGISTRY_PRIMARY_NAME='localhost:5500/debezium'
+                    env.DEBEZIUM_DOCKER_REGISTRY_SECONDARY_NAME='localhost:5500/debeziumquay'
+                }
+                sh """
+                    docker run --privileged --rm tonistiigi/binfmt --install all
+                    ./setup-local-builder.sh
+                    docker compose -f local-registry/docker-compose.yml up -d
+                    env SKIP_UI=true ./build-all-multiplatform.sh
+                """
             }
             sh """
                 docker rm -f connect zookeeper kafka mysql || true
-                docker run -it -d --name mysql -p 53306:3306 -e MYSQL_ROOT_PASSWORD=debezium -e MYSQL_USER=mysqluser -e MYSQL_PASSWORD=mysqlpw debezium/example-mysql:$IMAGE_TAG
-                docker run -it -d --name zookeeper -p 2181:2181 -p 2888:2888 -p 3888:3888 debezium/zookeeper:$IMAGE_TAG
+                docker run -it -d --name mysql -p 53306:3306 -e MYSQL_ROOT_PASSWORD=debezium -e MYSQL_USER=mysqluser -e MYSQL_PASSWORD=mysqlpw $DEBEZIUM_DOCKER_REGISTRY_PRIMARY_NAME/example-mysql:$IMAGE_TAG
+                docker run -it -d --name zookeeper -p 2181:2181 -p 2888:2888 -p 3888:3888 $DEBEZIUM_DOCKER_REGISTRY_PRIMARY_NAME/zookeeper:$IMAGE_TAG
                 sleep 10
-                docker run -it -d --name kafka -p 9092:9092 --link zookeeper:zookeeper debezium/kafka:$IMAGE_TAG
+                docker run -it -d --name kafka -p 9092:9092 --link zookeeper:zookeeper $DEBEZIUM_DOCKER_REGISTRY_PRIMARY_NAME/kafka:$IMAGE_TAG
                 sleep 10
-                docker run -it -d --name connect -p 8083:8083 -e GROUP_ID=1 -e CONFIG_STORAGE_TOPIC=my_connect_configs -e OFFSET_STORAGE_TOPIC=my_connect_offsets --link zookeeper:zookeeper --link kafka:kafka --link mysql:mysql debezium/connect:$IMAGE_TAG
+                docker run -it -d --name connect -p 8083:8083 -e GROUP_ID=1 -e CONFIG_STORAGE_TOPIC=my_connect_configs -e OFFSET_STORAGE_TOPIC=my_connect_offsets --link zookeeper:zookeeper --link kafka:kafka --link mysql:mysql $DEBEZIUM_DOCKER_REGISTRY_PRIMARY_NAME/connect:$IMAGE_TAG
                 sleep 30
     
                 curl -i -X POST -H "Accept:application/json" -H "Content-Type:application/json" localhost:8083/connectors/ -d '
@@ -490,10 +567,10 @@ node('Slave') {
                         "database.user": "debezium",
                         "database.password": "dbz",
                         "database.server.id": "184054",
-                        "database.server.name": "dbserver1",
+                        "topic.prefix": "dbserver1",
                         "database.include.list": "inventory",
-                        "database.history.kafka.bootstrap.servers": "kafka:9092",
-                        "database.history.kafka.topic": "schema-changes.inventory"
+                        "schema.history.internal.kafka.bootstrap.servers": "kafka:9092",
+                        "schema.history.internal.kafka.topic": "schema-changes.inventory"
                     }
                 }
                 '
@@ -613,7 +690,7 @@ node('Slave') {
                 if (!DRY_RUN) {
                     withCredentials([usernamePassword(credentialsId: GIT_CREDENTIALS_ID, passwordVariable: 'GIT_PASSWORD', usernameVariable: 'GIT_USERNAME')]) {
                         sh """
-                            git commit -a -m "Updated Docker images for release $RELEASE_VERSION" && git push https://\${GIT_USERNAME}:\${GIT_PASSWORD}@${
+                            git commit -a -m "Updated container images for release $RELEASE_VERSION" && git push https://\${GIT_USERNAME}:\${GIT_PASSWORD}@${
                             IMAGES_REPOSITORY
                         } HEAD:$IMAGES_BRANCH
                             git tag $VERSION_TAG && git push https://\${GIT_USERNAME}:\${GIT_PASSWORD}@${IMAGES_REPOSITORY} $VERSION_TAG
@@ -663,6 +740,6 @@ node('Slave') {
         }
 
     } finally {
-        mail to: 'jpechane@redhat.com', subject: "${JOB_NAME} run #${BUILD_NUMBER} finished", body: "Run ${BUILD_URL} finished with result: ${currentBuild.currentResult}"
+        mail to: MAIL_TO, subject: "${JOB_NAME} run #${BUILD_NUMBER} finished", body: "Run ${BUILD_URL} finished with result: ${currentBuild.currentResult}"
     }
 }

@@ -5,10 +5,8 @@
  */
 package io.debezium.connector.oracle.logminer;
 
-import static org.fest.assertions.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
 
-import java.io.IOException;
-import java.sql.SQLRecoverableException;
 import java.time.Duration;
 
 import org.junit.Rule;
@@ -30,8 +28,6 @@ public class SqlUtilsTest {
 
     @Test
     public void testStatements() {
-        SqlUtils.setRac(false);
-
         String result = SqlUtils.addLogFileStatement("ADD", "FILENAME");
         String expected = "BEGIN sys.dbms_logmnr.add_logfile(LOGFILENAME => 'FILENAME', OPTIONS => ADD);END;";
         assertThat(expected.equals(result)).isTrue();
@@ -52,10 +48,6 @@ public class SqlUtilsTest {
         result = SqlUtils.startLogMinerStatement(Scn.valueOf(10L), Scn.valueOf(20L), OracleConnectorConfig.LogMiningStrategy.CATALOG_IN_REDO, false);
         expected = "BEGIN sys.dbms_logmnr.start_logmnr(startScn => '10', endScn => '20', " +
                 "OPTIONS => DBMS_LOGMNR.DICT_FROM_REDO_LOGS + DBMS_LOGMNR.DDL_DICT_TRACKING  + DBMS_LOGMNR.NO_ROWID_IN_STMT);END;";
-        assertThat(result).isEqualTo(expected);
-
-        result = SqlUtils.truncateTableStatement("table_name");
-        expected = "TRUNCATE TABLE table_name";
         assertThat(result).isEqualTo(expected);
 
         result = SqlUtils.diffInDaysQuery(Scn.valueOf(123L));
@@ -83,15 +75,11 @@ public class SqlUtilsTest {
         assertThat(result).isEqualTo(expected);
 
         result = SqlUtils.currentRedoLogSequenceQuery();
-        expected = "SELECT SEQUENCE# FROM V$LOG WHERE STATUS = 'CURRENT'";
+        expected = "SELECT SEQUENCE# FROM V$LOG WHERE STATUS = 'CURRENT' ORDER BY SEQUENCE#";
         assertThat(result).isEqualTo(expected);
 
         result = SqlUtils.databaseSupplementalLoggingAllCheckQuery();
         expected = "SELECT 'KEY', SUPPLEMENTAL_LOG_DATA_ALL FROM V$DATABASE";
-        assertThat(result).isEqualTo(expected);
-
-        result = SqlUtils.currentScnQuery();
-        expected = "SELECT CURRENT_SCN FROM V$DATABASE";
         assertThat(result).isEqualTo(expected);
 
         result = SqlUtils.oldestFirstChangeQuery(Duration.ofHours(0L), null);
@@ -106,44 +94,26 @@ public class SqlUtilsTest {
                 " WHERE STATUS='VALID' AND TYPE='LOCAL' AND UPPER(DEST_NAME)='LOG_ARCHIVE_DEST_3') AND STATUS='A')";
         assertThat(result).isEqualTo(expected);
 
-        result = SqlUtils.tableExistsQuery("table_name");
-        expected = "SELECT '1' AS ONE FROM USER_TABLES WHERE TABLE_NAME = 'table_name'";
-        assertThat(result).isEqualTo(expected);
-
-        result = SqlUtils.logMiningHistoryDdl("table_name");
-        expected = "create  TABLE table_name(" +
-                "row_sequence NUMBER(19,0), " +
-                "captured_scn NUMBER(19,0), " +
-                "table_name VARCHAR2(30 CHAR), " +
-                "seg_owner VARCHAR2(30 CHAR), " +
-                "operation_code NUMBER(19,0), " +
-                "change_time TIMESTAMP(6), " +
-                "transaction_id VARCHAR2(50 CHAR), " +
-                "csf NUMBER(19,0), " +
-                "redo_sql VARCHAR2(4000 CHAR)" +
-                ") nologging";
-        assertThat(result).isEqualTo(expected);
-
         result = SqlUtils.allMinableLogsQuery(Scn.valueOf(10L), Duration.ofHours(0L), false, null);
         expected = "SELECT MIN(F.MEMBER) AS FILE_NAME, L.FIRST_CHANGE# FIRST_CHANGE, L.NEXT_CHANGE# NEXT_CHANGE, L.ARCHIVED, " +
-                "L.STATUS, 'ONLINE' AS TYPE, L.SEQUENCE# AS SEQ, 'NO' AS DICT_START, 'NO' AS DICT_END FROM V$LOGFILE F, " +
+                "L.STATUS, 'ONLINE' AS TYPE, L.SEQUENCE# AS SEQ, 'NO' AS DICT_START, 'NO' AS DICT_END, L.THREAD# AS THREAD FROM V$LOGFILE F, " +
                 "V$LOG L LEFT JOIN V$ARCHIVED_LOG A ON A.FIRST_CHANGE# = L.FIRST_CHANGE# AND A.NEXT_CHANGE# = L.NEXT_CHANGE# " +
-                "WHERE A.FIRST_CHANGE# IS NULL AND F.GROUP# = L.GROUP# GROUP BY F.GROUP#, L.FIRST_CHANGE#, L.NEXT_CHANGE#, " +
-                "L.STATUS, L.ARCHIVED, L.SEQUENCE# UNION SELECT A.NAME AS FILE_NAME, A.FIRST_CHANGE# FIRST_CHANGE, " +
+                "WHERE (A.STATUS <> 'A' OR A.FIRST_CHANGE# IS NULL) AND F.GROUP# = L.GROUP# GROUP BY F.GROUP#, L.FIRST_CHANGE#, L.NEXT_CHANGE#, " +
+                "L.STATUS, L.ARCHIVED, L.SEQUENCE#, L.THREAD# UNION SELECT A.NAME AS FILE_NAME, A.FIRST_CHANGE# FIRST_CHANGE, " +
                 "A.NEXT_CHANGE# NEXT_CHANGE, 'YES', NULL, 'ARCHIVED', A.SEQUENCE# AS SEQ, A.DICTIONARY_BEGIN, " +
-                "A.DICTIONARY_END FROM V$ARCHIVED_LOG A WHERE A.NAME IS NOT NULL AND A.ARCHIVED = 'YES' AND A.STATUS = 'A' " +
+                "A.DICTIONARY_END, A.THREAD# AS THREAD FROM V$ARCHIVED_LOG A WHERE A.NAME IS NOT NULL AND A.ARCHIVED = 'YES' AND A.STATUS = 'A' " +
                 "AND A.NEXT_CHANGE# > 10 AND A.DEST_ID IN (SELECT DEST_ID FROM V$ARCHIVE_DEST_STATUS WHERE STATUS='VALID' " +
                 "AND TYPE='LOCAL' AND ROWNUM=1) ORDER BY 7";
         assertThat(result).isEqualTo(expected);
 
         result = SqlUtils.allMinableLogsQuery(Scn.valueOf(10L), Duration.ofHours(0L), false, "LOG_ARCHIVE_DEST_2");
         expected = "SELECT MIN(F.MEMBER) AS FILE_NAME, L.FIRST_CHANGE# FIRST_CHANGE, L.NEXT_CHANGE# NEXT_CHANGE, L.ARCHIVED, " +
-                "L.STATUS, 'ONLINE' AS TYPE, L.SEQUENCE# AS SEQ, 'NO' AS DICT_START, 'NO' AS DICT_END FROM V$LOGFILE F, " +
+                "L.STATUS, 'ONLINE' AS TYPE, L.SEQUENCE# AS SEQ, 'NO' AS DICT_START, 'NO' AS DICT_END, L.THREAD# AS THREAD FROM V$LOGFILE F, " +
                 "V$LOG L LEFT JOIN V$ARCHIVED_LOG A ON A.FIRST_CHANGE# = L.FIRST_CHANGE# AND A.NEXT_CHANGE# = L.NEXT_CHANGE# " +
-                "WHERE A.FIRST_CHANGE# IS NULL AND F.GROUP# = L.GROUP# GROUP BY F.GROUP#, L.FIRST_CHANGE#, L.NEXT_CHANGE#, " +
-                "L.STATUS, L.ARCHIVED, L.SEQUENCE# UNION SELECT A.NAME AS FILE_NAME, A.FIRST_CHANGE# FIRST_CHANGE, " +
+                "WHERE (A.STATUS <> 'A' OR A.FIRST_CHANGE# IS NULL) AND F.GROUP# = L.GROUP# GROUP BY F.GROUP#, L.FIRST_CHANGE#, L.NEXT_CHANGE#, " +
+                "L.STATUS, L.ARCHIVED, L.SEQUENCE#, L.THREAD# UNION SELECT A.NAME AS FILE_NAME, A.FIRST_CHANGE# FIRST_CHANGE, " +
                 "A.NEXT_CHANGE# NEXT_CHANGE, 'YES', NULL, 'ARCHIVED', A.SEQUENCE# AS SEQ, A.DICTIONARY_BEGIN, " +
-                "A.DICTIONARY_END FROM V$ARCHIVED_LOG A WHERE A.NAME IS NOT NULL AND A.ARCHIVED = 'YES' AND A.STATUS = 'A' " +
+                "A.DICTIONARY_END, A.THREAD# AS THREAD FROM V$ARCHIVED_LOG A WHERE A.NAME IS NOT NULL AND A.ARCHIVED = 'YES' AND A.STATUS = 'A' " +
                 "AND A.NEXT_CHANGE# > 10 AND A.DEST_ID IN (SELECT DEST_ID FROM V$ARCHIVE_DEST_STATUS WHERE STATUS='VALID' " +
                 "AND TYPE='LOCAL' AND UPPER(DEST_NAME)='LOG_ARCHIVE_DEST_2') ORDER BY 7";
         assertThat(result).isEqualTo(expected);
@@ -151,19 +121,19 @@ public class SqlUtilsTest {
         result = SqlUtils.allMinableLogsQuery(Scn.valueOf(10L), Duration.ofHours(0L), true, null);
         expected = "SELECT A.NAME AS FILE_NAME, A.FIRST_CHANGE# FIRST_CHANGE, " +
                 "A.NEXT_CHANGE# NEXT_CHANGE, 'YES', NULL, 'ARCHIVED', A.SEQUENCE# AS SEQ, A.DICTIONARY_BEGIN, " +
-                "A.DICTIONARY_END FROM V$ARCHIVED_LOG A WHERE A.NAME IS NOT NULL AND A.ARCHIVED = 'YES' AND A.STATUS = 'A' " +
+                "A.DICTIONARY_END, A.THREAD# AS THREAD FROM V$ARCHIVED_LOG A WHERE A.NAME IS NOT NULL AND A.ARCHIVED = 'YES' AND A.STATUS = 'A' " +
                 "AND A.NEXT_CHANGE# > 10 AND A.DEST_ID IN (SELECT DEST_ID FROM V$ARCHIVE_DEST_STATUS WHERE STATUS='VALID' " +
                 "AND TYPE='LOCAL' AND ROWNUM=1) ORDER BY 7";
         assertThat(result).isEqualTo(expected);
 
         result = SqlUtils.allMinableLogsQuery(Scn.valueOf(10L), Duration.ofHours(1L), false, null);
         expected = "SELECT MIN(F.MEMBER) AS FILE_NAME, L.FIRST_CHANGE# FIRST_CHANGE, L.NEXT_CHANGE# NEXT_CHANGE, L.ARCHIVED, " +
-                "L.STATUS, 'ONLINE' AS TYPE, L.SEQUENCE# AS SEQ, 'NO' AS DICT_START, 'NO' AS DICT_END FROM V$LOGFILE F, " +
+                "L.STATUS, 'ONLINE' AS TYPE, L.SEQUENCE# AS SEQ, 'NO' AS DICT_START, 'NO' AS DICT_END, L.THREAD# AS THREAD FROM V$LOGFILE F, " +
                 "V$LOG L LEFT JOIN V$ARCHIVED_LOG A ON A.FIRST_CHANGE# = L.FIRST_CHANGE# AND A.NEXT_CHANGE# = L.NEXT_CHANGE# " +
-                "WHERE A.FIRST_CHANGE# IS NULL AND F.GROUP# = L.GROUP# GROUP BY F.GROUP#, L.FIRST_CHANGE#, L.NEXT_CHANGE#, " +
-                "L.STATUS, L.ARCHIVED, L.SEQUENCE# UNION SELECT A.NAME AS FILE_NAME, A.FIRST_CHANGE# FIRST_CHANGE, " +
+                "WHERE (A.STATUS <> 'A' OR A.FIRST_CHANGE# IS NULL) AND F.GROUP# = L.GROUP# GROUP BY F.GROUP#, L.FIRST_CHANGE#, L.NEXT_CHANGE#, " +
+                "L.STATUS, L.ARCHIVED, L.SEQUENCE#, L.THREAD# UNION SELECT A.NAME AS FILE_NAME, A.FIRST_CHANGE# FIRST_CHANGE, " +
                 "A.NEXT_CHANGE# NEXT_CHANGE, 'YES', NULL, 'ARCHIVED', A.SEQUENCE# AS SEQ, A.DICTIONARY_BEGIN, " +
-                "A.DICTIONARY_END FROM V$ARCHIVED_LOG A WHERE A.NAME IS NOT NULL AND A.ARCHIVED = 'YES' AND A.STATUS = 'A' " +
+                "A.DICTIONARY_END, A.THREAD# AS THREAD FROM V$ARCHIVED_LOG A WHERE A.NAME IS NOT NULL AND A.ARCHIVED = 'YES' AND A.STATUS = 'A' " +
                 "AND A.NEXT_CHANGE# > 10 AND A.DEST_ID IN (SELECT DEST_ID FROM V$ARCHIVE_DEST_STATUS WHERE STATUS='VALID' " +
                 "AND TYPE='LOCAL' AND ROWNUM=1) AND A.FIRST_TIME >= SYSDATE - (1/24) ORDER BY 7";
         assertThat(result).isEqualTo(expected);
@@ -171,7 +141,7 @@ public class SqlUtilsTest {
         result = SqlUtils.allMinableLogsQuery(Scn.valueOf(10L), Duration.ofHours(1L), true, null);
         expected = "SELECT A.NAME AS FILE_NAME, A.FIRST_CHANGE# FIRST_CHANGE, " +
                 "A.NEXT_CHANGE# NEXT_CHANGE, 'YES', NULL, 'ARCHIVED', A.SEQUENCE# AS SEQ, A.DICTIONARY_BEGIN, " +
-                "A.DICTIONARY_END FROM V$ARCHIVED_LOG A WHERE A.NAME IS NOT NULL AND A.ARCHIVED = 'YES' AND A.STATUS = 'A' " +
+                "A.DICTIONARY_END, A.THREAD# AS THREAD FROM V$ARCHIVED_LOG A WHERE A.NAME IS NOT NULL AND A.ARCHIVED = 'YES' AND A.STATUS = 'A' " +
                 "AND A.NEXT_CHANGE# > 10 AND A.DEST_ID IN (SELECT DEST_ID FROM V$ARCHIVE_DEST_STATUS WHERE STATUS='VALID' " +
                 "AND TYPE='LOCAL' AND ROWNUM=1) AND A.FIRST_TIME >= SYSDATE - (1/24) ORDER BY 7";
         assertThat(result).isEqualTo(expected);
@@ -179,27 +149,5 @@ public class SqlUtilsTest {
         result = SqlUtils.deleteLogFileStatement("file_name");
         expected = "BEGIN SYS.DBMS_LOGMNR.REMOVE_LOGFILE(LOGFILENAME => 'file_name');END;";
         assertThat(result).isEqualTo(expected);
-
-        result = SqlUtils.dropTableStatement("table_name");
-        expected = "DROP TABLE TABLE_NAME PURGE";
-        assertThat(result).isEqualTo(expected);
-
     }
-
-    @Test
-    public void shouldDetectConnectionProblems() {
-        assertThat(SqlUtils.connectionProblem(new IOException("connection"))).isTrue();
-        assertThat(SqlUtils.connectionProblem(new SQLRecoverableException("connection"))).isTrue();
-        assertThat(SqlUtils.connectionProblem(new Throwable())).isFalse();
-        assertThat(SqlUtils.connectionProblem(new Exception("ORA-03135 problem"))).isTrue();
-        assertThat(SqlUtils.connectionProblem(new Exception("ORA-12543 problem"))).isTrue();
-        assertThat(SqlUtils.connectionProblem(new Exception("ORA-00604 problem"))).isTrue();
-        assertThat(SqlUtils.connectionProblem(new Exception("ORA-01089 problem"))).isTrue();
-        assertThat(SqlUtils.connectionProblem(new Exception("ORA-00600 problem"))).isTrue();
-        assertThat(SqlUtils.connectionProblem(new Exception("ORA-99999 problem"))).isFalse();
-        assertThat(SqlUtils.connectionProblem(new Exception("NO MORE DATA TO READ FROM SOCKET problem"))).isTrue();
-
-        assertThat(SqlUtils.connectionProblem(new Exception("12543 problem"))).isFalse();
-    }
-
 }

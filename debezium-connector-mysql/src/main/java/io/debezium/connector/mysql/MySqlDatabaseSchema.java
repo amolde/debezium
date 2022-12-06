@@ -30,7 +30,6 @@ import io.debezium.relational.TableSchema;
 import io.debezium.relational.TableSchemaBuilder;
 import io.debezium.relational.Tables;
 import io.debezium.relational.ddl.DdlChanges;
-import io.debezium.relational.ddl.DdlChanges.DatabaseStatementStringConsumer;
 import io.debezium.relational.ddl.DdlParser;
 import io.debezium.relational.ddl.DdlParserListener.Event;
 import io.debezium.relational.ddl.DdlParserListener.SetVariableEvent;
@@ -41,10 +40,10 @@ import io.debezium.relational.ddl.DdlParserListener.TableEvent;
 import io.debezium.relational.ddl.DdlParserListener.TableIndexCreatedEvent;
 import io.debezium.relational.ddl.DdlParserListener.TableIndexDroppedEvent;
 import io.debezium.relational.ddl.DdlParserListener.TableIndexEvent;
-import io.debezium.relational.history.DatabaseHistory;
+import io.debezium.relational.ddl.DdlParserListener.TableTruncatedEvent;
 import io.debezium.schema.SchemaChangeEvent;
 import io.debezium.schema.SchemaChangeEvent.SchemaChangeEventType;
-import io.debezium.schema.TopicSelector;
+import io.debezium.spi.topic.TopicNamingStrategy;
 import io.debezium.text.MultipleParsingExceptions;
 import io.debezium.text.ParsingException;
 import io.debezium.util.Collect;
@@ -56,16 +55,6 @@ import io.debezium.util.Strings;
  * the {@link Tables table definitions} and the Kafka Connect {@link #schemaFor(TableId) Schema}s for each table, where the
  * {@link Schema} excludes any columns that have been {@link MySqlConnectorConfig#COLUMN_EXCLUDE_LIST specified} in the
  * configuration.
- * <p>
- * The history is changed by {@link #applyDdl(SourceInfo, String, String, DatabaseStatementStringConsumer) applying DDL
- * statements}, and every change is {@link DatabaseHistory persisted} as defined in the supplied {@link MySqlConnectorConfig MySQL
- * connector configuration}. This component can be reconstructed (e.g., on connector restart) and the history
- * {@link #loadHistory(SourceInfo) loaded} from persisted storage.
- * <p>
- * Note that when {@link #applyDdl(SourceInfo, String, String, DatabaseStatementStringConsumer) applying DDL statements}, the
- * caller is able to supply a {@link DatabaseStatementStringConsumer consumer function} that will be called with the DDL
- * statements and the database to which they apply, grouped by database names. However, these will only be called based when the
- * databases are included by the database filters defined in the {@link MySqlConnectorConfig MySQL connector configuration}.
  *
  * @author Randall Hauch
  */
@@ -79,7 +68,8 @@ public class MySqlDatabaseSchema extends HistorizedRelationalDatabaseSchema {
     private final RelationalTableFilters filters;
     private final DdlChanges ddlChanges;
     private final Map<Long, TableId> tableIdsByTableNumber = new ConcurrentHashMap<>();
-    private boolean storageInitialiationExecuted = false;
+    private final Map<Long, TableId> excludeTableIdsByTableNumber = new ConcurrentHashMap<>();
+    private boolean storageInitializationExecuted = false;
     private final MySqlConnectorConfig connectorConfig;
 
     /**
@@ -87,18 +77,25 @@ public class MySqlDatabaseSchema extends HistorizedRelationalDatabaseSchema {
      * The DDL statements passed to the schema are parsed and a logical model of the database schema is created.
      *
      */
-    public MySqlDatabaseSchema(MySqlConnectorConfig connectorConfig, MySqlValueConverters valueConverter, TopicSelector<TableId> topicSelector,
+    public MySqlDatabaseSchema(MySqlConnectorConfig connectorConfig, MySqlValueConverters valueConverter, TopicNamingStrategy<TableId> topicNamingStrategy,
                                SchemaNameAdjuster schemaNameAdjuster, boolean tableIdCaseInsensitive) {
-        super(connectorConfig, topicSelector, connectorConfig.getTableFilters().dataCollectionFilter(), connectorConfig.getColumnFilter(),
+        super(connectorConfig, topicNamingStrategy, connectorConfig.getTableFilters().dataCollectionFilter(), connectorConfig.getColumnFilter(),
                 new TableSchemaBuilder(
                         valueConverter,
+                        new MySqlDefaultValueConverter(valueConverter),
                         schemaNameAdjuster,
                         connectorConfig.customConverterRegistry(),
                         connectorConfig.getSourceInfoStructMaker().schema(),
-                        connectorConfig.getSanitizeFieldNames()),
+                        connectorConfig.getSanitizeFieldNames(),
+                        false),
                 tableIdCaseInsensitive, connectorConfig.getKeyMapper());
 
-        this.ddlParser = new MySqlAntlrDdlParser(valueConverter, getTableFilter());
+        this.ddlParser = new MySqlAntlrDdlParser(
+                true,
+                false,
+                connectorConfig.isSchemaCommentsHistoryEnabled(),
+                valueConverter,
+                getTableFilter());
         this.ddlChanges = this.ddlParser.getDdlChanges();
         this.connectorConfig = connectorConfig;
         filters = connectorConfig.getTableFilters();
@@ -183,24 +180,27 @@ public class MySqlDatabaseSchema extends HistorizedRelationalDatabaseSchema {
         // - all DDLs if configured
         // - or global SET variables
         // - or DDLs for monitored objects
-        if (!databaseHistory.storeOnlyCapturedTables() || isGlobalSetVariableStatement(schemaChange.getDdl(), schemaChange.getDatabase())
+        if (!schemaHistory.storeOnlyCapturedTables() || isGlobalSetVariableStatement(schemaChange.getDdl(), schemaChange.getDatabase())
                 || schemaChange.getTables().stream().map(Table::id).anyMatch(filters.dataCollectionFilter()::isIncluded)) {
             LOGGER.debug("Recorded DDL statements for database '{}': {}", schemaChange.getDatabase(), schemaChange.getDdl());
             record(schemaChange, schemaChange.getTableChanges());
         }
     }
 
-    public List<SchemaChangeEvent> parseSnapshotDdl(String ddlStatements, String databaseName, MySqlOffsetContext offset, Instant sourceTime) {
+    public List<SchemaChangeEvent> parseSnapshotDdl(MySqlPartition partition, String ddlStatements, String databaseName,
+                                                    MySqlOffsetContext offset, Instant sourceTime) {
         LOGGER.debug("Processing snapshot DDL '{}' for database '{}'", ddlStatements, databaseName);
-        return parseDdl(ddlStatements, databaseName, offset, sourceTime, true);
+        return parseDdl(partition, ddlStatements, databaseName, offset, sourceTime, true);
     }
 
-    public List<SchemaChangeEvent> parseStreamingDdl(String ddlStatements, String databaseName, MySqlOffsetContext offset, Instant sourceTime) {
+    public List<SchemaChangeEvent> parseStreamingDdl(MySqlPartition partition, String ddlStatements, String databaseName,
+                                                     MySqlOffsetContext offset, Instant sourceTime) {
         LOGGER.debug("Processing streaming DDL '{}' for database '{}'", ddlStatements, databaseName);
-        return parseDdl(ddlStatements, databaseName, offset, sourceTime, false);
+        return parseDdl(partition, ddlStatements, databaseName, offset, sourceTime, false);
     }
 
-    private List<SchemaChangeEvent> parseDdl(String ddlStatements, String databaseName, MySqlOffsetContext offset, Instant sourceTime, boolean snapshot) {
+    private List<SchemaChangeEvent> parseDdl(MySqlPartition partition, String ddlStatements, String databaseName,
+                                             MySqlOffsetContext offset, Instant sourceTime, boolean snapshot) {
         final List<SchemaChangeEvent> schemaChangeEvents = new ArrayList<>(3);
 
         if (ignoredQueryStatements.contains(ddlStatements)) {
@@ -213,7 +213,7 @@ public class MySqlDatabaseSchema extends HistorizedRelationalDatabaseSchema {
             this.ddlParser.parse(ddlStatements, tables());
         }
         catch (ParsingException | MultipleParsingExceptions e) {
-            if (databaseHistory.skipUnparseableDdlStatements()) {
+            if (schemaHistory.skipUnparseableDdlStatements()) {
                 LOGGER.warn("Ignoring unparseable DDL statement '{}': {}", ddlStatements, e);
             }
             else {
@@ -222,7 +222,7 @@ public class MySqlDatabaseSchema extends HistorizedRelationalDatabaseSchema {
         }
 
         // No need to send schema events or store DDL if no table has changed
-        if (!databaseHistory.storeOnlyCapturedTables() || isGlobalSetVariableStatement(ddlStatements, databaseName) || ddlChanges.anyMatch(filters)) {
+        if (!schemaHistory.storeOnlyCapturedTables() || isGlobalSetVariableStatement(ddlStatements, databaseName) || ddlChanges.anyMatch(filters)) {
 
             // We are supposed to _also_ record the schema changes as SourceRecords, but these need to be filtered
             // by database. Unfortunately, the databaseName on the event might not be the same database as that
@@ -249,24 +249,33 @@ public class MySqlDatabaseSchema extends HistorizedRelationalDatabaseSchema {
                             offset.tableEvent(dbName, tableIds, sourceTime);
                             // For SET with multiple parameters
                             if (event instanceof TableCreatedEvent) {
-                                emitChangeEvent(offset, schemaChangeEvents, sanitizedDbName, event, tableId, SchemaChangeEventType.CREATE, snapshot);
+                                emitChangeEvent(partition, offset, schemaChangeEvents, sanitizedDbName, event, tableId,
+                                        SchemaChangeEventType.CREATE, snapshot);
                             }
                             else if (event instanceof TableAlteredEvent || event instanceof TableIndexCreatedEvent || event instanceof TableIndexDroppedEvent) {
-                                emitChangeEvent(offset, schemaChangeEvents, sanitizedDbName, event, tableId, SchemaChangeEventType.ALTER, snapshot);
+                                emitChangeEvent(partition, offset, schemaChangeEvents, sanitizedDbName, event, tableId,
+                                        SchemaChangeEventType.ALTER, snapshot);
                             }
                             else if (event instanceof TableDroppedEvent) {
-                                emitChangeEvent(offset, schemaChangeEvents, sanitizedDbName, event, tableId, SchemaChangeEventType.DROP, snapshot);
+                                emitChangeEvent(partition, offset, schemaChangeEvents, sanitizedDbName, event, tableId,
+                                        SchemaChangeEventType.DROP, snapshot);
+                            }
+                            else if (event instanceof TableTruncatedEvent) {
+                                emitChangeEvent(partition, offset, schemaChangeEvents, sanitizedDbName, event, tableId,
+                                        SchemaChangeEventType.TRUNCATE, snapshot);
                             }
                             else if (event instanceof SetVariableEvent) {
                                 // SET statement with multiple variable emits event for each variable. We want to emit only
                                 // one change event
                                 final SetVariableEvent varEvent = (SetVariableEvent) event;
                                 if (varEvent.order() == 0) {
-                                    emitChangeEvent(offset, schemaChangeEvents, sanitizedDbName, event, tableId, SchemaChangeEventType.DATABASE, snapshot);
+                                    emitChangeEvent(partition, offset, schemaChangeEvents, sanitizedDbName, event,
+                                            tableId, SchemaChangeEventType.DATABASE, snapshot);
                                 }
                             }
                             else {
-                                emitChangeEvent(offset, schemaChangeEvents, sanitizedDbName, event, tableId, SchemaChangeEventType.DATABASE, snapshot);
+                                emitChangeEvent(partition, offset, schemaChangeEvents, sanitizedDbName, event, tableId,
+                                        SchemaChangeEventType.DATABASE, snapshot);
                             }
                         });
                     }
@@ -275,21 +284,42 @@ public class MySqlDatabaseSchema extends HistorizedRelationalDatabaseSchema {
             else {
                 offset.databaseEvent(databaseName, sourceTime);
                 schemaChangeEvents
-                        .add(new SchemaChangeEvent(offset.getPartition(), offset.getOffset(), offset.getSourceInfo(),
-                                databaseName, null, ddlStatements, (Table) null, SchemaChangeEventType.DATABASE, snapshot));
+                        .add(SchemaChangeEvent.ofDatabase(partition, offset, databaseName, ddlStatements, snapshot));
             }
         }
         else {
-            LOGGER.debug("Changes for DDL '{}' were filtered and not recorded in database history", ddlStatements);
+            LOGGER.debug("Changes for DDL '{}' were filtered and not recorded in database schema history", ddlStatements);
         }
         return schemaChangeEvents;
     }
 
-    private void emitChangeEvent(MySqlOffsetContext offset, List<SchemaChangeEvent> schemaChangeEvents,
-                                 final String sanitizedDbName, Event event, TableId tableId, SchemaChangeEvent.SchemaChangeEventType type,
+    private void emitChangeEvent(MySqlPartition partition, MySqlOffsetContext offset, List<SchemaChangeEvent> schemaChangeEvents,
+                                 final String sanitizedDbName, Event event, TableId tableId, SchemaChangeEventType type,
                                  boolean snapshot) {
-        schemaChangeEvents.add(new SchemaChangeEvent(offset.getPartition(), offset.getOffset(), offset.getSourceInfo(),
-                sanitizedDbName, null, event.statement(), tableId != null ? tableFor(tableId) : null, type, snapshot));
+        SchemaChangeEvent schemaChangeEvent;
+        if (type.equals(SchemaChangeEventType.ALTER) && event instanceof TableAlteredEvent
+                && ((TableAlteredEvent) event).previousTableId() != null) {
+            schemaChangeEvent = SchemaChangeEvent.ofRename(
+                    partition,
+                    offset,
+                    sanitizedDbName,
+                    null,
+                    event.statement(),
+                    tableId != null ? tableFor(tableId) : null,
+                    ((TableAlteredEvent) event).previousTableId());
+        }
+        else {
+            schemaChangeEvent = SchemaChangeEvent.of(
+                    type,
+                    partition,
+                    offset,
+                    sanitizedDbName,
+                    null,
+                    event.statement(),
+                    tableId != null ? tableFor(tableId) : null,
+                    snapshot);
+        }
+        schemaChangeEvents.add(schemaChangeEvent);
     }
 
     private boolean acceptableDatabase(final String databaseName) {
@@ -315,15 +345,15 @@ public class MySqlDatabaseSchema extends HistorizedRelationalDatabaseSchema {
     }
 
     /**
-     * Return true if the database history entity exists
+     * Return true if the database schema history entity exists
      */
     public boolean historyExists() {
-        return databaseHistory.exists();
+        return schemaHistory.exists();
     }
 
     @Override
     public boolean storeOnlyCapturedTables() {
-        return databaseHistory.storeOnlyCapturedTables();
+        return schemaHistory.storeOnlyCapturedTables();
     }
 
     /**
@@ -337,6 +367,7 @@ public class MySqlDatabaseSchema extends HistorizedRelationalDatabaseSchema {
     public boolean assignTableNumber(long tableNumber, TableId id) {
         final TableSchema tableSchema = schemaFor(id);
         if (tableSchema == null) {
+            excludeTableIdsByTableNumber.put(tableNumber, id);
             return false;
         }
 
@@ -355,22 +386,33 @@ public class MySqlDatabaseSchema extends HistorizedRelationalDatabaseSchema {
     }
 
     /**
+     * Return the excluded table id associated with MySQL-specific table number.
+     *
+     * @param tableNumber
+     * @return the table id or null if not known
+     */
+    public TableId getExcludeTableId(long tableNumber) {
+        return excludeTableIdsByTableNumber.get(tableNumber);
+    }
+
+    /**
      * Clear all of the table mappings. This should be done when the logs are rotated, since in that a different table
      * numbering scheme will be used by all subsequent TABLE_MAP binlog events.
      */
     public void clearTableMappings() {
         LOGGER.debug("Clearing table number mappings");
         tableIdsByTableNumber.clear();
+        excludeTableIdsByTableNumber.clear();
     }
 
     @Override
     public void initializeStorage() {
         super.initializeStorage();
-        storageInitialiationExecuted = true;
+        storageInitializationExecuted = true;
     }
 
     public boolean isStorageInitializationExecuted() {
-        return storageInitialiationExecuted;
+        return storageInitializationExecuted;
     }
 
     public boolean skipSchemaChangeEvent(SchemaChangeEvent event) {
