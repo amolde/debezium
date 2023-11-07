@@ -9,29 +9,57 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.util.Map;
 
-import org.junit.After;
+import org.junit.AfterClass;
 import org.junit.Before;
+import org.junit.BeforeClass;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.mongodb.client.MongoClient;
+import com.mongodb.client.MongoClients;
+
 import io.debezium.config.Configuration;
-import io.debezium.connector.mongodb.ConnectionContext.MongoPrimary;
+import io.debezium.connector.mongodb.connection.MongoDbConnection;
+import io.debezium.connector.mongodb.connection.ReplicaSet;
+import io.debezium.connector.mongodb.junit.MongoDbDatabaseProvider;
+import io.debezium.testing.testcontainers.MongoDbDeployment;
+import io.debezium.testing.testcontainers.util.DockerUtils;
 import io.debezium.util.Testing;
 
-public abstract class AbstractMongoIT implements Testing {
+public abstract class AbstractMongoIT {
 
     protected final static Logger logger = LoggerFactory.getLogger(AbstractMongoIT.class);
+    protected static MongoDbDeployment mongo;
 
     protected Configuration config;
     protected MongoDbTaskContext context;
     protected ReplicaSet replicaSet;
-    protected MongoPrimary primary;
+    protected MongoDbConnection connection;
+
+    @BeforeClass
+    public static void beforeAll() {
+        DockerUtils.enableFakeDnsIfRequired();
+        mongo = MongoDbDatabaseProvider.externalOrDockerReplicaSet();
+        mongo.start();
+    }
+
+    @AfterClass
+    public static void afterAll() {
+        DockerUtils.disableFakeDns();
+        if (mongo != null) {
+            mongo.stop();
+        }
+    }
+
+    protected MongoClient connect() {
+        return MongoClients.create(mongo.getConnectionString());
+    }
 
     @Before
     public void beforeEach() {
         Testing.Print.disable();
         Testing.Debug.disable();
-        useConfiguration(TestHelper.getConfiguration());
+        useConfiguration(TestHelper.getConfiguration(mongo));
     }
 
     /**
@@ -71,9 +99,9 @@ public abstract class AbstractMongoIT implements Testing {
         }
 
         context = new MongoDbTaskContext(config);
-        assertThat(context.getConnectionContext().hosts()).isNotEmpty();
+        assertThat(context.getConnectionContext().connectionSeed()).isNotEmpty();
 
-        replicaSet = ReplicaSet.parse(context.getConnectionContext().hosts());
+        replicaSet = TestHelper.replicaSet(mongo);
         context.configureLoggingContext(replicaSet.replicaSetName());
 
         // Restore Source position (if there are some) ...
@@ -82,14 +110,6 @@ public abstract class AbstractMongoIT implements Testing {
         }
 
         // Get a connection to the primary ...
-        primary = context.getConnectionContext().primaryFor(replicaSet, context.filters(), TestHelper.connectionErrorHandler(3));
-    }
-
-    @After
-    public void afterEach() {
-        if (context != null) {
-            // close all connections
-            context.getConnectionContext().shutdown();
-        }
+        connection = context.getConnectionContext().connect(replicaSet, context.filters(), TestHelper.connectionErrorHandler(3));
     }
 }

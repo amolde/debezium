@@ -13,25 +13,29 @@ import java.util.Objects;
 import java.util.stream.Collectors;
 
 import org.apache.kafka.connect.data.Schema;
-import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.debezium.DebeziumException;
 import io.debezium.annotation.ThreadSafe;
 import io.debezium.config.Configuration;
 import io.debezium.config.Field;
 import io.debezium.connector.base.ChangeEventQueue;
 import io.debezium.connector.common.BaseSourceTask;
 import io.debezium.connector.mongodb.metrics.MongoDbChangeEventSourceMetricsFactory;
+import io.debezium.document.DocumentReader;
 import io.debezium.pipeline.ChangeEventSourceCoordinator;
 import io.debezium.pipeline.DataChangeEvent;
 import io.debezium.pipeline.ErrorHandler;
 import io.debezium.pipeline.EventDispatcher;
+import io.debezium.pipeline.notification.NotificationService;
+import io.debezium.pipeline.signal.SignalProcessor;
 import io.debezium.pipeline.spi.Offsets;
+import io.debezium.schema.SchemaFactory;
+import io.debezium.schema.SchemaNameAdjuster;
 import io.debezium.util.Clock;
 import io.debezium.util.LoggingContext.PreviousContext;
-import io.debezium.util.SchemaNameAdjuster;
 
 /**
  * A Kafka Connect source task that replicates the changes from one or more MongoDB replica sets.
@@ -69,7 +73,7 @@ public final class MongoDbConnectorTask extends BaseSourceTask<MongoDbPartition,
     @Override
     public ChangeEventSourceCoordinator<MongoDbPartition, MongoDbOffsetContext> start(Configuration config) {
         final MongoDbConnectorConfig connectorConfig = new MongoDbConnectorConfig(config);
-        final SchemaNameAdjuster schemaNameAdjuster = connectorConfig.schemaNameAdjustmentMode().createAdjuster();
+        final SchemaNameAdjuster schemaNameAdjuster = connectorConfig.schemaNameAdjuster();
 
         this.taskName = "task" + config.getInteger(MongoDbConnectorConfig.TASK_ID);
         this.taskContext = new MongoDbTaskContext(config);
@@ -77,7 +81,7 @@ public final class MongoDbConnectorTask extends BaseSourceTask<MongoDbPartition,
         final Schema structSchema = connectorConfig.getSourceInfoStructMaker().schema();
         this.schema = new MongoDbSchema(taskContext.filters(), taskContext.topicNamingStrategy(), structSchema, schemaNameAdjuster);
 
-        final ReplicaSets replicaSets = getReplicaSets(config);
+        final ReplicaSets replicaSets = getReplicaSets(connectorConfig);
         final MongoDbOffsetContext previousOffset = getPreviousOffset(connectorConfig, replicaSets);
         final Clock clock = Clock.system();
 
@@ -93,9 +97,15 @@ public final class MongoDbConnectorTask extends BaseSourceTask<MongoDbPartition,
                     .loggingContextSupplier(() -> taskContext.configureLoggingContext(CONTEXT_NAME))
                     .build();
 
-            errorHandler = new MongoDbErrorHandler(connectorConfig, queue);
+            errorHandler = new MongoDbErrorHandler(connectorConfig, queue, errorHandler);
 
             final MongoDbEventMetadataProvider metadataProvider = new MongoDbEventMetadataProvider();
+
+            SignalProcessor<MongoDbPartition, MongoDbOffsetContext> signalProcessor = new SignalProcessor<>(
+                    MongoDbConnector.class, connectorConfig, Map.of(),
+                    getAvailableSignalChannels(),
+                    DocumentReader.defaultReader(),
+                    Offsets.of(Collections.singletonMap(new MongoDbPartition(), previousOffset)));
 
             final EventDispatcher<MongoDbPartition, CollectionId> dispatcher = new EventDispatcher<>(
                     connectorConfig,
@@ -105,7 +115,11 @@ public final class MongoDbConnectorTask extends BaseSourceTask<MongoDbPartition,
                     taskContext.filters().collectionFilter()::test,
                     DataChangeEvent::new,
                     metadataProvider,
-                    schemaNameAdjuster);
+                    schemaNameAdjuster,
+                    signalProcessor);
+
+            NotificationService<MongoDbPartition, MongoDbOffsetContext> notificationService = new NotificationService<>(getNotificationChannels(),
+                    connectorConfig, SchemaFactory.get(), dispatcher::enqueueNotification);
 
             ChangeEventSourceCoordinator<MongoDbPartition, MongoDbOffsetContext> coordinator = new ChangeEventSourceCoordinator<>(
                     // TODO pass offsets from all the partitions
@@ -123,7 +137,9 @@ public final class MongoDbConnectorTask extends BaseSourceTask<MongoDbPartition,
                             schema),
                     new MongoDbChangeEventSourceMetricsFactory(),
                     dispatcher,
-                    schema);
+                    schema,
+                    signalProcessor,
+                    notificationService);
 
             coordinator.start(taskContext, this.queue, metadataProvider);
 
@@ -173,11 +189,10 @@ public final class MongoDbConnectorTask extends BaseSourceTask<MongoDbPartition,
         }
     }
 
-    private ReplicaSets getReplicaSets(Configuration config) {
-        final String hosts = config.getString(MongoDbConnectorConfig.HOSTS);
-        final ReplicaSets replicaSets = ReplicaSets.parse(hosts);
-        if (replicaSets.validReplicaSetCount() == 0) {
-            throw new ConnectException("Unable to start MongoDB connector task since no replica sets were found at " + hosts);
+    private ReplicaSets getReplicaSets(MongoDbConnectorConfig connectorConfig) {
+        final ReplicaSets replicaSets = connectorConfig.getReplicaSets();
+        if (replicaSets.size() == 0) {
+            throw new DebeziumException("Unable to start MongoDB connector task since no replica sets were found");
         }
         return replicaSets;
     }

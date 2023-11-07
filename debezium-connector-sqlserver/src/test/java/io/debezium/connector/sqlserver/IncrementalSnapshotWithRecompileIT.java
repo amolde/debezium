@@ -121,4 +121,34 @@ public class IncrementalSnapshotWithRecompileIT extends AbstractIncrementalSnaps
                 .with(SqlServerConnectorConfig.TABLE_INCLUDE_LIST, tableIncludeList)
                 .with(SchemaHistory.STORE_ONLY_CAPTURED_TABLES_DDL, storeOnlyCapturedDdl);
     }
+
+    @Override
+    protected String connector() {
+        return "sql_server";
+    }
+
+    @Override
+    protected String server() {
+        return TestHelper.TEST_SERVER_NAME;
+    }
+
+    @Override
+    protected String task() {
+        return "0";
+    }
+
+    @Override
+    protected String database() {
+        return TestHelper.TEST_DATABASE_1;
+    }
+
+    @Override
+    protected void waitForCdcTransactionPropagation(int expectedTransactions) throws Exception {
+        TestHelper.waitForCdcTransactionPropagation(connection, TestHelper.TEST_DATABASE_1, expectedTransactions);
+    }
+
+    @Override
+    protected int defaultIncrementalSnapshotChunkSize() {
+        return 250;
+    }
 }

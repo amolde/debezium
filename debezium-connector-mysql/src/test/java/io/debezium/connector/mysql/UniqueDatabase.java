@@ -91,7 +91,7 @@ public class UniqueDatabase {
      * Creates an instance with given Debezium logical name and database name and id suffix same
      * as another database. This is handy for tests that need multpli databases and can use regex
      * based whitelisting.
-    
+
      * @param serverName - logical Debezium server name
      * @param databaseName - the name of the database (prix)
      * @param sibling - a database whose unique suffix will be used
@@ -196,7 +196,7 @@ public class UniqueDatabase {
                 .with(MySqlConnectorConfig.USER, "snapper")
                 .with(MySqlConnectorConfig.PASSWORD, "snapperpass");
 
-        String sslMode = System.getProperty("database.ssl.mode", "disabled");
+        String sslMode = System.getProperty("database.ssl.mode", "preferred");
 
         if (sslMode.equals("disabled")) {
             builder.with(MySqlConnectorConfig.SSL_MODE, MySqlConnectorConfig.SecureConnectionMode.DISABLED);

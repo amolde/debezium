@@ -14,6 +14,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -100,7 +101,15 @@ public class LogMinerHelper {
     }
 
     private static boolean hasLogFilesStartingBeforeOrAtScn(List<LogFile> logs, Scn scn) {
-        return logs.stream().anyMatch(l -> l.getFirstScn().compareTo(scn) <= 0);
+        final Map<Integer, List<LogFile>> threadLogs = logs.stream().collect(Collectors.groupingBy(LogFile::getThread));
+        for (Map.Entry<Integer, List<LogFile>> entry : threadLogs.entrySet()) {
+            if (!entry.getValue().stream().anyMatch(l -> l.getFirstScn().compareTo(scn) <= 0)) {
+                LOGGER.debug("Redo thread {} does not yet have any logs before or at SCN {}.", entry.getKey(), scn);
+                return false;
+            }
+        }
+        LOGGER.debug("Redo threads {} have logs before or at SCN {}.", threadLogs.keySet(), scn);
+        return true;
     }
 
     private static Scn getMinimumScn(List<LogFile> logs) {
@@ -140,18 +149,18 @@ public class LogMinerHelper {
                     // archive log record
                     LogFile logFile = new LogFile(fileName, firstScn, nextScn, sequence, LogFile.Type.ARCHIVE, thread);
                     if (logFile.getNextScn().compareTo(offsetScn) >= 0) {
-                        LOGGER.trace("Archive log {} with SCN range {} to {} sequence {} to be added.", fileName, firstScn, nextScn, sequence);
+                        LOGGER.debug("Archive log {} with SCN range {} to {} sequence {} to be added.", fileName, firstScn, nextScn, sequence);
                         archivedLogFiles.add(logFile);
                     }
                 }
                 else if ("ONLINE".equals(type)) {
                     LogFile logFile = new LogFile(fileName, firstScn, nextScn, sequence, LogFile.Type.REDO, CURRENT.equalsIgnoreCase(status), thread);
                     if (logFile.isCurrent() || logFile.getNextScn().compareTo(offsetScn) >= 0) {
-                        LOGGER.trace("Online redo log {} with SCN range {} to {} ({}) sequence {} to be added.", fileName, firstScn, nextScn, status, sequence);
+                        LOGGER.debug("Online redo log {} with SCN range {} to {} ({}) sequence {} to be added.", fileName, firstScn, nextScn, status, sequence);
                         onlineLogFiles.add(logFile);
                     }
                     else {
-                        LOGGER.trace("Online redo log {} with SCN range {} to {} ({}) sequence {} to be excluded.", fileName, firstScn, nextScn, status, sequence);
+                        LOGGER.debug("Online redo log {} with SCN range {} to {} ({}) sequence {} to be excluded.", fileName, firstScn, nextScn, status, sequence);
                     }
                 }
             }
@@ -163,7 +172,7 @@ public class LogMinerHelper {
         for (LogFile redoLog : onlineLogFiles) {
             archivedLogFiles.removeIf(f -> {
                 if (f.getSequence().equals(redoLog.getSequence())) {
-                    LOGGER.trace("Removing archive log {} with duplicate sequence {} to {}", f.getFileName(), f.getSequence(), redoLog.getFileName());
+                    LOGGER.debug("Removing archive log {} with duplicate sequence {} to {}", f.getFileName(), f.getSequence(), redoLog.getFileName());
                     return true;
                 }
                 return false;

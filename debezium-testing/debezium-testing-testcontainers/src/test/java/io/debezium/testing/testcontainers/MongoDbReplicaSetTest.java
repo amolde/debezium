@@ -10,9 +10,20 @@ import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
+import java.util.Arrays;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+import org.apache.commons.lang3.StringUtils;
+import org.assertj.core.api.Assertions;
 import org.bson.BsonDocument;
 import org.bson.Document;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -26,6 +37,10 @@ import com.mongodb.client.model.changestream.ChangeStreamDocument;
 import com.mongodb.connection.ServerDescription;
 import com.mongodb.internal.selector.ReadPreferenceServerSelector;
 
+import io.debezium.testing.testcontainers.util.DockerUtils;
+import io.debezium.testing.testcontainers.util.ParsingPortResolver;
+import io.debezium.testing.testcontainers.util.PooledPortResolver;
+
 /**
  * @see <a href="https://issues.redhat.com/browse/DBZ-5857">DBZ-5857</a>
  */
@@ -33,15 +48,64 @@ public class MongoDbReplicaSetTest {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(MongoDbReplicaSetTest.class);
 
+    public static final String MONGO_DOCKER_DESKTOP_PORT_PROPERTY = "mongodb.docker.desktop.ports";
+
+    @BeforeAll
+    static void setupAll() {
+        DockerUtils.enableFakeDnsIfRequired();
+    }
+
+    @AfterAll
+    static void tearDownAll() {
+        DockerUtils.disableFakeDns();
+    }
+
+    @AfterEach
+    void tearDown() {
+        System.clearProperty(MONGO_DOCKER_DESKTOP_PORT_PROPERTY);
+    }
+
     @Test
     public void testCluster() throws InterruptedException {
-        try (var cluster = replicaSet().build()) {
+        testCluster(replicaSet());
+    }
+
+    @EnabledOnOs({ OS.MAC, OS.WINDOWS })
+    @Test
+    public void testClusterWithPropertyPortList() throws InterruptedException {
+        System.setProperty(MONGO_DOCKER_DESKTOP_PORT_PROPERTY, "27017,27018,27019");
+
+        testCluster(replicaSet()
+                .portResolver(ParsingPortResolver.parseProperty(MONGO_DOCKER_DESKTOP_PORT_PROPERTY)));
+    }
+
+    @EnabledOnOs({ OS.MAC, OS.WINDOWS })
+    @Test
+    public void testClusterWithPropertyPorRange() throws InterruptedException {
+        System.setProperty(MONGO_DOCKER_DESKTOP_PORT_PROPERTY, "27017:27019");
+
+        testCluster(replicaSet()
+                .portResolver(ParsingPortResolver.parseProperty(MONGO_DOCKER_DESKTOP_PORT_PROPERTY)));
+    }
+
+    @EnabledOnOs({ OS.MAC, OS.WINDOWS })
+    @Test
+    public void testClusterWithInsufficientNumberOfPorts() throws InterruptedException {
+        var portResolver = new PooledPortResolver(Set.of(27017, 27018));
+
+        Assertions.assertThatExceptionOfType(IllegalStateException.class)
+                .describedAs("Exception is thrown when two ports are available but three ports are required")
+                .isThrownBy(() -> testCluster(replicaSet().portResolver(portResolver)));
+    }
+
+    public void testCluster(MongoDbReplicaSet.Builder replicaSet) throws InterruptedException {
+        try (var cluster = replicaSet.build()) {
             LOGGER.info("Starting {}...", cluster);
             cluster.start();
 
             // Create a connection string with a desired read preference
             var readPreference = ReadPreference.primary();
-            var connectionString = new ConnectionString(cluster.getConnectionString() + "/?readPreference=" + readPreference.getName());
+            var connectionString = new ConnectionString(cluster.getConnectionString() + "&readPreference=" + readPreference.getName());
 
             LOGGER.info("Connecting to cluster: {}", connectionString);
             try (var client = MongoClients.create(connectionString)) {
@@ -75,7 +139,12 @@ public class MongoDbReplicaSetTest {
                             .orElse(false));
 
             // Ensure it's invalid
-            if (!MongoDbContainer.IMAGE_VERSION.equals("4.0")) {
+            var parsableVersion = StringUtils.substringBefore(MongoDbContainer.IMAGE_VERSION, "-");
+            var mongoVersions = Arrays.stream(parsableVersion.split("\\."))
+                    .map(Integer::parseInt)
+                    .collect(Collectors.toList());
+
+            if (mongoVersions.get(0) > 4 || (mongoVersions.get(0) == 4 && mongoVersions.get(1) >= 4)) {
                 assertThat(isSelectedReadPreference(client, collection, cursor)).isFalse();
             }
 

@@ -3,7 +3,7 @@
     <parent>
         <groupId>io.debezium</groupId>
         <artifactId>debezium-parent</artifactId>
-        <version>2.1.0-SNAPSHOT</version>
+        <version>2.5.0-SNAPSHOT</version>
         <relativePath>../debezium-parent/pom.xml</relativePath>
     </parent>
     <modelVersion>4.0.0</modelVersion>
@@ -48,8 +48,8 @@
             <scope>provided</scope>
         </dependency>
         <dependency>
-            <groupId>mysql</groupId>
-            <artifactId>mysql-connector-java</artifactId>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
             <exclusions>
                 <exclusion>
                     <groupId>com.google.protobuf</groupId>
@@ -105,11 +105,32 @@
             <groupId>io.apicurio</groupId>
             <artifactId>apicurio-registry-utils-converter</artifactId>
             <scope>test</scope>
+            <exclusions>
+                <exclusion>
+                    <artifactId>slf4j-jboss-logmanager</artifactId>
+                    <groupId>org.jboss.slf4j</groupId>
+                </exclusion>
+            </exclusions>
         </dependency>
         <dependency>
             <groupId>org.awaitility</groupId>
             <artifactId>awaitility</artifactId>
             <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.debezium</groupId>
+            <artifactId>debezium-testing-testcontainers</artifactId>
+            <scope>test</scope>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.junit.platform</groupId>
+                    <artifactId>junit-platform-launcher</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.junit.jupiter</groupId>
+                    <artifactId>junit-jupiter</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
         <dependency>
             <groupId>org.testcontainers</groupId>
@@ -119,6 +140,11 @@
         <dependency>
             <groupId>org.testcontainers</groupId>
             <artifactId>mysql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.rest-assured</groupId>
+            <artifactId>rest-assured</artifactId>
             <scope>test</scope>
         </dependency>
 
@@ -147,6 +173,11 @@
         <apicurio.port>8080</apicurio.port>
         <apicurio.init.timeout>60000</apicurio.init.timeout> <!-- 60 seconds -->
         <!--
+        MariaDB specific
+        -->
+        <mariadb.server.image.source>mariadb</mariadb.server.image.source>
+        <version.mariadb.server>11.1.2</version.mariadb.server>
+        <!--
         By default, we should use the docker image maintained by the MySQL team. This property is changed with different profiles.
         However, we run one container with GTIDs and one without.
         -->
@@ -167,7 +198,7 @@
                     <imagePullPolicy>IfNotPresent</imagePullPolicy>
                     <images>
                         <!--
-                        Images based on "mysql/mysql-server" Docker image
+                        Images based on "${mysql.server.image.source}" Docker image
                         -->
                         <image>
                             <!-- A Docker image using a partial MySQL installation maintained by MySQL team. -->
@@ -189,12 +220,12 @@
                                     <color>yellow</color>
                                 </log>
                                 <wait>
-                                    <log>MySQL init process done. Ready for start up.(?s)(.*)mysqld: ready for connections.</log>
+                                    <log>(MySQL|MariaDB) init process done. Ready for start up.(?s)(.*)(mysqld|mariadbd): ready for connections.</log>
                                     <time>${mysql.init.timeout}</time>
                                 </wait>
                             </run>
                             <build>
-                                <from>mysql/mysql-server:${version.mysql.server}</from>
+                                <from>${mysql.server.image.source}:${version.mysql.server}</from>
                                 <runCmds>
                                     <run>${docker.initimage}</run>
                                 </runCmds>
@@ -248,12 +279,12 @@
                                     <color>yellow</color>
                                 </log>
                                 <wait>
-                                    <log>MySQL init process done. Ready for start up.(?s)(.*)mysqld: ready for connections.</log>
+                                    <log>(MySQL|MariaDB) init process done. Ready for start up.(?s)(.*)(mysqld|mariadbd): ready for connections.</log>
                                     <time>${mysql.init.timeout}</time>
                                 </wait>
                             </run>
                             <build>
-                                <from>mysql/mysql-server:${version.mysql.server}</from>
+                                <from>${mysql.server.image.source}:${version.mysql.server}</from>
                                 <runCmds>
                                     <run>${docker.initimage}</run>
                                 </runCmds>
@@ -306,12 +337,12 @@
                                     <color>cyan</color>
                                 </log>
                                 <wait>
-                                    <log>MySQL init process done. Ready for start up.(?s)(.*)mysqld: ready for connections.</log>
+                                    <log>(MySQL|MariaDB) init process done. Ready for start up.(?s)(.*)(mysqld|mariadbd): ready for connections.</log>
                                     <time>${mysql.init.timeout}</time>
                                 </wait>
                             </run>
                             <build>
-                                <from>mysql/mysql-server:${version.mysql.server}</from>
+                                <from>${mysql.server.image.source}:${version.mysql.server}</from>
                                 <runCmds>
                                     <run>${docker.initimage}</run>
                                 </runCmds>
@@ -364,12 +395,12 @@
                                     <color>magenta</color>
                                 </log>
                                 <wait>
-                                    <log>MySQL init process done. Ready for start up.(?s)(.*)mysqld: ready for connections.</log>
+                                    <log>(MySQL|MariaDB) init process done. Ready for start up.(?s)(.*)(mysqld|mariadbd): ready for connections.</log>
                                     <time>${mysql.init.timeout}</time>
                                 </wait>
                             </run>
                             <build>
-                                <from>mysql/mysql-server:${version.mysql.server}</from>
+                                <from>${mysql.server.image.source}:${version.mysql.server}</from>
                                 <runCmds>
                                     <run>${docker.initimage}</run>
                                 </runCmds>
@@ -511,8 +542,9 @@
                         <database.replica.hostname>${docker.host.address}</database.replica.hostname>
                         <database.replica.port>${mysql.replica.port}</database.replica.port>
                         <skipLongRunningTests>${skipLongRunningTests}</skipLongRunningTests>
+                        <database.ssl.mode>disabled</database.ssl.mode>
                     </systemPropertyVariables>
-                    <runOrder>alphabetical</runOrder>
+                    <runOrder>${runOrder}</runOrder>
                 </configuration>
                 <executions>
                     <execution>
@@ -544,6 +576,9 @@
                             <goal>generate-api-spec</goal>
                         </goals>
                         <phase>prepare-package</phase>
+                        <configuration>
+                            <outputDirectory>${project.build.outputDirectory}/META-INF/resources/</outputDirectory>
+                        </configuration>
                     </execution>
                 </executions>
             </plugin>
@@ -652,8 +687,9 @@
                                 <database.replica.port>${mysql.port}</database.replica.port>
                                 <database.ssl.mode>disabled</database.ssl.mode>
                                 <skipLongRunningTests>false</skipLongRunningTests>
+                                <isAssemblyProfileActive>true</isAssemblyProfileActive>
                             </systemPropertyVariables>
-                            <runOrder>alphabetical</runOrder>
+                            <runOrder>${runOrder}</runOrder>
                         </configuration>
                         <executions>
                             <!-- First run the integration tests with the non-GTID server alone -->
@@ -840,7 +876,7 @@
                 <!-- Integration test properties -->
                 <database.port>${mysql.ssl.port}</database.port>
                 <database.replica.port>${mysql.ssl.port}</database.replica.port>
-                <docker.initimage>ln -s /usr/share/zoneinfo/Pacific/Pago_Pago /etc/localtime</docker.initimage>
+                <docker.initimage>rm -f /etc/localtime; ln -s /usr/share/zoneinfo/Pacific/Pago_Pago /etc/localtime</docker.initimage>
             </properties>
         </profile>
         <profile>
@@ -866,6 +902,30 @@
             </build>
             <properties>
                 <docker.filter>${docker.dbs},apicurio/apicurio-registry-mem:${version.apicurio}</docker.filter>
+            </properties>
+        </profile>
+        <!-- Profile used to toggle MariaDB instead of MySQL -->
+        <profile>
+            <id>mariadb</id>
+            <activation>
+                <activeByDefault>false</activeByDefault>
+            </activation>
+            <properties>
+                <docker.dbs>debezium/mysql-server-test-database</docker.dbs>
+                <mysql.server.image.source>${mariadb.server.image.source}</mysql.server.image.source>
+                <version.mysql.server>${version.mariadb.server}</version.mysql.server>
+            </properties>
+        </profile>
+        <!-- Profile for MariaDB SQL support -->
+        <profile>
+            <id>mariadb-ssl</id>
+            <activation>
+                <activeByDefault>false</activeByDefault>
+            </activation>
+            <properties>
+                <docker.dbs>debezium/mysql-server-test-database-ssl</docker.dbs>
+                <mysql.server.image.source>${mariadb.server.image.source}</mysql.server.image.source>
+                <version.mysql.server>${version.mariadb.server}</version.mysql.server>
             </properties>
         </profile>
     </profiles>

@@ -61,7 +61,7 @@ public class PostgresChangeRecordEmitter extends RelationalChangeRecordEmitter<P
     public PostgresChangeRecordEmitter(PostgresPartition partition, OffsetContext offset, Clock clock, PostgresConnectorConfig connectorConfig, PostgresSchema schema,
                                        PostgresConnection connection, TableId tableId,
                                        ReplicationMessage message) {
-        super(partition, offset, clock);
+        super(partition, offset, clock, connectorConfig);
 
         this.schema = schema;
         this.message = message;
@@ -377,4 +377,5 @@ public class PostgresChangeRecordEmitter extends RelationalChangeRecordEmitter<P
     protected boolean skipEmptyMessages() {
         return true;
     }
+
 }

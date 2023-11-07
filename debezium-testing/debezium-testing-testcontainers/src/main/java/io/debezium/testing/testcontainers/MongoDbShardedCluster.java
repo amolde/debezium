@@ -5,14 +5,17 @@
  */
 package io.debezium.testing.testcontainers;
 
-import static io.debezium.testing.testcontainers.MongoDbContainer.node;
+import static io.debezium.testing.testcontainers.MongoDbContainer.router;
+import static io.debezium.testing.testcontainers.MongoDbReplicaSet.configServerReplicaSet;
 import static io.debezium.testing.testcontainers.MongoDbReplicaSet.replicaSet;
+import static io.debezium.testing.testcontainers.util.DockerUtils.logDockerDesktopBanner;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toList;
 import static java.util.stream.IntStream.rangeClosed;
 import static org.awaitility.Awaitility.await;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.stream.Stream;
@@ -22,13 +25,17 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.Network;
 import org.testcontainers.lifecycle.Startable;
+import org.testcontainers.utility.DockerImageName;
 
+import io.debezium.testing.testcontainers.MongoDbContainer.Address;
 import io.debezium.testing.testcontainers.util.MoreStartables;
+import io.debezium.testing.testcontainers.util.PortResolver;
+import io.debezium.testing.testcontainers.util.RandomPortResolver;
 
 /**
  * A MongoDB sharded cluster.
  */
-public class MongoDbShardedCluster implements Startable {
+public class MongoDbShardedCluster implements MongoDbDeployment {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(MongoDbShardedCluster.class);
 
@@ -36,10 +43,12 @@ public class MongoDbShardedCluster implements Startable {
     private final int replicaCount;
     private final int routerCount;
     private final Network network;
+    private final PortResolver portResolver;
 
     private final MongoDbReplicaSet configServers;
     private final List<MongoDbReplicaSet> shards;
     private final List<MongoDbContainer> routers;
+    private final DockerImageName imageName;
 
     private volatile boolean started;
 
@@ -54,6 +63,14 @@ public class MongoDbShardedCluster implements Startable {
         private int routerCount = 1;
 
         private Network network = Network.newNetwork();
+        private PortResolver portResolver = new RandomPortResolver();
+        private boolean skipDockerDesktopLogWarning = false;
+        private DockerImageName imageName;
+
+        public Builder imageName(DockerImageName imageName) {
+            this.imageName = imageName;
+            return this;
+        }
 
         public Builder shardCount(int shardCount) {
             this.shardCount = shardCount;
@@ -75,6 +92,16 @@ public class MongoDbShardedCluster implements Startable {
             return this;
         }
 
+        public Builder portResolver(PortResolver portResolver) {
+            this.portResolver = portResolver;
+            return this;
+        }
+
+        public Builder skipDockerDesktopLogWarning(boolean skipDockerDesktopLogWarning) {
+            this.skipDockerDesktopLogWarning = skipDockerDesktopLogWarning;
+            return this;
+        }
+
         public MongoDbShardedCluster build() {
             return new MongoDbShardedCluster(this);
         }
@@ -85,10 +112,14 @@ public class MongoDbShardedCluster implements Startable {
         this.replicaCount = builder.replicaCount;
         this.routerCount = builder.routerCount;
         this.network = builder.network;
+        this.portResolver = builder.portResolver;
+        this.imageName = builder.imageName;
 
         this.shards = createShards();
         this.configServers = createConfigServers();
         this.routers = createRouters();
+
+        logDockerDesktopBanner(LOGGER, getHostNames(), builder.skipDockerDesktopLogWarning);
     }
 
     /**
@@ -117,7 +148,10 @@ public class MongoDbShardedCluster implements Startable {
         // Idempotent
         LOGGER.info("Stopping {} shard cluster...", shards.size());
         MoreStartables.deepStopSync(stream());
-        network.close();
+    }
+
+    public int size() {
+        return shards.size();
     }
 
     /**
@@ -140,6 +174,7 @@ public class MongoDbShardedCluster implements Startable {
 
     public void shardCollection(String databaseName, String collectionName, String keyField) {
         // See https://www.mongodb.com/docs/v6.0/tutorial/deploy-shard-cluster/#shard-a-collection
+        LOGGER.info("Enabling sharding for {}.{} using '{}' filed as key", databaseName, collectionName, keyField);
         var arbitraryRouter = routers.get(0);
         arbitraryRouter.eval("sh.shardCollection(" +
                 "'" + databaseName + "." + collectionName + "'," +
@@ -156,37 +191,31 @@ public class MongoDbShardedCluster implements Startable {
 
     private MongoDbReplicaSet createShard(int i) {
         // See https://www.mongodb.com/docs/v6.0/tutorial/deploy-shard-cluster/#start-each-member-of-the-shard-replica-set
-        var shard = replicaSet()
+        var shard = MongoDbReplicaSet.shardReplicaSet()
                 .network(network)
                 .namespace("test-mongo-shard" + i + "-replica")
                 .name("shard" + i)
                 .memberCount(replicaCount)
+                .portResolver(portResolver)
+                .skipDockerDesktopLogWarning(true)
+                .imageName(imageName)
                 .build();
-
-        shard.getMembers().forEach(node -> node.setCommand(
-                "--shardsvr",
-                "--replSet", shard.getName(),
-                "--port", String.valueOf(node.getNamedAddress().getPort()),
-                "--bind_ip", "localhost," + node.getNamedAddress().getHost()));
 
         return shard;
     }
 
     private MongoDbReplicaSet createConfigServers() {
         // See https://www.mongodb.com/docs/v6.0/tutorial/deploy-shard-cluster/#create-the-config-server-replica-set
-        var configServers = replicaSet()
+        var configServers = configServerReplicaSet()
                 .network(network)
                 .namespace("test-mongo-configdb")
                 .name("configdb")
                 .memberCount(replicaCount)
+                .portResolver(portResolver)
                 .configServer(true)
+                .skipDockerDesktopLogWarning(true)
+                .imageName(imageName)
                 .build();
-
-        configServers.getMembers().forEach(node -> node.setCommand(
-                "--configsvr",
-                "--replSet", configServers.getName(),
-                "--port", String.valueOf(node.getNamedAddress().getPort()),
-                "--bind_ip", "localhost," + node.getNamedAddress().getHost()));
 
         return configServers;
     }
@@ -199,16 +228,14 @@ public class MongoDbShardedCluster implements Startable {
 
     private MongoDbContainer createRouter(Network network, int i) {
         // See https://www.mongodb.com/docs/v6.0/tutorial/deploy-shard-cluster/#start-a-mongos-for-the-sharded-cluster
-        var router = node()
+        var router = router(formatReplicaSetAddress(configServers, /* namedAddess= */ true))
                 .network(network)
                 .name("test-mongos" + i)
+                .portResolver(portResolver)
+                .skipDockerDesktopLogWarning(true)
+                .imageName(imageName)
                 .build();
 
-        router.setCommand(
-                "mongos",
-                "--port", String.valueOf(router.getNamedAddress().getPort()),
-                "--bind_ip", "localhost," + router.getNamedAddress().getHost(),
-                "--configdb", formatReplicaSetAddress(configServers, /* namedAddess= */ true));
         router.getDependencies().addAll(shards);
         router.getDependencies().add(configServers);
 
@@ -280,12 +307,30 @@ public class MongoDbShardedCluster implements Startable {
                 .pollInterval(1, SECONDS)
                 .until(() -> stream(arbitraryRouter.eval("db.adminCommand({listShards: 1})")
                         .path("shards"))
-                                .anyMatch(s -> s.get("_id").asText().equals(shard.getName()) &&
-                                        s.get("state").asInt() == 1));
+                        .anyMatch(s -> s.get("_id").asText().equals(shard.getName()) &&
+                                s.get("state").asInt() == 1));
     }
 
     private Stream<Startable> stream() {
         return Stream.concat(Stream.concat(shards.stream(), Stream.of(configServers)), routers.stream());
+    }
+
+    public List<String> getHostNames() {
+        var hostsEntries = new ArrayList<String>();
+
+        routers.stream()
+                .map(MongoDbContainer::getNamedAddress)
+                .map(Address::getHost)
+                .forEach(hostsEntries::add);
+
+        shards.stream()
+                .map(MongoDbReplicaSet::getHostNames)
+                .forEach(hostsEntries::addAll);
+
+        configServers.getHostNames()
+                .forEach(hostsEntries::add);
+
+        return hostsEntries;
     }
 
     private static String formatReplicaSetAddress(MongoDbReplicaSet replicaSet, boolean namedAddress) {

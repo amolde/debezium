@@ -33,7 +33,7 @@ options {
 }
 
 sql_script
-    : ((unit_statement | sql_plus_command) SEMICOLON?)* EOF
+    : sql_plus_command_no_semicolon? ((sql_plus_command | unit_statement) (SEMICOLON '/'? (sql_plus_command | unit_statement))* SEMICOLON? '/'?) EOF
     ;
 
 unit_statement
@@ -93,9 +93,10 @@ unit_statement
     | drop_table
     | drop_view
     | drop_index
+    | drop_user
 
     | rename_object
-
+    | revoke_statement
     | comment_on_column
     | comment_on_table
     | comment_on_materialized
@@ -590,7 +591,6 @@ create_index
     : CREATE (UNIQUE | BITMAP)? INDEX index_name
        ON (cluster_index_clause | table_index_clause | bitmap_join_index_clause)
        UNUSABLE?
-       ';'?
     ;
 
 cluster_index_clause
@@ -715,7 +715,7 @@ indextype
 
 //https://docs.oracle.com/cd/E11882_01/server.112/e41084/statements_1010.htm#SQLRF00805
 alter_index
-    : ALTER INDEX index_name (alter_index_ops_set1 | alter_index_ops_set2) ';'
+    : ALTER INDEX index_name (alter_index_ops_set1 | alter_index_ops_set2)
     ;
 
 alter_index_ops_set1
@@ -804,6 +804,7 @@ modify_index_partition
         | COALESCE
         | UPDATE BLOCK REFERENCES
         | UNUSABLE
+        | shrink_clause
         )
     ;
 
@@ -890,6 +891,10 @@ alter_user
         )+
       ';'
       | user_object_name (',' user_object_name)* proxy_clause ';'
+    ;
+
+drop_user
+    : DROP USER user_object_name CASCADE?
     ;
 
 alter_identified_by
@@ -981,7 +986,6 @@ analyze
       | LIST CHAINED ROWS into_clause1?
       | DELETE SYSTEM? STATISTICS
       )
-      ';'
     ;
 
 partition_extention_clause
@@ -1274,6 +1278,43 @@ grant_statement
 
 container_clause
     : CONTAINER EQUALS_OP (CURRENT | ALL)
+    ;
+
+// https://docs.oracle.com/en/database/oracle/oracle-database/21/sqlrf/REVOKE.html
+revoke_statement
+    : REVOKE ((revoke_system_privilege | revoke_object_privileges) container_clause? | revoke_roles_from_programs)
+    ;
+
+revoke_system_privilege
+    : (system_privilege | role_name | ALL PRIVILEGES) FROM revokee_clause
+    ;
+
+revokee_clause
+    : (id_expression | PUBLIC) (',' (id_expression | PUBLIC))*
+    ;
+
+revoke_object_privileges
+    : (object_privilege | ALL PRIVILEGES?) (',' (object_privilege | ALL PRIVILEGES?))* on_object_clause
+        FROM revokee_clause (CASCADE CONSTRAINTS | FORCE)?
+    ;
+
+on_object_clause
+    : ON ( (schema_name '.')? o=id_expression
+         | USER id_expression (',' id_expression)*
+         | DIRECTORY directory_name
+         | EDITION edition_name
+         | MINING MODEL (schema_name '.')? mmn=id_expression
+         | JAVA (SOURCE | RESOURCE) (schema_name '.')? o2=id_expression
+         | SQL TRANSLATION PROFILE (schema_name '.')? p=id_expression
+         )
+    ;
+
+revoke_roles_from_programs
+    : (role_name (',' role_name)* | ALL) FROM program_unit (',' program_unit)*
+    ;
+
+program_unit
+    : (FUNCTION | PROCEDURE | PACKAGE) (schema_name '.')? id_expression
     ;
 
 create_directory
@@ -1781,7 +1822,6 @@ create_table
     : CREATE (GLOBAL TEMPORARY)? TABLE tableview_name
         (SHARING '=' (NONE | METADATA | DATA | EXTENDED DATA))?
         (relational_table | object_table | xmltype_table) (USAGE QUEUE)? (AS select_only_statement)?
-      ';'
     ;
 
 xmltype_table
@@ -1791,8 +1831,7 @@ xmltype_table
          physical_properties? column_properties? table_partitioning_clauses?
          (CACHE | NOCACHE)? (RESULT_CACHE '(' MODE (DEFAULT | FORCE) ')')?
          parallel_clause? (ROWDEPENDENCIES | NOROWDEPENDENCIES)?
-	 (enable_disable_clause+)? row_movement_clause?
-         flashback_archive_clause?
+	 (enable_disable_clause+)? row_movement_clause? logical_replication_clause? flashback_archive_clause?
     ;
 
 xmltype_virtual_columns
@@ -1823,7 +1862,7 @@ object_table
       physical_properties? column_properties? table_partitioning_clauses?
       (CACHE | NOCACHE)? (RESULT_CACHE '(' MODE (DEFAULT | FORCE) ')')?
       parallel_clause? (ROWDEPENDENCIES | NOROWDEPENDENCIES)?
-      (enable_disable_clause+)? row_movement_clause? flashback_archive_clause?
+      (enable_disable_clause+)? row_movement_clause? logical_replication_clause? flashback_archive_clause?
     ;
 
 oid_index_clause
@@ -1849,11 +1888,13 @@ relational_table
     : ('(' relational_property (',' relational_property)* ')')?
           (DEFAULT COLLATION collation_name)?
           (ON COMMIT (DELETE | PRESERVE) ROWS)?
-          physical_properties? column_properties? table_partitioning_clauses?
+          physical_properties?
+          column_properties?
+          table_partitioning_clauses?
           (CACHE | NOCACHE)? (RESULT_CACHE '(' MODE (DEFAULT | FORCE) ')')?
           parallel_clause?
           (ROWDEPENDENCIES | NOROWDEPENDENCIES)?
-          (enable_disable_clause+)? row_movement_clause? flashback_archive_clause?
+          (enable_disable_clause+)? row_movement_clause? logical_replication_clause? flashback_archive_clause?
         ;
 
 relational_property
@@ -2435,6 +2476,10 @@ row_movement_clause
     : (ENABLE | DISABLE)? ROW MOVEMENT
     ;
 
+logical_replication_clause
+    : (DISABLE | ENABLE) LOGICAL REPLICATION ( ALL KEYS | ALLOW NOVALIDATE KEYS)?
+    ;
+
 flashback_archive_clause
     : FLASHBACK ARCHIVE flashback_archive=REGULAR_ID
     | NO FLASHBACK ARCHIVE
@@ -2496,11 +2541,11 @@ upgrade_table_clause
     ;
     
 truncate_table
-    : TRUNCATE TABLE tableview_name PURGE? ((DROP ALL?|REUSE) STORAGE)? CASCADE? SEMICOLON
+    : TRUNCATE TABLE tableview_name ((PRESERVE | PURGE) MATERIALIZED VIEW LOG)? ((DROP ALL?|REUSE) STORAGE)? CASCADE?
     ;
 
 drop_table
-    : DROP TABLE tableview_name (AS tableview_name)? (CASCADE CONSTRAINTS)? PURGE? (AS quoted_string)? SEMICOLON
+    : DROP TABLE tableview_name (AS tableview_name)? (CASCADE CONSTRAINTS)? PURGE? (AS quoted_string)? FORCE?
     ;
 
 drop_view
@@ -2860,7 +2905,6 @@ alter_table
       | move_table_clause
       )
       ((enable_disable_clause | enable_or_disable (TABLE LOCK | ALL TRIGGERS) )+)?
-      ';'
     ;
 
 alter_table_properties
@@ -2878,6 +2922,7 @@ alter_table_properties_1
       | table_compression
       | supplemental_table_logging
       | allocate_extent_clause
+      | inmemory_table_clause
       | deallocate_unused_clause
       | (CACHE | NOCACHE)
       | RESULT_CACHE '(' MODE (DEFAULT | FORCE) ')'
@@ -2885,6 +2930,7 @@ alter_table_properties_1
       | records_per_block_clause
       | parallel_clause
       | row_movement_clause
+      | logical_replication_clause
       | flashback_archive_clause
       )+
       alter_iot_clauses?
@@ -2917,7 +2963,9 @@ merge_table_partition
     ;
 
 modify_table_partition
-    : MODIFY PARTITION partition_name ((ADD | DROP) list_values_clause)? (ADD range_subpartition_desc)? (REBUILD? UNUSABLE LOCAL INDEXES)?
+    : MODIFY PARTITION partition_name (
+             ((ADD | DROP) list_values_clause)? (ADD range_subpartition_desc)? (REBUILD? UNUSABLE LOCAL INDEXES)?
+             | shrink_clause )
     ;
 
 split_table_partition
@@ -2947,7 +2995,7 @@ alter_interval_partition
     ;
 
 partition_extended_names
-    : (PARTITION|PARTITIONS) partition_name
+    : (PARTITION|PARTITIONS) partition_name (',' partition_name)*
     | (PARTITION|PARTITIONS) '(' partition_name (',' partition_name)* ')'
     | (PARTITION|PARTITIONS) FOR '('? partition_key_value (',' partition_key_value)* ')'?
     ;
@@ -3105,13 +3153,19 @@ drop_column_clause
 
 modify_column_clauses
     : MODIFY ('(' modify_col_properties (',' modify_col_properties)* ')'
+             |'(' modify_col_visibility (',' modify_col_visibility)* ')'
              | modify_col_properties
+             | modify_col_visibility
              | modify_col_substitutable
              )
     ;
 
 modify_col_properties
     : column_name datatype? (DEFAULT column_default_value)? (ENCRYPT encryption_spec | DECRYPT)? inline_constraint* lob_storage_clause? //TODO alter_xmlschema_clause
+    ;
+
+modify_col_visibility
+    : column_name (VISIBLE|INVISIBLE)
     ;
 
 modify_col_substitutable
@@ -3229,7 +3283,7 @@ varray_item
 column_properties
     : object_type_col_properties
     | nested_table_col_properties
-    | (varray_col_properties | lob_storage_clause) //TODO '(' ( ','? lob_partition_storage)+ ')'
+    | (varray_col_properties | lob_storage_clause table_compression? logging_clause?) //TODO '(' ( ','? lob_partition_storage)+ ')'
     | xmltype_column_properties
     | column_properties column_properties+
     ;
@@ -3338,12 +3392,10 @@ new_constraint_name
     ;
 
 drop_constraint_clause
-    : DROP  drop_primary_key_or_unique_or_generic_clause
-    ;
-
-drop_primary_key_or_unique_or_generic_clause
-    : (PRIMARY KEY | UNIQUE '(' column_name (',' column_name)* ')') CASCADE? ((KEEP | DROP) INDEX)? ONLINE?
-    | CONSTRAINT constraint_name CASCADE?
+    : DROP ( PRIMARY KEY
+           | UNIQUE '(' column_name (',' column_name)* ')'
+           | CONSTRAINT constraint_name
+           ) CASCADE? ((KEY | DROP) INDEX)? ONLINE?
     ;
 
 add_constraint
@@ -4419,7 +4471,7 @@ string_function
     | DECODE '(' expressions  ')'
     | CHR '(' concatenation USING NCHAR_CS ')'
     | NVL '(' expression ',' expression ')'
-    | TRIM '(' ((LEADING | TRAILING | BOTH)? quoted_string? FROM)? concatenation ')'
+    | TRIM '(' ((LEADING | TRAILING | BOTH)? expression? FROM)? concatenation ')'
     | TO_DATE '(' expression (',' quoted_string (',' quoted_string)?)? ')'
     ;
 
@@ -4433,6 +4485,7 @@ literal
     : CHAR_STRING
     | string_function
     | numeric
+    | numeric_negative
     | MAXVALUE
     ;
 
@@ -4619,9 +4672,11 @@ xmlserialize_param_ident_part
 
 // SqlPlus
 
+sql_plus_command_no_semicolon
+    : set_command
+    ;
 sql_plus_command
-    : '/'
-    | EXIT
+    : EXIT
     | PROMPT_MESSAGE
     | SHOW (ERR | ERRORS)
     | START_CMD
@@ -4933,7 +4988,7 @@ native_datatype_element
     | NCHAR
     | LONG RAW?
     | CHAR
-    | CHARACTER
+    | CHARACTER VARYING?
     | VARCHAR2
     | VARCHAR
     | STRING
@@ -4964,6 +5019,7 @@ native_datatype_element
     | CLOB
     | NCLOB
     | MLSLABEL
+    | XMLTYPE
     ;
 
 bind_variable

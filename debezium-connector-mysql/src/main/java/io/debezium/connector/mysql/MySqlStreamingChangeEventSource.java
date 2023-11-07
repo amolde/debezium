@@ -42,6 +42,7 @@ import org.slf4j.event.Level;
 
 import com.github.shyiko.mysql.binlog.BinaryLogClient;
 import com.github.shyiko.mysql.binlog.BinaryLogClient.LifecycleListener;
+import com.github.shyiko.mysql.binlog.event.AnnotateRowsEventData;
 import com.github.shyiko.mysql.binlog.event.DeleteRowsEventData;
 import com.github.shyiko.mysql.binlog.event.Event;
 import com.github.shyiko.mysql.binlog.event.EventData;
@@ -120,6 +121,7 @@ public class MySqlStreamingChangeEventSource implements StreamingChangeEventSour
 
     @SingleThreadAccess("binlog client thread")
     private Instant eventTimestamp;
+    private MySqlOffsetContext effectiveOffsetContext;
 
     public static class BinlogPosition {
         final String filename;
@@ -177,7 +179,7 @@ public class MySqlStreamingChangeEventSource implements StreamingChangeEventSour
     }
 
     @FunctionalInterface
-    private static interface BinlogChangeEmitter<T> {
+    private interface BinlogChangeEmitter<T> {
         void emit(TableId tableId, T data) throws InterruptedException;
     }
 
@@ -209,6 +211,10 @@ public class MySqlStreamingChangeEventSource implements StreamingChangeEventSour
             if (sslSocketFactory != null) {
                 client.setSslSocketFactory(sslSocketFactory);
             }
+        }
+        if (connection.isMariaDb()) {
+            // This makes sure BEGIN events are emitted via QUERY events rather than GTIDs.
+            client.setMariaDbSlaveCapability(2);
         }
         Configuration configuration = connectorConfig.getConfig();
         client.setKeepAlive(configuration.getBoolean(MySqlConnectorConfig.KEEP_ALIVE));
@@ -254,7 +260,7 @@ public class MySqlStreamingChangeEventSource implements StreamingChangeEventSour
                     }
 
                     // DBZ-5126 Clean cache on rotate event to prevent it from growing indefinitely.
-                    if (event.getHeader().getEventType() == EventType.ROTATE) {
+                    if (event.getHeader().getEventType() == EventType.ROTATE && event.getHeader().getTimestamp() != 0) {
                         tableMapEventByTableId.clear();
                     }
                     return event;
@@ -305,6 +311,13 @@ public class MySqlStreamingChangeEventSource implements StreamingChangeEventSour
         eventDeserializer.setEventDataDeserializer(EventType.EXT_DELETE_ROWS,
                 new RowDeserializers.DeleteRowsDeserializer(
                         tableMapEventByTableId, eventDeserializationFailureHandlingMode).setMayContainExtraInformation(true));
+        eventDeserializer.setEventDataDeserializer(EventType.TRANSACTION_PAYLOAD,
+                new TransactionPayloadDeserializer(tableMapEventByTableId, eventDeserializationFailureHandlingMode));
+
+        if (connection.isMariaDb()) {
+            eventDeserializer.setCompatibilityMode(EventDeserializer.CompatibilityMode.CHAR_AND_BINARY_AS_BYTE_ARRAY);
+        }
+
         client.setEventDeserializer(eventDeserializer);
     }
 
@@ -337,7 +350,8 @@ public class MySqlStreamingChangeEventSource implements StreamingChangeEventSour
         LOGGER.trace("Ignoring event due to missing handler: {}", event);
     }
 
-    protected void handleEvent(MySqlPartition partition, MySqlOffsetContext offsetContext, Event event) {
+    protected void handleEvent(MySqlPartition partition, MySqlOffsetContext offsetContext, ChangeEventSourceContext context, Event event) {
+
         if (event == null) {
             return;
         }
@@ -368,6 +382,9 @@ public class MySqlStreamingChangeEventSource implements StreamingChangeEventSour
 
         // If there is a handler for this event, forward the event to it ...
         try {
+
+            waitWhenStreamingPaused(context);
+
             // Forward the event to the handler ...
             eventHandlers.getOrDefault(eventType, (e) -> ignoreEvent(offsetContext, e)).accept(event);
 
@@ -523,17 +540,25 @@ public class MySqlStreamingChangeEventSource implements StreamingChangeEventSour
     }
 
     /**
-     * Handle the supplied event with an {@link RowsQueryEventData} by recording the original SQL query
-     * that generated the event.
+     * Handle the supplied event with an {@link RowsQueryEventData} or {@link AnnotateRowsEventData} by
+     * recording the original SQL query that generated the event.
      *
      * @param event the database change data event to be processed; may not be null
      */
-    protected void handleRowsQuery(MySqlOffsetContext offsetContext, Event event) {
-        // Unwrap the RowsQueryEvent
-        final RowsQueryEventData lastRowsQueryEventData = unwrapData(event);
-
+    protected void handleRecordingQuery(MySqlOffsetContext offsetContext, Event event) {
+        final String query;
+        if (!connection.isMariaDb()) {
+            // Unwrap the RowsQueryEvent
+            final RowsQueryEventData lastRowsQueryEventData = unwrapData(event);
+            query = lastRowsQueryEventData.getQuery();
+        }
+        else {
+            // Unwrap the AnnotateRowsEventData
+            final AnnotateRowsEventData annotateRowsEventData = unwrapData(event);
+            query = annotateRowsEventData.getRowsQuery();
+        }
         // Set the query on the source
-        offsetContext.setQuery(lastRowsQueryEventData.getQuery());
+        offsetContext.setQuery(query);
     }
 
     /**
@@ -573,7 +598,7 @@ public class MySqlStreamingChangeEventSource implements StreamingChangeEventSour
             // This is an XA transaction, and we currently ignore these and do nothing ...
             return;
         }
-        if (connectorConfig.getDdlFilter().test(sql)) {
+        if (taskContext.getSchema().ddlFilter().test(sql)) {
             LOGGER.debug("DDL '{}' was filtered out of processing", sql);
             return;
         }
@@ -599,9 +624,9 @@ public class MySqlStreamingChangeEventSource implements StreamingChangeEventSour
                 if (tableId != null && !connectorConfig.getSkippedOperations().contains(Operation.TRUNCATE)
                         && schemaChangeEvent.getType().equals(SchemaChangeEventType.TRUNCATE)) {
                     eventDispatcher.dispatchDataChangeEvent(partition, tableId,
-                            new MySqlChangeRecordEmitter(partition, offsetContext, clock, Operation.TRUNCATE, null, null));
+                            new MySqlChangeRecordEmitter(partition, offsetContext, clock, Operation.TRUNCATE, null, null, connectorConfig));
                 }
-                eventDispatcher.dispatchSchemaChangeEvent(partition, tableId, (receiver) -> {
+                eventDispatcher.dispatchSchemaChangeEvent(partition, offsetContext, tableId, (receiver) -> {
                     try {
                         receiver.schemaChangeEvent(schemaChangeEvent);
                     }
@@ -749,7 +774,7 @@ public class MySqlStreamingChangeEventSource implements StreamingChangeEventSour
         handleChange(partition, offsetContext, event, Operation.CREATE, WriteRowsEventData.class, x -> taskContext.getSchema().getTableId(x.getTableId()),
                 WriteRowsEventData::getRows,
                 (tableId, row) -> eventDispatcher.dispatchDataChangeEvent(partition, tableId,
-                        new MySqlChangeRecordEmitter(partition, offsetContext, clock, Operation.CREATE, null, row)));
+                        new MySqlChangeRecordEmitter(partition, offsetContext, clock, Operation.CREATE, null, row, connectorConfig)));
     }
 
     /**
@@ -763,7 +788,8 @@ public class MySqlStreamingChangeEventSource implements StreamingChangeEventSour
         handleChange(partition, offsetContext, event, Operation.UPDATE, UpdateRowsEventData.class, x -> taskContext.getSchema().getTableId(x.getTableId()),
                 UpdateRowsEventData::getRows,
                 (tableId, row) -> eventDispatcher.dispatchDataChangeEvent(partition, tableId,
-                        new MySqlChangeRecordEmitter(partition, offsetContext, clock, Operation.UPDATE, row.getKey(), row.getValue())));
+                        new MySqlChangeRecordEmitter(partition, offsetContext, clock, Operation.UPDATE, row.getKey(), row.getValue(),
+                                connectorConfig)));
     }
 
     /**
@@ -777,7 +803,7 @@ public class MySqlStreamingChangeEventSource implements StreamingChangeEventSour
         handleChange(partition, offsetContext, event, Operation.DELETE, DeleteRowsEventData.class, x -> taskContext.getSchema().getTableId(x.getTableId()),
                 DeleteRowsEventData::getRows,
                 (tableId, row) -> eventDispatcher.dispatchDataChangeEvent(partition, tableId,
-                        new MySqlChangeRecordEmitter(partition, offsetContext, clock, Operation.DELETE, row, null)));
+                        new MySqlChangeRecordEmitter(partition, offsetContext, clock, Operation.DELETE, row, null, connectorConfig)));
     }
 
     private <T extends EventData, U> void handleChange(MySqlPartition partition, MySqlOffsetContext offsetContext, Event event, Operation operation,
@@ -870,6 +896,14 @@ public class MySqlStreamingChangeEventSource implements StreamingChangeEventSour
     }
 
     @Override
+    public void init(MySqlOffsetContext offsetContext) {
+
+        this.effectiveOffsetContext = offsetContext != null
+                ? offsetContext
+                : MySqlOffsetContext.initial(connectorConfig);
+    }
+
+    @Override
     public void execute(ChangeEventSourceContext context, MySqlPartition partition, MySqlOffsetContext offsetContext) throws InterruptedException {
         if (!connectorConfig.getSnapshotMode().shouldStream()) {
             LOGGER.info("Streaming is disabled for snapshot mode {}", connectorConfig.getSnapshotMode());
@@ -879,10 +913,6 @@ public class MySqlStreamingChangeEventSource implements StreamingChangeEventSour
             taskContext.getSchema().assureNonEmptySchema();
         }
         final Set<Operation> skippedOperations = connectorConfig.getSkippedOperations();
-
-        final MySqlOffsetContext effectiveOffsetContext = offsetContext != null
-                ? offsetContext
-                : MySqlOffsetContext.initial(connectorConfig);
 
         // Register our event handlers ...
         eventHandlers.put(EventType.STOP, (event) -> handleServerStop(effectiveOffsetContext, event));
@@ -914,12 +944,21 @@ public class MySqlStreamingChangeEventSource implements StreamingChangeEventSour
 
         // Conditionally register ROWS_QUERY handler to parse SQL statements.
         if (connectorConfig.includeSqlQuery()) {
-            eventHandlers.put(EventType.ROWS_QUERY, (event) -> handleRowsQuery(effectiveOffsetContext, event));
+            if (!connection.isMariaDb()) {
+                eventHandlers.put(EventType.ROWS_QUERY, (event) -> handleRecordingQuery(effectiveOffsetContext, event));
+            }
+            else {
+                // Binlog client explicitly needs to be told to enable ANNOTATE_ROWS events, which is the
+                // MariaDB equivalent of ROWS_QUERY. This must be done ahead of the connection to make
+                // sure that the right negotiation bits are set during handshake.
+                client.setUseSendAnnotateRowsEvent(true);
+                eventHandlers.put(EventType.ANNOTATE_ROWS, (event) -> handleRecordingQuery(effectiveOffsetContext, event));
+            }
         }
 
         BinaryLogClient.EventListener listener;
         if (connectorConfig.bufferSizeForStreamingChangeEventSource() == 0) {
-            listener = (event) -> handleEvent(partition, effectiveOffsetContext, event);
+            listener = (event) -> handleEvent(partition, effectiveOffsetContext, context, event);
         }
         else {
             EventBuffer buffer = new EventBuffer(connectorConfig.bufferSizeForStreamingChangeEventSource(), this, context);
@@ -1032,6 +1071,7 @@ public class MySqlStreamingChangeEventSource implements StreamingChangeEventSour
             }
             while (context.isRunning()) {
                 Thread.sleep(100);
+                waitWhenStreamingPaused(context);
             }
         }
         finally {
@@ -1042,6 +1082,21 @@ public class MySqlStreamingChangeEventSource implements StreamingChangeEventSour
                 LOGGER.info("Exception while stopping binary log client", e);
             }
         }
+    }
+
+    private void waitWhenStreamingPaused(ChangeEventSourceContext context) throws InterruptedException {
+
+        if (context.isPaused()) {
+            LOGGER.info("Streaming will now pause");
+            context.streamingPaused();
+            context.waitSnapshotCompletion();
+            LOGGER.info("Streaming resumed");
+        }
+    }
+
+    @Override
+    public MySqlOffsetContext getOffsetContext() {
+        return effectiveOffsetContext;
     }
 
     private SSLSocketFactory getBinlogSslSocketFactory(MySqlConnectorConfig connectorConfig, MySqlConnection connection) {

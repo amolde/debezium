@@ -14,6 +14,7 @@ import java.util.List;
 import org.junit.Before;
 import org.junit.Test;
 
+import com.mongodb.ConnectionString;
 import com.mongodb.MongoException;
 import com.mongodb.MongoSocketOpenException;
 import com.mongodb.ServerAddress;
@@ -23,6 +24,8 @@ import com.mongodb.connection.ClusterDescription;
 import com.mongodb.connection.ClusterType;
 import com.mongodb.connection.ServerConnectionState;
 import com.mongodb.connection.ServerDescription;
+
+import io.debezium.connector.mongodb.connection.ConnectionContext;
 
 public class ReplicaSetDiscoveryTest {
 
@@ -37,7 +40,7 @@ public class ReplicaSetDiscoveryTest {
         connectionContext = mock(ConnectionContext.class);
         mongoClient = mock(MongoClient.class);
         when(context.getConnectionContext()).thenReturn(connectionContext);
-        when(connectionContext.clientForSeedConnection()).thenReturn(mongoClient);
+        when(connectionContext.connect()).thenReturn(mongoClient);
         replicaSetDiscovery = new ReplicaSetDiscovery(context);
     }
 
@@ -52,6 +55,10 @@ public class ReplicaSetDiscoveryTest {
 
         ServerAddress host1Address = new ServerAddress("host1");
         ServerAddress host2Address = new ServerAddress("host2");
+
+        var cs = "mongodb://" + host1Address + "," + host1Address;
+        when(connectionContext.connectionSeed()).thenReturn(cs);
+        when(connectionContext.connectionString()).thenReturn(new ConnectionString(cs));
 
         List<ServerDescription> serverDescriptions = List.of(
                 ServerDescription.builder()
@@ -72,9 +79,8 @@ public class ReplicaSetDiscoveryTest {
 
         when(mongoClient.getClusterDescription()).thenReturn(clusterDescription);
 
-        ReplicaSets replicaSets = replicaSetDiscovery.getReplicaSets();
-        assertThat(replicaSets.validReplicaSets().size()).isEqualTo(1);
-        assertThat(replicaSets.validReplicaSets().get(0).replicaSetName()).isEqualTo("my_rs");
-        assertThat(replicaSets.validReplicaSets().get(0).addresses()).isEqualTo(List.of(host2Address));
+        ReplicaSets replicaSets = replicaSetDiscovery.getReplicaSets(mongoClient);
+        assertThat(replicaSets.all().size()).isEqualTo(1);
+        assertThat(replicaSets.all().get(0).replicaSetName()).isEqualTo("my_rs");
     }
 }

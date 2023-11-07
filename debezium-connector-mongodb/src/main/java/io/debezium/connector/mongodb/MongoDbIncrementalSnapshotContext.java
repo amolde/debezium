@@ -10,6 +10,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.LinkedList;
@@ -30,6 +31,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import io.debezium.DebeziumException;
 import io.debezium.annotation.NotThreadSafe;
+import io.debezium.pipeline.signal.actions.snapshotting.AdditionalCondition;
 import io.debezium.pipeline.source.snapshot.incremental.DataCollection;
 import io.debezium.pipeline.source.snapshot.incremental.IncrementalSnapshotContext;
 import io.debezium.relational.Table;
@@ -56,6 +58,8 @@ public class MongoDbIncrementalSnapshotContext<T> implements IncrementalSnapshot
             + "_additional_condition";
     public static final String EVENT_PRIMARY_KEY = INCREMENTAL_SNAPSHOT_KEY + "_primary_key";
     public static final String TABLE_MAXIMUM_KEY = INCREMENTAL_SNAPSHOT_KEY + "_maximum_key";
+
+    public static final String CORRELATION_ID = INCREMENTAL_SNAPSHOT_KEY + "_correlation_id";
 
     /**
      * @code(true) if window is opened and deduplication should be executed
@@ -88,6 +92,8 @@ public class MongoDbIncrementalSnapshotContext<T> implements IncrementalSnapshot
     private Table schema;
 
     private boolean schemaVerificationPassed;
+
+    private String correlationId;
 
     /**
      * Determines if the incremental snapshot was paused or not.
@@ -151,7 +157,7 @@ public class MongoDbIncrementalSnapshotContext<T> implements IncrementalSnapshot
     }
 
     private String arrayToSerializedString(Object[] array) {
-        try (final ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        try (ByteArrayOutputStream bos = new ByteArrayOutputStream();
                 ObjectOutputStream oos = new ObjectOutputStream(bos)) {
             oos.writeObject(array);
             return HexConverter.convertToHexString(bos.toByteArray());
@@ -162,7 +168,7 @@ public class MongoDbIncrementalSnapshotContext<T> implements IncrementalSnapshot
     }
 
     private Object[] serializedStringToArray(String field, String serialized) {
-        try (final ByteArrayInputStream bis = new ByteArrayInputStream(HexConverter.convertFromHex(serialized));
+        try (ByteArrayInputStream bis = new ByteArrayInputStream(HexConverter.convertFromHex(serialized));
                 ObjectInputStream ois = new ObjectInputStream(bis)) {
             return (Object[]) ois.readObject();
         }
@@ -180,7 +186,7 @@ public class MongoDbIncrementalSnapshotContext<T> implements IncrementalSnapshot
                         LinkedHashMap<String, String> map = new LinkedHashMap<>();
                         map.put(DATA_COLLECTIONS_TO_SNAPSHOT_KEY_ID, x.getId().toString());
                         map.put(DATA_COLLECTIONS_TO_SNAPSHOT_KEY_ADDITIONAL_CONDITION,
-                                x.getAdditionalCondition().orElse(null));
+                                x.getAdditionalCondition().isEmpty() ? null : x.getAdditionalCondition().orElse(null));
                         return map;
                     })
                     .collect(Collectors.toList());
@@ -195,7 +201,7 @@ public class MongoDbIncrementalSnapshotContext<T> implements IncrementalSnapshot
         try {
             List<LinkedHashMap<String, String>> dataCollections = mapper.readValue(dataCollectionsStr, mapperTypeRef);
             List<DataCollection<T>> dataCollectionsList = dataCollections.stream()
-                    .map(x -> new DataCollection<T>((T) CollectionId.parse(x.get(DATA_COLLECTIONS_TO_SNAPSHOT_KEY_ID)), null))
+                    .map(x -> new DataCollection<T>((T) CollectionId.parse(x.get(DATA_COLLECTIONS_TO_SNAPSHOT_KEY_ID))))
                     .filter(x -> x.getId() != null)
                     .collect(Collectors.toList());
             return dataCollectionsList;
@@ -216,6 +222,7 @@ public class MongoDbIncrementalSnapshotContext<T> implements IncrementalSnapshot
         offset.put(EVENT_PRIMARY_KEY, arrayToSerializedString(lastEventKeySent));
         offset.put(TABLE_MAXIMUM_KEY, arrayToSerializedString(maximumKey));
         offset.put(DATA_COLLECTIONS_TO_SNAPSHOT_KEY, dataCollectionsToSnapshotAsString());
+        offset.put(CORRELATION_ID, correlationId);
         return offset;
     }
 
@@ -224,9 +231,10 @@ public class MongoDbIncrementalSnapshotContext<T> implements IncrementalSnapshot
     }
 
     @SuppressWarnings("unchecked")
-    public List<DataCollection<T>> addDataCollectionNamesToSnapshot(List<String> dataCollectionIds, Optional<String> _additionalCondition) {
+    public List<DataCollection<T>> addDataCollectionNamesToSnapshot(String correlationId, List<String> dataCollectionIds, List<AdditionalCondition> additionalCondition,
+                                                                    String surrogateKey) {
         final List<DataCollection<T>> newDataCollectionIds = dataCollectionIds.stream()
-                .map(x -> new DataCollection<T>((T) CollectionId.parse(x), null))
+                .map(x -> new DataCollection<T>((T) CollectionId.parse(x)))
                 .filter(x -> x.getId() != null) // Remove collections with incorrectly formatted name
                 .collect(Collectors.toList());
         addTablesIdsToSnapshot(newDataCollectionIds);
@@ -236,13 +244,29 @@ public class MongoDbIncrementalSnapshotContext<T> implements IncrementalSnapshot
     @Override
     public void stopSnapshot() {
         this.dataCollectionsToSnapshot.clear();
+        this.correlationId = null;
     }
 
     @Override
     @SuppressWarnings("unchecked")
     public boolean removeDataCollectionFromSnapshot(String dataCollectionId) {
         final T collectionId = (T) CollectionId.parse(dataCollectionId);
-        return dataCollectionsToSnapshot.remove(new DataCollection<T>(collectionId, null));
+        return dataCollectionsToSnapshot.remove(new DataCollection<T>(collectionId));
+    }
+
+    @Override
+    public List<DataCollection<T>> getDataCollections() {
+        return new ArrayList<>(dataCollectionsToSnapshot);
+    }
+
+    @Override
+    public void unsetCorrelationId() {
+        this.correlationId = null;
+    }
+
+    @Override
+    public String getCorrelationId() {
+        return this.correlationId;
     }
 
     protected static <U> IncrementalSnapshotContext<U> init(MongoDbIncrementalSnapshotContext<U> context, Map<String, ?> offsets) {
@@ -259,6 +283,7 @@ public class MongoDbIncrementalSnapshotContext<T> implements IncrementalSnapshot
         if (dataCollectionsStr != null) {
             context.addTablesIdsToSnapshot(context.stringToDataCollections(dataCollectionsStr));
         }
+        context.correlationId = (String) offsets.get(CORRELATION_ID);
         return context;
     }
 

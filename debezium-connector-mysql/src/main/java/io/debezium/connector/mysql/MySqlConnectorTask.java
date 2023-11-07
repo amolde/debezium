@@ -7,6 +7,7 @@ package io.debezium.connector.mysql;
 
 import java.sql.SQLException;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 import org.apache.kafka.connect.source.SourceRecord;
@@ -21,18 +22,25 @@ import io.debezium.connector.common.BaseSourceTask;
 import io.debezium.connector.mysql.MySqlConnection.MySqlConnectionConfiguration;
 import io.debezium.connector.mysql.MySqlConnectorConfig.BigIntUnsignedHandlingMode;
 import io.debezium.connector.mysql.MySqlConnectorConfig.SnapshotMode;
+import io.debezium.document.DocumentReader;
+import io.debezium.jdbc.DefaultMainConnectionProvidingConnectionFactory;
 import io.debezium.jdbc.JdbcValueConverters.BigIntUnsignedMode;
 import io.debezium.jdbc.JdbcValueConverters.DecimalMode;
+import io.debezium.jdbc.MainConnectionProvidingConnectionFactory;
 import io.debezium.jdbc.TemporalPrecisionMode;
 import io.debezium.pipeline.ChangeEventSourceCoordinator;
 import io.debezium.pipeline.DataChangeEvent;
 import io.debezium.pipeline.ErrorHandler;
 import io.debezium.pipeline.EventDispatcher;
+import io.debezium.pipeline.notification.NotificationService;
+import io.debezium.pipeline.signal.SignalProcessor;
+import io.debezium.pipeline.signal.channels.KafkaSignalChannel;
 import io.debezium.pipeline.spi.Offsets;
 import io.debezium.relational.TableId;
+import io.debezium.schema.SchemaFactory;
+import io.debezium.schema.SchemaNameAdjuster;
 import io.debezium.spi.topic.TopicNamingStrategy;
 import io.debezium.util.Clock;
-import io.debezium.util.SchemaNameAdjuster;
 
 /**
  * The main task executing streaming from MySQL.
@@ -58,24 +66,26 @@ public class MySqlConnectorTask extends BaseSourceTask<MySqlPartition, MySqlOffs
     }
 
     @Override
-    public ChangeEventSourceCoordinator<MySqlPartition, MySqlOffsetContext> start(Configuration config) {
+    public ChangeEventSourceCoordinator<MySqlPartition, MySqlOffsetContext> start(Configuration configuration) {
         final Clock clock = Clock.system();
-        final MySqlConnectorConfig connectorConfig = new MySqlConnectorConfig(config);
-        final TopicNamingStrategy topicNamingStrategy = connectorConfig.getTopicNamingStrategy(MySqlConnectorConfig.TOPIC_NAMING_STRATEGY);
-        final SchemaNameAdjuster schemaNameAdjuster = connectorConfig.schemaNameAdjustmentMode().createAdjuster();
+        final MySqlConnectorConfig connectorConfig = new MySqlConnectorConfig(configuration);
+        final TopicNamingStrategy<TableId> topicNamingStrategy = connectorConfig.getTopicNamingStrategy(MySqlConnectorConfig.TOPIC_NAMING_STRATEGY);
+        final SchemaNameAdjuster schemaNameAdjuster = connectorConfig.schemaNameAdjuster();
         final MySqlValueConverters valueConverters = getValueConverters(connectorConfig);
 
         // DBZ-3238: automatically set "useCursorFetch" to true when a snapshot fetch size other than the default of -1 is given
         // By default do not load whole result sets into memory
-        config = config.edit()
+        final Configuration config = configuration.edit()
                 .withDefault("database.responseBuffering", "adaptive")
                 .withDefault("database.fetchSize", 10_000)
                 .withDefault("database.useCursorFetch", connectorConfig.useCursorFetch())
                 .build();
 
-        connection = new MySqlConnection(new MySqlConnectionConfiguration(config),
-                connectorConfig.useCursorFetch() ? new MySqlBinaryProtocolFieldReader(connectorConfig)
-                        : new MySqlTextProtocolFieldReader(connectorConfig));
+        MainConnectionProvidingConnectionFactory<MySqlConnection> connectionFactory = new DefaultMainConnectionProvidingConnectionFactory<>(
+                () -> new MySqlConnection(new MySqlConnectionConfiguration(config),
+                        connectorConfig.useCursorFetch() ? new MySqlBinaryProtocolFieldReader(connectorConfig) : new MySqlTextProtocolFieldReader(connectorConfig)));
+
+        connection = connectionFactory.mainConnection();
 
         validateBinlogConfiguration(connectorConfig);
 
@@ -127,9 +137,16 @@ public class MySqlConnectorTask extends BaseSourceTask<MySqlPartition, MySqlOffs
                 .buffering()
                 .build();
 
-        errorHandler = new MySqlErrorHandler(connectorConfig, queue);
+        errorHandler = new MySqlErrorHandler(connectorConfig, queue, errorHandler);
 
         final MySqlEventMetadataProvider metadataProvider = new MySqlEventMetadataProvider();
+
+        SignalProcessor<MySqlPartition, MySqlOffsetContext> signalProcessor = new SignalProcessor<>(
+                MySqlConnector.class, connectorConfig, Map.of(),
+                getAvailableSignalChannels(),
+                DocumentReader.defaultReader(),
+                previousOffsets);
+        resetOffset(connectorConfig, previousOffset, signalProcessor);
 
         final Configuration heartbeatConfig = config;
         final EventDispatcher<MySqlPartition, TableId> dispatcher = new EventDispatcher<>(
@@ -160,19 +177,25 @@ public class MySqlConnectorTask extends BaseSourceTask<MySqlPartition, MySqlOffs
                                     break;
                             }
                         }),
-                schemaNameAdjuster);
+                schemaNameAdjuster,
+                signalProcessor);
 
         final MySqlStreamingChangeEventSourceMetrics streamingMetrics = new MySqlStreamingChangeEventSourceMetrics(taskContext, queue, metadataProvider);
+
+        NotificationService<MySqlPartition, MySqlOffsetContext> notificationService = new NotificationService<>(getNotificationChannels(),
+                connectorConfig, SchemaFactory.get(), dispatcher::enqueueNotification);
 
         ChangeEventSourceCoordinator<MySqlPartition, MySqlOffsetContext> coordinator = new ChangeEventSourceCoordinator<>(
                 previousOffsets,
                 errorHandler,
                 MySqlConnector.class,
                 connectorConfig,
-                new MySqlChangeEventSourceFactory(connectorConfig, connection, errorHandler, dispatcher, clock, schema, taskContext, streamingMetrics, queue),
+                new MySqlChangeEventSourceFactory(connectorConfig, connectionFactory, errorHandler, dispatcher, clock, schema, taskContext, streamingMetrics, queue),
                 new MySqlChangeEventSourceMetricsFactory(streamingMetrics),
                 dispatcher,
-                schema);
+                schema,
+                signalProcessor,
+                notificationService);
 
         coordinator.start(taskContext, this.queue, metadataProvider);
 
@@ -383,5 +406,20 @@ public class MySqlConnectorTask extends BaseSourceTask<MySqlPartition, MySqlOffs
             }
         }
         return false;
+    }
+
+    private void resetOffset(MySqlConnectorConfig connectorConfig, MySqlOffsetContext previousOffset,
+                             SignalProcessor<MySqlPartition, MySqlOffsetContext> signalProcessor) {
+        boolean isKafkaChannelEnabled = connectorConfig.getEnabledChannels().contains(KafkaSignalChannel.CHANNEL_NAME);
+        if (previousOffset != null && isKafkaChannelEnabled && connectorConfig.isReadOnlyConnection()) {
+            MySqlReadOnlyIncrementalSnapshotContext<TableId> readOnlyIncrementalSnapshotContext = (MySqlReadOnlyIncrementalSnapshotContext<TableId>) previousOffset
+                    .getIncrementalSnapshotContext();
+            KafkaSignalChannel kafkaSignal = signalProcessor.getSignalChannel(KafkaSignalChannel.class);
+            Long signalOffset = readOnlyIncrementalSnapshotContext.getSignalOffset();
+            if (signalOffset != null) {
+                LOGGER.info("Resetting Kafka Signal offset to {}", signalOffset);
+                kafkaSignal.reset(signalOffset);
+            }
+        }
     }
 }

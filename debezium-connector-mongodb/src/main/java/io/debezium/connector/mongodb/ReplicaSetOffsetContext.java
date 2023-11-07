@@ -11,10 +11,14 @@ import java.util.Map;
 import org.apache.kafka.connect.data.Schema;
 import org.bson.BsonDocument;
 import org.bson.BsonTimestamp;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import com.mongodb.client.MongoChangeStreamCursor;
 import com.mongodb.client.model.changestream.ChangeStreamDocument;
 
 import io.debezium.annotation.ThreadSafe;
+import io.debezium.connector.mongodb.connection.ReplicaSet;
 import io.debezium.pipeline.CommonOffsetContext;
 import io.debezium.pipeline.source.snapshot.incremental.IncrementalSnapshotContext;
 import io.debezium.pipeline.spi.OffsetContext;
@@ -32,6 +36,8 @@ import io.debezium.spi.schema.DataCollectionId;
  */
 @ThreadSafe
 public class ReplicaSetOffsetContext extends CommonOffsetContext<SourceInfo> {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(ReplicaSetOffsetContext.class);
 
     private final MongoDbOffsetContext offsetContext;
     private final String replicaSetName;
@@ -97,20 +103,41 @@ public class ReplicaSetOffsetContext extends CommonOffsetContext<SourceInfo> {
     }
 
     public void readEvent(CollectionId collectionId, Instant timestamp) {
-        sourceInfo.collectionEvent(replicaSetName, collectionId);
+        sourceInfo.collectionEvent(replicaSetName, collectionId, 0L);
         sourceInfo.lastOffset(replicaSetName);
+    }
+
+    public void initEvent(MongoChangeStreamCursor<ChangeStreamDocument<BsonDocument>> cursor) {
+        sourceInfo.initEvent(replicaSetName, cursor);
+    }
+
+    public void initFromOpTimeIfNeeded(BsonTimestamp timestamp) {
+        if (lastResumeToken() != null) {
+            return;
+        }
+        LOGGER.info("Initializing offset for replica-set {} from operation time", replicaSetName);
+        sourceInfo.noEvent(replicaSetName, timestamp);
+    }
+
+    public void noEvent(MongoChangeStreamCursor<?> cursor) {
+        sourceInfo.noEvent(replicaSetName, cursor);
     }
 
     public void changeStreamEvent(ChangeStreamDocument<BsonDocument> changeStreamEvent) {
         sourceInfo.changeStreamEvent(replicaSetName, changeStreamEvent);
     }
 
-    public BsonTimestamp lastOffsetTimestamp() {
-        return sourceInfo.lastOffsetTimestamp(replicaSetName);
-    }
-
     public String lastResumeToken() {
         return sourceInfo.lastResumeToken(replicaSetName);
+    }
+
+    public BsonDocument lastResumeTokenDoc() {
+        final String data = sourceInfo.lastResumeToken(replicaSetName);
+        return (data == null) ? null : ResumeTokens.fromData(data);
+    }
+
+    public BsonTimestamp lastTimestamp() {
+        return sourceInfo.lastTimestamp(replicaSetName);
     }
 
     @Override

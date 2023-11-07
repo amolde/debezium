@@ -89,6 +89,7 @@ public class SqlServerStreamingChangeEventSource implements StreamingChangeEvent
     private final Map<SqlServerPartition, SqlServerStreamingExecutionContext> streamingExecutionContexts;
 
     private boolean checkAgent;
+    private SqlServerOffsetContext effectiveOffset;
 
     public SqlServerStreamingChangeEventSource(SqlServerConnectorConfig connectorConfig, SqlServerConnection dataConnection,
                                                SqlServerConnection metadataConnection,
@@ -107,9 +108,13 @@ public class SqlServerStreamingChangeEventSource implements StreamingChangeEvent
                 DEFAULT_INTERVAL_BETWEEN_COMMITS.compareTo(intervalBetweenCommitsBasedOnPoll) > 0
                         ? DEFAULT_INTERVAL_BETWEEN_COMMITS.toMillis()
                         : intervalBetweenCommitsBasedOnPoll.toMillis());
-        this.pauseBetweenCommits.hasElapsed();
         this.streamingExecutionContexts = new HashMap<>();
         this.checkAgent = true;
+    }
+
+    @Override
+    public void init(SqlServerOffsetContext offsetContext) throws InterruptedException {
+        this.effectiveOffset = offsetContext == null ? new SqlServerOffsetContext(connectorConfig, TxLogPosition.NULL, false, false) : offsetContext;
     }
 
     @Override
@@ -126,6 +131,8 @@ public class SqlServerStreamingChangeEventSource implements StreamingChangeEvent
         }
 
         final String databaseName = partition.getDatabaseName();
+
+        this.effectiveOffset = offsetContext;
 
         try {
             final SqlServerStreamingExecutionContext streamingExecutionContext = streamingExecutionContexts.getOrDefault(partition,
@@ -181,6 +188,7 @@ public class SqlServerStreamingChangeEventSource implements StreamingChangeEvent
                 // There is no change in the database
                 if (toLsn.compareTo(lastProcessedPosition.getCommitLsn()) <= 0 && streamingExecutionContext.getShouldIncreaseFromLsn()) {
                     LOGGER.debug("No change in the database");
+                    dispatcher.dispatchHeartbeatEvent(partition, offsetContext);
                     return false;
                 }
 
@@ -316,7 +324,8 @@ public class SqlServerStreamingChangeEventSource implements StreamingChangeEvent
                                                     operation,
                                                     data,
                                                     dataNext,
-                                                    clock));
+                                                    clock,
+                                                    connectorConfig));
                             tableWithSmallestLsn.next();
                         }
                     });
@@ -334,6 +343,11 @@ public class SqlServerStreamingChangeEventSource implements StreamingChangeEvent
         }
 
         return true;
+    }
+
+    @Override
+    public SqlServerOffsetContext getOffsetContext() {
+        return effectiveOffset;
     }
 
     private void commitTransaction() throws SQLException {
@@ -357,8 +371,8 @@ public class SqlServerStreamingChangeEventSource implements StreamingChangeEvent
             LOGGER.info("Migration skipped, no table schema changes detected.");
             return;
         }
-        dispatcher.dispatchSchemaChangeEvent(partition, newTable.getSourceTableId(),
-                new SqlServerSchemaChangeEventEmitter(partition, offsetContext, newTable, tableSchema,
+        dispatcher.dispatchSchemaChangeEvent(partition, offsetContext, newTable.getSourceTableId(),
+                new SqlServerSchemaChangeEventEmitter(partition, offsetContext, newTable, tableSchema, schema,
                         SchemaChangeEventType.ALTER));
         newTable.setSourceTable(tableSchema);
     }
@@ -429,12 +443,14 @@ public class SqlServerStreamingChangeEventSource implements StreamingChangeEvent
                         Instant.now());
                 dispatcher.dispatchSchemaChangeEvent(
                         partition,
+                        offsetContext,
                         currentTable.getSourceTableId(),
                         new SqlServerSchemaChangeEventEmitter(
                                 partition,
                                 offsetContext,
                                 currentTable,
                                 dataConnection.getTableSchemaFromTable(databaseName, currentTable),
+                                schema,
                                 SchemaChangeEventType.CREATE));
             }
 

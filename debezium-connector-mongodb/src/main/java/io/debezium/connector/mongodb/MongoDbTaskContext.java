@@ -11,6 +11,7 @@ import io.debezium.config.CommonConnectorConfig;
 import io.debezium.config.Configuration;
 import io.debezium.connector.common.CdcSourceTaskContext;
 import io.debezium.connector.mongodb.MongoDbConnectorConfig.CaptureMode;
+import io.debezium.connector.mongodb.connection.ConnectionContext;
 import io.debezium.spi.topic.TopicNamingStrategy;
 
 /**
@@ -29,7 +30,11 @@ public class MongoDbTaskContext extends CdcSourceTaskContext {
      * @param config the configuration
      */
     public MongoDbTaskContext(Configuration config) {
-        super(Module.contextName(), config.getString(CommonConnectorConfig.TOPIC_PREFIX), config.getString(MongoDbConnectorConfig.TASK_ID), Collections::emptySet);
+        super(Module.contextName(),
+                config.getString(CommonConnectorConfig.TOPIC_PREFIX),
+                config.getString(MongoDbConnectorConfig.TASK_ID),
+                new MongoDbConnectorConfig(config).getCustomMetricTags(),
+                Collections::emptySet);
 
         this.filters = new Filters(config);
         this.connectorConfig = new MongoDbConnectorConfig(config);

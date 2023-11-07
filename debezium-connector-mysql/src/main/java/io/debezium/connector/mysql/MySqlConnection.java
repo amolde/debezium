@@ -53,11 +53,14 @@ public class MySqlConnection extends JdbcConnection {
     private static final String SQL_SHOW_SESSION_VARIABLE_SSL_VERSION = "SHOW SESSION STATUS LIKE 'Ssl_version'";
     private static final String QUOTED_CHARACTER = "`";
 
-    protected static final String URL_PATTERN = "jdbc:mysql://${hostname}:${port}/?useInformationSchema=true&nullCatalogMeansCurrent=false&useUnicode=true&characterEncoding=UTF-8&characterSetResults=UTF-8&zeroDateTimeBehavior=CONVERT_TO_NULL&connectTimeout=${connectTimeout}";
+    protected static final String URL_PATTERN = "${protocol}://${hostname}:${port}/?useInformationSchema=true&nullCatalogMeansCurrent=false&useUnicode=true&characterEncoding=UTF-8&characterSetResults=UTF-8&zeroDateTimeBehavior=CONVERT_TO_NULL&connectTimeout=${connectTimeout}";
 
     private final Map<String, String> originalSystemProperties = new HashMap<>();
     private final MySqlConnectionConfiguration connectionConfig;
     private final MySqlFieldReader mysqlFieldReader;
+
+    // Tracks whether this connection is with MariaDB, calculated lazily as needed.
+    private Boolean isMariaDb;
 
     /**
      * Creates a new connection using the supplied configuration.
@@ -220,7 +223,7 @@ public class MySqlConnection extends JdbcConnection {
         try {
             return queryAndMap("SHOW GLOBAL VARIABLES LIKE 'GTID_MODE'", rs -> {
                 if (rs.next()) {
-                    return !"OFF".equalsIgnoreCase(rs.getString(2));
+                    return "ON".equalsIgnoreCase(rs.getString(2));
                 }
                 return false;
             });
@@ -426,6 +429,14 @@ public class MySqlConnection extends JdbcConnection {
         return OptionalLong.empty();
     }
 
+    public boolean isMariaDb() {
+        if (isMariaDb == null) {
+            final String version = querySystemVariables(SQL_SHOW_SYSTEM_VARIABLES).get("version");
+            isMariaDb = version.toLowerCase().contains("mariadb");
+        }
+        return isMariaDb;
+    }
+
     public boolean isTableIdCaseSensitive() {
         return !"0".equals(readMySqlSystemVariables().get(MySqlSystemVariables.LOWER_CASE_TABLE_NAMES));
     }
@@ -498,6 +509,7 @@ public class MySqlConnection extends JdbcConnection {
             final Configuration dbConfig = config
                     .edit()
                     .withDefault(MySqlConnectorConfig.PORT, MySqlConnectorConfig.PORT.defaultValue())
+                    .withDefault(MySqlConnectorConfig.JDBC_PROTOCOL, MySqlConnectorConfig.JDBC_PROTOCOL.defaultValue())
                     .build()
                     .subset(DATABASE_CONFIG_PREFIX, true)
                     .merge(config.subset(DRIVER_CONFIG_PREFIX, true));
@@ -524,9 +536,18 @@ public class MySqlConnection extends JdbcConnection {
 
             jdbcConfigBuilder.with(JDBC_PROPERTY_CONNECTION_TIME_ZONE, determineConnectionTimeZone(dbConfig));
 
+            // Set and remove options to prevent potential vulnerabilities
+            jdbcConfigBuilder
+                    .with("allowLoadLocalInfile", "false")
+                    .with("allowUrlInLocalInfile", "false")
+                    .with("autoDeserialize", false)
+                    .without("queryInterceptors");
+
             this.jdbcConfig = JdbcConfiguration.adapt(jdbcConfigBuilder.build());
-            String driverClassName = this.jdbcConfig.getString(MySqlConnectorConfig.JDBC_DRIVER);
-            factory = JdbcConnection.patternBasedFactory(MySqlConnection.URL_PATTERN, driverClassName, getClass().getClassLoader());
+            String driverClassName = this.config.getString(MySqlConnectorConfig.JDBC_DRIVER);
+            Field protocol = MySqlConnectorConfig.JDBC_PROTOCOL;
+
+            factory = JdbcConnection.patternBasedFactory(MySqlConnection.URL_PATTERN, driverClassName, getClass().getClassLoader(), protocol);
         }
 
         private static String determineConnectionTimeZone(final Configuration dbConfig) {

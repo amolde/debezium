@@ -56,6 +56,10 @@ public class TestHelper {
     public static final String INFINISPAN_HOST = "0.0.0.0";
     public static final String INFINISPAN_SERVER_LIST = INFINISPAN_HOST + ":" + INFINISPAN_HOTROD_PORT;
 
+    public static final String OPENLOGREPLICATOR_SOURCE = System.getProperty("openlogreplicator.source", "ORACLE");
+    public static final String OPENLOGREPLICATOR_HOST = System.getProperty("openlogreplicator.host", "localhost");
+    public static final String OPENLOGREPLICATOR_PORT = System.getProperty("openlogreplicator.port", "9000");
+
     /**
      * Key for schema parameter used to store a source column's type name.
      */
@@ -136,9 +140,19 @@ public class TestHelper {
         if (adapter().equals(ConnectorAdapter.XSTREAM)) {
             builder.withDefault(OracleConnectorConfig.XSTREAM_SERVER_NAME, "dbzxout");
         }
+        else if (adapter().equals(ConnectorAdapter.OLR)) {
+            builder.withDefault(OracleConnectorConfig.OLR_SOURCE, OPENLOGREPLICATOR_SOURCE);
+            builder.withDefault(OracleConnectorConfig.OLR_HOST, OPENLOGREPLICATOR_HOST);
+            builder.withDefault(OracleConnectorConfig.OLR_PORT, OPENLOGREPLICATOR_PORT);
+        }
         else {
             // Tests will always use the online catalog strategy due to speed.
             builder.withDefault(OracleConnectorConfig.LOG_MINING_STRATEGY, "online_catalog");
+
+            final Boolean readOnly = Boolean.parseBoolean(System.getProperty(OracleConnectorConfig.LOG_MINING_READ_ONLY.name()));
+            if (readOnly) {
+                builder.with(OracleConnectorConfig.LOG_MINING_READ_ONLY, readOnly);
+            }
 
             final String bufferTypeName = System.getProperty(OracleConnectorConfig.LOG_MINING_BUFFER_TYPE.name());
             final LogMiningBufferType bufferType = LogMiningBufferType.parse(bufferTypeName);
@@ -540,13 +554,14 @@ public class TestHelper {
         final String result = new org.infinispan.configuration.cache.ConfigurationBuilder()
                 .persistence()
                 .passivation(false)
-                .addSingleFileStore()
-                .segmented(false)
+                .addSoftIndexFileStore()
+                .segmented(true)
                 .preload(true)
                 .shared(false)
                 .fetchPersistentState(true)
                 .ignoreModifications(false)
-                .location("./target/data")
+                .dataLocation("./target/data")
+                .indexLocation("./target/data")
                 .build()
                 .toXMLString(cacheName);
         return result;
@@ -556,7 +571,7 @@ public class TestHelper {
         return "<distributed-cache name=\"" + cacheName + "\" statistics=\"true\">\n" +
                 "\t<encoding media-type=\"application/x-protostream\"/>\n" +
                 "\t<persistence passivation=\"false\">\n" +
-                "\t\t<file-store fetch-state=\"true\" read-only=\"false\" preload=\"true\" shared=\"false\" segmented=\"false\"/>\n" +
+                "\t\t<file-store read-only=\"false\" preload=\"true\" shared=\"false\" segmented=\"true\"/>\n" +
                 "\t</persistence>\n" +
                 "</distributed-cache>";
     }
@@ -572,6 +587,12 @@ public class TestHelper {
 
             builder.with(field, config);
         }
+
+        if (bufferType.isInfinispanEmbedded()) {
+            builder.with(OracleConnectorConfig.LOG_MINING_BUFFER_INFINISPAN_CACHE_GLOBAL,
+                    getDefaultInfinispanEmbeddedCacheConfig("global"));
+        }
+
         return builder;
     }
 

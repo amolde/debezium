@@ -13,17 +13,19 @@ import io.debezium.connector.AbstractSourceInfoStructMaker;
 
 public class MongoDbSourceInfoStructMaker extends AbstractSourceInfoStructMaker<SourceInfo> {
 
-    private final Schema schema;
+    private Schema schema;
 
-    public MongoDbSourceInfoStructMaker(String connector, String version, CommonConnectorConfig connectorConfig) {
-        super(connector, version, connectorConfig);
+    @Override
+    public void init(String connector, String version, CommonConnectorConfig connectorConfig) {
+        super.init(connector, version, connectorConfig);
         schema = commonSchemaBuilder()
-                .name(connectorConfig.schemaNameAdjustmentMode().createAdjuster().adjust("io.debezium.connector.mongo.Source"))
+                .name(connectorConfig.schemaNameAdjuster().adjust("io.debezium.connector.mongo.Source"))
                 .field(SourceInfo.REPLICA_SET_NAME, Schema.STRING_SCHEMA)
                 .field(SourceInfo.COLLECTION, Schema.STRING_SCHEMA)
                 .field(SourceInfo.ORDER, Schema.INT32_SCHEMA)
                 .field(SourceInfo.LSID, Schema.OPTIONAL_STRING_SCHEMA)
                 .field(SourceInfo.TXN_NUMBER, Schema.OPTIONAL_INT64_SCHEMA)
+                .field(SourceInfo.WALL_TIME, Schema.OPTIONAL_INT64_SCHEMA)
                 .build();
     }
 
@@ -42,6 +44,10 @@ public class MongoDbSourceInfoStructMaker extends AbstractSourceInfoStructMaker<
         if (sourceInfo.position().getChangeStreamSessionTxnId() != null) {
             struct.put(SourceInfo.LSID, sourceInfo.position().getChangeStreamSessionTxnId().lsid)
                     .put(SourceInfo.TXN_NUMBER, sourceInfo.position().getChangeStreamSessionTxnId().txnNumber);
+        }
+
+        if (sourceInfo.wallTime() != 0L) {
+            struct.put(SourceInfo.WALL_TIME, sourceInfo.wallTime());
         }
 
         return struct;

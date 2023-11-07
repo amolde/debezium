@@ -167,9 +167,8 @@ public class KafkaSchemaHistory extends AbstractSchemaHistory {
             .withDefault(Duration.ofSeconds(30).toMillis())
             .withValidation(Field::isPositiveInteger);
 
-    public static Field.Set ALL_FIELDS = Field.setOf(TOPIC, BOOTSTRAP_SERVERS, SchemaHistory.NAME,
-            RECOVERY_POLL_INTERVAL_MS, RECOVERY_POLL_ATTEMPTS, INTERNAL_CONNECTOR_CLASS, INTERNAL_CONNECTOR_ID,
-            KAFKA_QUERY_TIMEOUT_MS);
+    public static Field.Set ALL_FIELDS = Field.setOf(TOPIC, BOOTSTRAP_SERVERS, NAME, RECOVERY_POLL_INTERVAL_MS,
+            RECOVERY_POLL_ATTEMPTS, INTERNAL_CONNECTOR_CLASS, INTERNAL_CONNECTOR_ID, KAFKA_QUERY_TIMEOUT_MS);
 
     private static final String CONSUMER_PREFIX = CONFIGURATION_FIELD_PREFIX_STRING + "consumer.";
     private static final String PRODUCER_PREFIX = CONFIGURATION_FIELD_PREFIX_STRING + "producer.";
@@ -358,6 +357,7 @@ public class KafkaSchemaHistory extends AbstractSchemaHistory {
                 }
                 else {
                     LOGGER.debug("Processed {} records from database schema history", numRecordsProcessed);
+                    recoveryAttempts = 0;
                 }
             } while (lastProcessedOffset < endOffset - 1);
         }

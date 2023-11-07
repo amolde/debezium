@@ -10,6 +10,7 @@ import static io.debezium.config.CommonConnectorConfig.DRIVER_CONFIG_PREFIX;
 import static io.debezium.config.CommonConnectorConfig.TOPIC_PREFIX;
 import static io.debezium.relational.RelationalDatabaseConnectorConfig.COLUMN_EXCLUDE_LIST;
 import static io.debezium.relational.RelationalDatabaseConnectorConfig.COLUMN_INCLUDE_LIST;
+import static io.debezium.relational.RelationalDatabaseConnectorConfig.HOSTNAME;
 import static io.debezium.relational.RelationalDatabaseConnectorConfig.MSG_KEY_COLUMNS;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -26,6 +27,7 @@ import io.debezium.doc.FixFor;
 import io.debezium.function.Predicates;
 import io.debezium.relational.RelationalDatabaseConnectorConfig;
 import io.debezium.relational.history.SchemaHistory;
+import io.debezium.util.Collect;
 
 /**
  * @author Randall Hauch
@@ -265,6 +267,24 @@ public class ConfigurationTest {
     }
 
     @Test
+    @FixFor("DBZ-6840")
+    public void defaultDdlFilterShouldNotFilterMariaDBComments() {
+        String defaultDdlFilter = Configuration.create().build().getString(SchemaHistory.DDL_FILTER);
+        Predicate<String> ddlFilter = Predicates.includes(defaultDdlFilter, Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+        assertThat(ddlFilter.test("# Create the new ENTITY table which will be the parent of all other resource tables.\n" +
+                "CREATE TABLE IF NOT EXISTS ENTITY (\n" +
+                " ID BIGINT AUTO_INCREMENT PRIMARY KEY,\n" +
+                " ENTITY_UUID VARCHAR(255) NOT NULL,\n" +
+                " ENTITY_TYPE VARCHAR(255) NULL,\n" +
+                " CREATED_ON DATETIME(6)  NULL,\n" +
+                " UPDATED_ON DATETIME(6)  NULL,\n" +
+                " CREATED_BY VARCHAR(255) NULL,\n" +
+                " UPDATED_BY VARCHAR(255) NULL,\n" +
+                " CONSTRAINT UI_ENTITY_UUID UNIQUE (ENTITY_UUID)\n" +
+                ")")).isFalse();
+    }
+
+    @Test
     @FixFor("DBZ-1015")
     public void testMsgKeyColumnsField() {
         List<String> errorList;
@@ -340,6 +360,22 @@ public class ConfigurationTest {
     }
 
     @Test
+    @FixFor("DBZ-6156")
+    public void testHostnameValidation() {
+        config = Configuration.create().with(HOSTNAME, "").build();
+        assertThat(config.validate(Field.setOf(HOSTNAME)).get(HOSTNAME.name()).errorMessages().get(0))
+                .isEqualTo("The 'database.hostname' value is invalid: A value is required");
+
+        List<String> invalidHostnames = Collect.arrayListOf("~hostname", "hostname@", "host-*-name", "(hostname)", "hostname?inject_parameter=1234");
+        String errorMessage = " has invalid format (only the underscore, hyphen, dot and alphanumeric characters are allowed)";
+        invalidHostnames.stream().forEach(hostname -> {
+            config = Configuration.create().with(HOSTNAME, hostname).build();
+            List<String> errorList = config.validate(Field.setOf(HOSTNAME)).get(HOSTNAME.name()).errorMessages();
+            assertThat(errorList.get(0)).isEqualTo(Field.validationOutput(HOSTNAME, hostname + errorMessage));
+        });
+    }
+
+    @Test
     @FixFor("DBZ-5801")
     public void testConfigurationMerge() {
         config = Configuration.create()
@@ -353,5 +389,16 @@ public class ConfigurationTest {
 
         assertThat(dbConfig.keys().size()).isEqualTo(2);
         assertThat(dbConfig.getString("user")).isEqualTo("mysqluser");
+    }
+
+    @Test
+    @FixFor("DBZ-6864")
+    public void defaultDdlFilterShouldFilterOutRdsSetStatements() {
+        String defaultDdlFilter = Configuration.create().build().getString(SchemaHistory.DDL_FILTER);
+        Predicate<String> ddlFilter = Predicates.includes(defaultDdlFilter, Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+        assertThat(ddlFilter.test("SET STATEMENT max_statement_time=60 FOR DELETE FROM mysql.rds_sysinfo where name = 'innodb_txn_key'")).isTrue();
+        assertThat(ddlFilter.test(
+                "SET STATEMENT max_statement_time=60 FOR INSERT INTO mysql.rds_heartbeat2(id, value) values (1,1692866524004) ON DUPLICATE KEY UPDATE value = 1692866524004"))
+                .isTrue();
     }
 }

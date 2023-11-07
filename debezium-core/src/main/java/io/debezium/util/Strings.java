@@ -154,7 +154,7 @@ public final class Strings {
      * Represents a predicate (boolean-valued function) of one character argument.
      */
     @FunctionalInterface
-    public static interface CharacterPredicate {
+    public interface CharacterPredicate {
         /**
          * Evaluates this predicate on the given character argument.
          *
@@ -394,7 +394,7 @@ public final class Strings {
         return justifyLeft(original, length, padChar, false);
     }
 
-    public static enum Justify {
+    public enum Justify {
         LEFT,
         RIGHT,
         CENTER;
@@ -1118,7 +1118,7 @@ public final class Strings {
      * If a comma is part of expression then it can be prepended with <code>'\'</code> so
      * it will not act as a separator.
      */
-    private static class RegExSplitter implements Tokenizer {
+    public static class RegExSplitter implements Tokenizer {
 
         public static String[] split(String identifier) {
             TokenStream stream = new TokenStream(identifier, new RegExSplitter(), true);
