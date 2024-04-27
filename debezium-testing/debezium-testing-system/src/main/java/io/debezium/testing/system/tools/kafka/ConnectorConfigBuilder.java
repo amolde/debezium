@@ -11,8 +11,8 @@ import java.util.Map;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-import io.strimzi.api.kafka.model.KafkaConnector;
-import io.strimzi.api.kafka.model.KafkaConnectorBuilder;
+import io.strimzi.api.kafka.model.connector.KafkaConnector;
+import io.strimzi.api.kafka.model.connector.KafkaConnectorBuilder;
 
 /**
  *
@@ -75,6 +75,36 @@ public class ConnectorConfigBuilder {
         config.put("predicates", "TopicPredicate");
         config.put("predicates.TopicPredicate.type", "org.apache.kafka.connect.transforms.predicates.TopicNameMatches");
         config.put("predicates.TopicPredicate.pattern", topicNamePattern);
+
+        return this;
+    }
+
+    public ConnectorConfigBuilder addJdbcUnwrapSMT() {
+        addUnwrapSMT();
+        config.put("transforms.unwrap.type", "io.debezium.transforms.ExtractNewRecordState");
+        config.put("transforms.unwrap.drop.tombstones", "false");
+        config.put("transforms.unwrap.delete.handling.mode", "rewrite");
+        config.put("transforms.unwrap.add.fields", "table,lsn");
+        return this;
+    }
+
+    public ConnectorConfigBuilder addMongoUnwrapSMT() {
+        addUnwrapSMT();
+        config.put("transforms.unwrap.type", "io.debezium.connector.mongodb.transforms.ExtractNewDocumentState");
+        config.put("transforms.unwrap.drop.tombstones", "false");
+        config.put("transforms.unwrap.delete.handling.mode", "drop");
+        config.put("transforms.unwrap.add.fields", "collection");
+        return this;
+    }
+
+    private ConnectorConfigBuilder addUnwrapSMT() {
+        String current = config.get("transforms").toString();
+        if (current.isEmpty()) {
+            config.put("transforms", "unwrap");
+        }
+        else {
+            config.put("transforms", current + ",unwrap");
+        }
 
         return this;
     }

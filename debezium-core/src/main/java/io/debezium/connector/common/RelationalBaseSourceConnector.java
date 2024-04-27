@@ -10,7 +10,6 @@ import java.util.Map;
 
 import org.apache.kafka.common.config.Config;
 import org.apache.kafka.common.config.ConfigValue;
-import org.apache.kafka.connect.source.SourceConnector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -19,10 +18,10 @@ import io.debezium.relational.RelationalDatabaseConnectorConfig;
 import io.debezium.util.Strings;
 
 /**
- * Base class for Debezium's relational CDC {@link SourceConnector} implementations. Provides functionality common to
+ * Base class for Debezium's relational CDC {@link BaseSourceConnector} implementations. Provides functionality common to
  * all relational CDC connectors, such as validation.
  */
-public abstract class RelationalBaseSourceConnector extends SourceConnector {
+public abstract class RelationalBaseSourceConnector extends BaseSourceConnector {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(RelationalBaseSourceConnector.class);
 
@@ -50,6 +49,4 @@ public abstract class RelationalBaseSourceConnector extends SourceConnector {
      * Validates connection to database.
      */
     protected abstract void validateConnection(Map<String, ConfigValue> configValues, Configuration config);
-
-    protected abstract Map<String, ConfigValue> validateAllFields(Configuration config);
 }

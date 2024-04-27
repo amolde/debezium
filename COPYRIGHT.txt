@@ -22,6 +22,7 @@ Alexey Loubyansky
 Alexey Miroshnikov
 Alfusainey Jallow
 Alisa Houskova
+Amirmohammad Sadat Shokouhi
 Amit Sela
 Aman Garg
 Anatolii Popov
@@ -49,6 +50,7 @@ Anton Martynov
 Arik Cohen
 Arkoprabho Chakraborti
 artiship
+Arthur Le Ray
 Artur Gukasian
 Ashhar Hasan
 Ashique Ansari
@@ -56,6 +58,7 @@ Ashmeet Lamba
 Attila Szucs
 Avinash Vishwakarma
 Aykut Farsak
+baabgai
 Babur Duisenov
 Balázs Németh
 Balázs Sipos
@@ -79,6 +82,7 @@ Brandon Brown
 Brandon Maguire
 Brennan Vincent
 Breno Moreira
+Bue Von Hun
 Byron Ruth
 Camile Sing
 ccro
@@ -103,6 +107,7 @@ Christian Stein
 Christopher Burch
 Christopher Sang
 Chuck Ha
+Ciaran O'Reilly
 Claus Guttesen
 Claus Ibsen
 Clément Loiselet
@@ -144,6 +149,7 @@ Eero Koplimets
 Egyed Tamas
 Elan Hasson
 Eliran Agranovich
+Emil Lindström
 Emmanuel Brard
 Emre Akgün
 Emrul Islam
@@ -199,6 +205,8 @@ Jannik Steinmann
 Jason Schweier
 Jesse Ehrenzweig
 Jiabao Sun
+Jiri Kulhanek
+Jordan Pittier
 Juan Fiallo
 Jun Zhao
 Hady Willi
@@ -220,6 +228,7 @@ Hyunjin Oh
 Ian Axelrod
 Igor Gabaydulin
 Ilia Bogdanov
+Ilyas Ahsan
 Ingmar Fjolla
 Indra Shukla
 Inki Hwang
@@ -234,7 +243,9 @@ Ivan Vucina
 Jackey Zhang
 Jakub Cechacek
 James Gormley
+James Johnston
 Jan-Hendrik Dolling
+Jan Lieskovsky
 Jan Uyttenhove
 JapuDCret
 Jaromir Hamala
@@ -280,6 +291,7 @@ Keith Barber
 Keri Harris
 Kevin Pullin
 Kewei Shang
+Kosta Kostelnik
 Krizhan Mariampillai
 Kyley Jex
 Lairen Hightower
@@ -296,6 +308,7 @@ Liu Hanlin
 Liu Lang Wa
 Liz Chatman
 Lokesh Sanapalli
+Lourens Naudé
 Luca Scannapieco
 Luis Garcés-Erice
 Lukas Krejci
@@ -317,8 +330,10 @@ Mark Ducommun
 Mark Lambert
 Martin Medek
 Martin Sillence
+Martin Tosney
 Masazumi Kobayashi
 Matt Beary
+Matt Vance
 Matteo Capitanio
 Mathieu Rozieres
 Matthias Wessendorf
@@ -340,6 +355,7 @@ Ming Luo
 Mohamed Pudukulathan
 Mohammad Yousuf Minhaj Zia
 Moira Tagle
+Mostafa Ghadimi
 Muhammad Sufyian
 My Lang Pangzi
 Nancy Xu
@@ -393,6 +409,7 @@ Preethi Sadagopan
 pushpavanthar
 Qishang Zhong
 Raf Liwoch
+Rafael Câmara
 Raghava Ponnam
 Rajendra Dangwal
 Ram Satish
@@ -404,6 +421,7 @@ Raúl Tovar
 Renato Mefi
 René Kerner
 Robert Hana
+Robin Moffatt
 Roman Kuchar
 Roman Kudryashov
 Rotem Adhoh
@@ -412,6 +430,7 @@ Sahan Dilshan
 Sahap Asci
 René Kerner
 Rich O'Connell
+Richard Harrington
 Richard Kolkovich
 Robert Coup
 Robert Roldan
@@ -430,10 +449,13 @@ Sayed Mohammad Hossein Torabi
 Scofield Xu
 Sara Fonseca
 Sean Rooney
+Sean Wu
+Sebastiaan Knijnenburg
 Sebastian Bruckner
 Seo Jae-kwon
 Sergei Morozov
 Sergey Eizner
+Sergey Ivanov
 Shane Paul
 Shantanu Sharma
 Sherafudheen PM
@@ -447,6 +469,7 @@ SiuFay
 Siddhant Agnihotry
 Stanley Shyiko
 Stathis Souris
+Stavros Champilomatis
 Stefan Miklosovic
 Stephen Powis
 Steven Siahetiong
@@ -484,10 +507,13 @@ tooptoop4
 Tova Cohen
 Travis Elnicky
 Troy Gaines
+Tudor Plugaru
+V K
 Vadzim Ramanenka
+Vaibhav Kushwaha
 Vasily Ulianko
 Vedit Firat Arig
-Vincenzo Santoynastaso
+Vincenzo Santonastaso
 Victar Malinouski
 Victor Xiang
 Vivek Wassan
@@ -541,6 +567,7 @@ Andrei Isac
 M. Gökhan Akgül
 Mark Allanson
 Rahul Khanna
+Razvan Laurus
 Ronak Jain
 Pengwei Dou
 Zhongqiang Gong
@@ -561,3 +588,15 @@ Massimo Fortunat
 Vincenzo Santonastaso
 Matan Cohen
 Don Seiler
+Ahmed Rachid Hazourli
+Pavithrananda Prabhu
+حمود سمبول
+Peter Hamer
+Artem Shubovych
+leoloel
+Clifford Cheefoon
+Fr0z3Nn
+Xianming Zhou
+Akula
+Nick Golubev
+Selman Genç

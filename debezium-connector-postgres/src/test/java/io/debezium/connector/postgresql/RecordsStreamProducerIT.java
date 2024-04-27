@@ -23,6 +23,7 @@ import static org.junit.Assert.assertNotNull;
 
 import java.math.BigDecimal;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
@@ -71,6 +72,7 @@ import io.debezium.connector.postgresql.PostgresConnectorConfig.IntervalHandling
 import io.debezium.connector.postgresql.PostgresConnectorConfig.SchemaRefreshMode;
 import io.debezium.connector.postgresql.PostgresConnectorConfig.SnapshotMode;
 import io.debezium.connector.postgresql.connection.PostgresConnection;
+import io.debezium.connector.postgresql.connection.ReplicationConnection;
 import io.debezium.connector.postgresql.junit.SkipTestDependingOnDecoderPluginNameRule;
 import io.debezium.connector.postgresql.junit.SkipWhenDecoderPluginNameIs;
 import io.debezium.connector.postgresql.junit.SkipWhenDecoderPluginNameIsNot;
@@ -102,6 +104,7 @@ import io.debezium.time.MicroTime;
 import io.debezium.time.MicroTimestamp;
 import io.debezium.time.ZonedTime;
 import io.debezium.time.ZonedTimestamp;
+import io.debezium.util.HexConverter;
 import io.debezium.util.Stopwatch;
 import io.debezium.util.Testing;
 
@@ -144,7 +147,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
                     .with("assumeMinServerVersion.set", "9.4");
         }
 
-        Testing.Print.enable();
+        // Testing.Print.enable();
     }
 
     private void startConnector(Function<Configuration.Builder, Configuration.Builder> customConfig, boolean waitForSnapshot, Predicate<SourceRecord> isStopRecord)
@@ -152,7 +155,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         start(PostgresConnector.class, new PostgresConnectorConfig(customConfig.apply(TestHelper.defaultConfig()
                 .with(PostgresConnectorConfig.INCLUDE_UNKNOWN_DATATYPES, false)
                 .with(PostgresConnectorConfig.SCHEMA_EXCLUDE_LIST, "postgis")
-                .with(PostgresConnectorConfig.SNAPSHOT_MODE, waitForSnapshot ? SnapshotMode.INITIAL : SnapshotMode.NEVER))
+                .with(PostgresConnectorConfig.SNAPSHOT_MODE, waitForSnapshot ? SnapshotMode.INITIAL : SnapshotMode.NO_DATA))
                 .build()).getConfig(), isStopRecord);
         assertConnectorIsRunning();
         waitForStreamingToStart();
@@ -228,7 +231,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
     @Test
     @FixFor("DBZ-5014")
     public void shouldReceiveDeletesWithInfinityDate() throws Exception {
-        Testing.Print.enable();
+        // Testing.Print.enable();
         TestHelper.executeDDL("postgres_create_tables.ddl");
         TestHelper.execute("ALTER TABLE time_table REPLICA IDENTITY FULL");
         startConnector();
@@ -1385,12 +1388,12 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
     @Test
     @FixFor("DBZ-800")
     public void shouldReceiveHeartbeatAlsoWhenChangingNonWhitelistedTable() throws Exception {
-        Testing.Print.enable();
+        // Testing.Print.enable();
         startConnector(config -> config
                 .with(Heartbeat.HEARTBEAT_INTERVAL, "100")
                 .with(PostgresConnectorConfig.POLL_INTERVAL_MS, "50")
                 .with(PostgresConnectorConfig.TABLE_INCLUDE_LIST, "s1\\.b")
-                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NEVER),
+                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NO_DATA),
                 false);
         waitForStreamingToStart();
 
@@ -1450,7 +1453,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         startConnector(config -> config
                 .with(PostgresConnectorConfig.POLL_INTERVAL_MS, "50")
                 .with(PostgresConnectorConfig.TABLE_INCLUDE_LIST, "s1\\.b")
-                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NEVER),
+                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NO_DATA),
                 false);
         waitForStreamingToStart();
 
@@ -1755,7 +1758,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
     @Test
     @FixFor("DBZ-6122")
     public void shouldHandleToastedByteArrayColumn() throws Exception {
-        Testing.Print.enable();
+        // Testing.Print.enable();
         TestHelper.execute(
                 "DROP TABLE IF EXISTS test_toast_table;",
                 "CREATE TABLE test_toast_table (id SERIAL PRIMARY KEY);");
@@ -1798,6 +1801,33 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         Assertions.assertThat(byteaArray.get(0)).isEqualTo(DecoderDifferences.mandatoryToastedValueBinaryPlaceholder());
         Assertions.assertThat(after.schema().field("bytea_array").schema())
                 .isEqualTo(SchemaBuilder.array(Schema.OPTIONAL_BYTES_SCHEMA).optional().build());
+    }
+
+    @Test
+    public void shouldHandleToastedByteaColumnInHexMode() throws Exception {
+        TestHelper.execute(
+                "DROP TABLE IF EXISTS test_toast_table;",
+                "CREATE TABLE test_toast_table (id SERIAL PRIMARY KEY);");
+
+        startConnector(config -> config.with(CommonConnectorConfig.BINARY_HANDLING_MODE, BinaryHandlingMode.HEX), false);
+        final String toastedValue = RandomStringUtils.randomNumeric(10000);
+
+        String statement = "ALTER TABLE test_toast_table ADD COLUMN not_toast integer;"
+                + "ALTER TABLE test_toast_table ADD COLUMN bytea_ bytea;"
+                + "ALTER TABLE test_toast_table ALTER COLUMN bytea_ SET STORAGE EXTENDED;"
+                + "INSERT INTO test_toast_table (not_toast, bytea_) values (10,  '" + toastedValue + "'::bytea);";
+        consumer = testConsumer(1);
+        executeAndWait(statement);
+
+        // after record should contain the toasted value
+        assertValueField(consumer.remove(), "after/bytea_", HexConverter.convertToHexString(toastedValue.getBytes(StandardCharsets.UTF_8)));
+
+        statement = "UPDATE test_toast_table SET not_toast = 2;";
+
+        consumer.expects(1);
+        executeAndWait(statement);
+        // after update of toasted value record should contain the placeholder
+        assertValueField(consumer.remove(), "after/bytea_", DecoderDifferences.mandatoryToastedValuePlaceholder());
     }
 
     @Test
@@ -2018,6 +2048,382 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
     }
 
     @Test
+    @FixFor("DBZ-7193")
+    public void shouldHandleToastedArrayColumnForReplicaIdentityFullTable() throws Exception {
+        TestHelper.execute(
+                "DROP TABLE IF EXISTS test_toast_table;",
+                "CREATE TABLE test_toast_table (id SERIAL PRIMARY KEY);");
+
+        startConnector(Function.identity(), false);
+        assertConnectorIsRunning();
+        final String toastedValue = RandomStringUtils.randomAlphanumeric(10000);
+
+        // INSERT
+        String statement = "ALTER TABLE test_toast_table ADD COLUMN not_toast integer;"
+                + "ALTER TABLE test_toast_table ADD COLUMN mandatory_text_array TEXT[] NOT NULL;"
+                + "ALTER TABLE test_toast_table ALTER COLUMN mandatory_text_array SET STORAGE EXTENDED;"
+                + "ALTER TABLE test_toast_table REPLICA IDENTITY FULL;"
+                + "INSERT INTO test_toast_table (not_toast, mandatory_text_array) values (10, ARRAY ['" + toastedValue + "']);";
+        consumer = testConsumer(1);
+        executeAndWait(statement);
+
+        // after record should contain the toasted value
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 10),
+                new SchemaAndValueField("mandatory_text_array", SchemaBuilder.array(Schema.OPTIONAL_STRING_SCHEMA).build(), Arrays.asList(toastedValue))),
+                consumer.remove(),
+                Envelope.FieldName.AFTER);
+
+        // UPDATE
+        statement = "UPDATE test_toast_table SET not_toast = 20;";
+        consumer.expects(1);
+        executeAndWait(statement);
+        consumer.process(record -> {
+            assertWithTask(task -> {
+                Table tbl = ((PostgresConnectorTask) task).getTaskContext().schema().tableFor(TableId.parse("public.test_toast_table", false));
+                assertEquals(Arrays.asList("id", "not_toast", "mandatory_text_array"), tbl.retrieveColumnNames());
+            });
+        });
+        SourceRecord updatedRecord = consumer.remove();
+
+        // before and after record should contain the toasted value
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 10),
+                new SchemaAndValueField("mandatory_text_array", SchemaBuilder.array(Schema.OPTIONAL_STRING_SCHEMA).build(), Arrays.asList(toastedValue))),
+                updatedRecord, Envelope.FieldName.BEFORE);
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 20),
+                new SchemaAndValueField("mandatory_text_array", SchemaBuilder.array(Schema.OPTIONAL_STRING_SCHEMA).build(), Arrays.asList(toastedValue))),
+                updatedRecord, Envelope.FieldName.AFTER);
+    }
+
+    @Test
+    @FixFor("DBZ-7193")
+    public void shouldHandleToastedArrayColumnCharacterVaryingForReplicaIdentityFullTable() throws Exception {
+        TestHelper.execute(
+                "DROP TABLE IF EXISTS test_toast_table;",
+                "CREATE TABLE test_toast_table (id SERIAL PRIMARY KEY);");
+
+        startConnector(Function.identity(), false);
+        assertConnectorIsRunning();
+        final String toastedValue = RandomStringUtils.randomAlphanumeric(10000);
+
+        // INSERT
+        String statement = "ALTER TABLE test_toast_table ADD COLUMN not_toast integer;"
+                + "ALTER TABLE test_toast_table ADD COLUMN mandatory_text_array character varying(20000)[] NOT NULL;"
+                + "ALTER TABLE test_toast_table ALTER COLUMN mandatory_text_array SET STORAGE EXTENDED;"
+                + "ALTER TABLE test_toast_table REPLICA IDENTITY FULL;"
+                + "INSERT INTO test_toast_table (not_toast, mandatory_text_array) values (10, ARRAY ['" + toastedValue + "']);";
+        consumer = testConsumer(1);
+        executeAndWait(statement);
+
+        // after record should contain the toasted value
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 10),
+                new SchemaAndValueField("mandatory_text_array", SchemaBuilder.array(Schema.OPTIONAL_STRING_SCHEMA).build(), Arrays.asList(toastedValue))),
+                consumer.remove(),
+                Envelope.FieldName.AFTER);
+
+        // UPDATE
+        statement = "UPDATE test_toast_table SET not_toast = 20;";
+        consumer.expects(1);
+        executeAndWait(statement);
+        consumer.process(record -> {
+            assertWithTask(task -> {
+                Table tbl = ((PostgresConnectorTask) task).getTaskContext().schema().tableFor(TableId.parse("public.test_toast_table", false));
+                assertEquals(Arrays.asList("id", "not_toast", "mandatory_text_array"), tbl.retrieveColumnNames());
+            });
+        });
+        SourceRecord updatedRecord = consumer.remove();
+
+        // before and after record should contain the toasted value
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 10),
+                new SchemaAndValueField("mandatory_text_array", SchemaBuilder.array(Schema.OPTIONAL_STRING_SCHEMA).build(), Arrays.asList(toastedValue))),
+                updatedRecord, Envelope.FieldName.BEFORE);
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 20),
+                new SchemaAndValueField("mandatory_text_array", SchemaBuilder.array(Schema.OPTIONAL_STRING_SCHEMA).build(), Arrays.asList(toastedValue))),
+                updatedRecord, Envelope.FieldName.AFTER);
+    }
+
+    @Test
+    @FixFor("DBZ-7193")
+    public void shouldHandleToastedDateArrayColumnForReplicaIdentityFullTable() throws Exception {
+        TestHelper.execute(
+                "DROP TABLE IF EXISTS test_toast_table;",
+                "CREATE TABLE test_toast_table (id SERIAL PRIMARY KEY);");
+
+        startConnector(Function.identity(), false);
+        assertConnectorIsRunning();
+        List<Integer> intList = IntStream.range(1, 100000).boxed().map((x) -> 19338).collect(Collectors.toList());
+        final String toastedValue = intList.stream().map((x) -> "'2022-12-12'::date").collect(Collectors.joining(","));
+
+        // INSERT
+        String statement = "ALTER TABLE test_toast_table ADD COLUMN not_toast integer;"
+                + "ALTER TABLE test_toast_table ADD COLUMN date_array date[];"
+                + "ALTER TABLE test_toast_table ALTER COLUMN date_array SET STORAGE EXTENDED;"
+                + "ALTER TABLE test_toast_table REPLICA IDENTITY FULL;"
+                + "INSERT INTO test_toast_table (not_toast, date_array) values (10, ARRAY [" + toastedValue + "]);";
+        consumer = testConsumer(1);
+        executeAndWait(statement);
+
+        // after record should contain the toasted value
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 10),
+                new SchemaAndValueField("date_array",
+                        SchemaBuilder.array(SchemaBuilder.int32().name("io.debezium.time.Date").optional().version(1).build()).optional().build(),
+                        intList)),
+                consumer.remove(),
+                Envelope.FieldName.AFTER);
+
+        // UPDATE
+        statement = "UPDATE test_toast_table SET not_toast = 20;";
+        consumer.expects(1);
+        executeAndWait(statement);
+        consumer.process(record -> {
+            assertWithTask(task -> {
+                Table tbl = ((PostgresConnectorTask) task).getTaskContext().schema().tableFor(TableId.parse("public.test_toast_table", false));
+                assertEquals(Arrays.asList("id", "not_toast", "date_array"), tbl.retrieveColumnNames());
+            });
+        });
+        SourceRecord updatedRecord = consumer.remove();
+
+        // before and after record should contain the toasted value
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 10),
+                new SchemaAndValueField("date_array",
+                        SchemaBuilder.array(SchemaBuilder.int32().name("io.debezium.time.Date").optional().version(1).build()).optional().build(),
+                        intList)),
+                updatedRecord, Envelope.FieldName.BEFORE);
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 20),
+                new SchemaAndValueField("date_array",
+                        SchemaBuilder.array(SchemaBuilder.int32().name("io.debezium.time.Date").optional().version(1).build()).optional().build(),
+                        intList)),
+                updatedRecord, Envelope.FieldName.AFTER);
+    }
+
+    @Test
+    @FixFor("DBZ-7193")
+    public void shouldHandleToastedByteArrayColumnForReplicaIdentityFullTable() throws Exception {
+        TestHelper.execute(
+                "DROP TABLE IF EXISTS test_toast_table;",
+                "CREATE TABLE test_toast_table (id SERIAL PRIMARY KEY);");
+
+        startConnector(Function.identity(), false);
+        assertConnectorIsRunning();
+        List<Integer> intList = IntStream.range(1, 100000).boxed().map((x) -> 19338).collect(Collectors.toList());
+        final String toastedValue = RandomStringUtils.randomNumeric(10000);
+
+        // INSERT
+        String statement = "ALTER TABLE test_toast_table ADD COLUMN not_toast integer;"
+                + "ALTER TABLE test_toast_table ADD COLUMN bytea_array bytea[];"
+                + "ALTER TABLE test_toast_table ALTER COLUMN bytea_array SET STORAGE EXTENDED;"
+                + "ALTER TABLE test_toast_table REPLICA IDENTITY FULL;"
+                + "INSERT INTO test_toast_table (not_toast, bytea_array) values (10, ARRAY ['" + toastedValue + "'::bytea]);";
+        consumer = testConsumer(1);
+        executeAndWait(statement);
+
+        // after record should contain the toasted value
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 10),
+                new SchemaAndValueField("bytea_array",
+                        SchemaBuilder.array(Schema.OPTIONAL_BYTES_SCHEMA).optional().build(), Arrays.asList(ByteBuffer.wrap(toastedValue.getBytes())))),
+                consumer.remove(),
+                Envelope.FieldName.AFTER);
+
+        // UPDATE
+        statement = "UPDATE test_toast_table SET not_toast = 20;";
+        consumer.expects(1);
+        executeAndWait(statement);
+        consumer.process(record -> {
+            assertWithTask(task -> {
+                Table tbl = ((PostgresConnectorTask) task).getTaskContext().schema().tableFor(TableId.parse("public.test_toast_table", false));
+                assertEquals(Arrays.asList("id", "not_toast", "bytea_array"), tbl.retrieveColumnNames());
+            });
+        });
+        SourceRecord updatedRecord = consumer.remove();
+
+        // before and after record should contain the toasted value
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 10),
+                new SchemaAndValueField("bytea_array",
+                        SchemaBuilder.array(Schema.OPTIONAL_BYTES_SCHEMA).optional().build(),
+                        Arrays.asList(ByteBuffer.wrap(toastedValue.getBytes())))),
+                updatedRecord, Envelope.FieldName.BEFORE);
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 20),
+                new SchemaAndValueField("bytea_array",
+                        SchemaBuilder.array(Schema.OPTIONAL_BYTES_SCHEMA).optional().build(),
+                        Arrays.asList(ByteBuffer.wrap(toastedValue.getBytes())))),
+                updatedRecord, Envelope.FieldName.AFTER);
+    }
+
+    @Test
+    @FixFor("DBZ-7193")
+    public void shouldHandleToastedIntegerArrayColumnForReplicaIdentityFullTable() throws Exception {
+        TestHelper.execute(
+                "DROP TABLE IF EXISTS test_toast_table;",
+                "CREATE TABLE test_toast_table (id SERIAL PRIMARY KEY);");
+
+        startConnector(Function.identity(), false);
+        assertConnectorIsRunning();
+        List<Integer> intList = IntStream.range(1, 10000).boxed().collect(Collectors.toList());
+        final String toastedValue = intList.stream().map(String::valueOf)
+                .collect(Collectors.joining(","));
+
+        // INSERT
+        String statement = "ALTER TABLE test_toast_table ADD COLUMN not_toast integer;"
+                + "ALTER TABLE test_toast_table ADD COLUMN int_array int[];"
+                + "ALTER TABLE test_toast_table ALTER COLUMN int_array SET STORAGE EXTENDED;"
+                + "ALTER TABLE test_toast_table REPLICA IDENTITY FULL;"
+                + "INSERT INTO test_toast_table (not_toast, int_array) values (10, ARRAY [" + toastedValue + "]);";
+        consumer = testConsumer(1);
+        executeAndWait(statement);
+
+        // after record should contain the toasted value
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 10),
+                new SchemaAndValueField("int_array", SchemaBuilder.array(Schema.OPTIONAL_INT32_SCHEMA).optional().build(), intList)),
+                consumer.remove(),
+                Envelope.FieldName.AFTER);
+
+        // UPDATE
+        statement = "UPDATE test_toast_table SET not_toast = 20;";
+        consumer.expects(1);
+        executeAndWait(statement);
+        consumer.process(record -> {
+            assertWithTask(task -> {
+                Table tbl = ((PostgresConnectorTask) task).getTaskContext().schema().tableFor(TableId.parse("public.test_toast_table", false));
+                assertEquals(Arrays.asList("id", "not_toast", "int_array"), tbl.retrieveColumnNames());
+            });
+        });
+        SourceRecord updatedRecord = consumer.remove();
+
+        // before and after record should contain the toasted value
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 10),
+                new SchemaAndValueField("int_array", SchemaBuilder.array(Schema.OPTIONAL_INT32_SCHEMA).optional().build(), intList)),
+                updatedRecord, Envelope.FieldName.BEFORE);
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 20),
+                new SchemaAndValueField("int_array", SchemaBuilder.array(Schema.OPTIONAL_INT32_SCHEMA).optional().build(), intList)),
+                updatedRecord, Envelope.FieldName.AFTER);
+    }
+
+    @Test
+    @FixFor("DBZ-7193")
+    public void shouldHandleToastedBigIntArrayColumnForReplicaIdentityFullTable() throws Exception {
+        TestHelper.execute(
+                "DROP TABLE IF EXISTS test_toast_table;",
+                "CREATE TABLE test_toast_table (id SERIAL PRIMARY KEY);");
+
+        startConnector(Function.identity(), false);
+        assertConnectorIsRunning();
+        List<Long> bigintList = LongStream.range(1, 10000).boxed().collect(Collectors.toList());
+        final String toastedValue = bigintList.stream().map(String::valueOf)
+                .collect(Collectors.joining(","));
+
+        // INSERT
+        String statement = "ALTER TABLE test_toast_table ADD COLUMN not_toast integer;"
+                + "ALTER TABLE test_toast_table ADD COLUMN bigint_array bigint[];"
+                + "ALTER TABLE test_toast_table ALTER COLUMN bigint_array SET STORAGE EXTENDED;"
+                + "ALTER TABLE test_toast_table REPLICA IDENTITY FULL;"
+                + "INSERT INTO test_toast_table (not_toast, bigint_array) values (10, ARRAY [" + toastedValue + "]);";
+        consumer = testConsumer(1);
+        executeAndWait(statement);
+
+        // after record should contain the toasted value
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 10),
+                new SchemaAndValueField("bigint_array", SchemaBuilder.array(Schema.OPTIONAL_INT64_SCHEMA).optional().build(), bigintList)),
+                consumer.remove(),
+                Envelope.FieldName.AFTER);
+
+        // UPDATE
+        statement = "UPDATE test_toast_table SET not_toast = 20;";
+        consumer.expects(1);
+        executeAndWait(statement);
+        consumer.process(record -> {
+            assertWithTask(task -> {
+                Table tbl = ((PostgresConnectorTask) task).getTaskContext().schema().tableFor(TableId.parse("public.test_toast_table", false));
+                assertEquals(Arrays.asList("id", "not_toast", "bigint_array"), tbl.retrieveColumnNames());
+            });
+        });
+        SourceRecord updatedRecord = consumer.remove();
+
+        // before and after record should contain the toasted value
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 10),
+                new SchemaAndValueField("bigint_array", SchemaBuilder.array(Schema.OPTIONAL_INT64_SCHEMA).optional().build(), bigintList)),
+                updatedRecord, Envelope.FieldName.BEFORE);
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 20),
+                new SchemaAndValueField("bigint_array", SchemaBuilder.array(Schema.OPTIONAL_INT64_SCHEMA).optional().build(), bigintList)),
+                updatedRecord, Envelope.FieldName.AFTER);
+    }
+
+    @Test
+    @FixFor("DBZ-7193")
+    public void shouldHandleToastedUuidArrayColumnForReplicaIdentityFullTable() throws Exception {
+        TestHelper.execute(
+                "DROP TABLE IF EXISTS test_toast_table;",
+                "CREATE TABLE test_toast_table (id SERIAL PRIMARY KEY);");
+
+        startConnector(Function.identity(), false);
+        assertConnectorIsRunning();
+        final List<String> toastedValueList = Stream.generate(UUID::randomUUID).map(String::valueOf).limit(10000).collect(Collectors.toList());
+        final String[] toastedValueArray = toastedValueList.toArray(new String[toastedValueList.size()]);
+        final String toastedValueQuotedString = toastedValueList.stream().map(uuid_str -> ("'" + uuid_str + "'")).collect(Collectors.joining(","));
+
+        // INSERT
+        String statement = "ALTER TABLE test_toast_table ADD COLUMN not_toast integer;"
+                + "ALTER TABLE test_toast_table ADD COLUMN uuid_array uuid[];"
+                + "ALTER TABLE test_toast_table ALTER COLUMN uuid_array SET STORAGE EXTENDED;"
+                + "ALTER TABLE test_toast_table REPLICA IDENTITY FULL;"
+                + "INSERT INTO test_toast_table (not_toast, uuid_array) "
+                + "VALUES (10, ARRAY [" + toastedValueQuotedString + "]::uuid[]);";
+        consumer = testConsumer(1);
+        executeAndWait(statement);
+
+        // after record should contain the toasted value
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 10),
+                new SchemaAndValueField("uuid_array",
+                        SchemaBuilder.array(io.debezium.data.Uuid.builder().optional().build()).optional().build(),
+                        Arrays.asList(toastedValueArray))),
+                consumer.remove(),
+                Envelope.FieldName.AFTER);
+
+        // UPDATE
+        statement = "UPDATE test_toast_table SET not_toast = 20;";
+        consumer.expects(1);
+        executeAndWait(statement);
+        consumer.process(record -> {
+            assertWithTask(task -> {
+                Table tbl = ((PostgresConnectorTask) task).getTaskContext().schema().tableFor(TableId.parse("public.test_toast_table", false));
+                assertEquals(Arrays.asList("id", "not_toast", "uuid_array"), tbl.retrieveColumnNames());
+            });
+        });
+        SourceRecord updatedRecord = consumer.remove();
+
+        // before and after record should contain the toasted value
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 10),
+                new SchemaAndValueField("uuid_array",
+                        SchemaBuilder.array(io.debezium.data.Uuid.builder().optional().build()).optional().build(),
+                        Arrays.asList(toastedValueArray))),
+                updatedRecord, Envelope.FieldName.BEFORE);
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 20),
+                new SchemaAndValueField("uuid_array",
+                        SchemaBuilder.array(io.debezium.data.Uuid.builder().optional().build()).optional().build(),
+                        Arrays.asList(toastedValueArray))),
+                updatedRecord, Envelope.FieldName.AFTER);
+    }
+
+    @Test
     @FixFor("DBZ-1029")
     public void shouldReceiveChangesForTableWithoutPrimaryKey() throws Exception {
         TestHelper.execute(
@@ -2093,6 +2499,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
 
     @Test()
     @FixFor("DBZ-1181")
+    @SkipWhenDecoderPluginNameIs(value = PGOUTPUT, reason = "Pgoutput does not dispatch events on schema changes alone")
     public void testEmptyChangesProducesHeartbeat() throws Exception {
         // the low heartbeat interval should make sure that a heartbeat message is emitted after each change record
         // received from Postgres
@@ -2226,7 +2633,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
     @Test
     @FixFor("DBZ-1824")
     public void stopInTheMiddleOfTxAndResume() throws Exception {
-        Testing.Print.enable();
+        // Testing.Print.enable();
         final int numberOfEvents = 50;
         final int STOP_ID = 20;
 
@@ -2276,7 +2683,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
     @Test
     @FixFor("DBZ-2397")
     public void restartConnectorInTheMiddleOfUncommittedTx() throws Exception {
-        Testing.Print.enable();
+        // Testing.Print.enable();
 
         final PostgresConnection tx1Connection = TestHelper.create();
         tx1Connection.setAutoCommit(false);
@@ -2319,7 +2726,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
     @Test
     @FixFor("DBZ-1730")
     public void shouldStartConsumingFromSlotLocation() throws Exception {
-        Testing.Print.enable();
+        // Testing.Print.enable();
 
         startConnector(config -> config
                 .with(PostgresConnectorConfig.DROP_SLOT_ON_STOP, false)
@@ -2336,7 +2743,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
                 "INSERT INTO test_table (text) VALUES ('insert4')");
         startConnector(config -> config
                 .with(PostgresConnectorConfig.DROP_SLOT_ON_STOP, true)
-                .with(PostgresConnectorConfig.SNAPSHOT_MODE, PostgresConnectorConfig.SnapshotMode.NEVER)
+                .with(PostgresConnectorConfig.SNAPSHOT_MODE, PostgresConnectorConfig.SnapshotMode.NO_DATA)
                 .with(EmbeddedEngineConfig.OFFSET_STORAGE, MemoryOffsetBackingStore.class), false);
 
         consumer.expects(3);
@@ -2508,7 +2915,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         startConnector(config -> config
                 .with(PostgresConnectorConfig.DECIMAL_HANDLING_MODE, DecimalHandlingMode.DOUBLE)
                 .with(PostgresConnectorConfig.INCLUDE_UNKNOWN_DATATYPES, true)
-                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NEVER)
+                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NO_DATA)
                 .with(PostgresConnectorConfig.TABLE_INCLUDE_LIST, "public.alias_table")
                 .with("column.propagate.source.type", "public.alias_table.salary3"),
                 false);
@@ -2550,7 +2957,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         startConnector(config -> config
                 .with(PostgresConnectorConfig.DECIMAL_HANDLING_MODE, DecimalHandlingMode.DOUBLE)
                 .with(PostgresConnectorConfig.INCLUDE_UNKNOWN_DATATYPES, true)
-                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NEVER)
+                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NO_DATA)
                 .with(PostgresConnectorConfig.TABLE_INCLUDE_LIST, "public.alias_table"),
                 false);
 
@@ -2582,7 +2989,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         startConnector(config -> config
                 .with(PostgresConnectorConfig.DECIMAL_HANDLING_MODE, DecimalHandlingMode.DOUBLE)
                 .with(PostgresConnectorConfig.INCLUDE_UNKNOWN_DATATYPES, true)
-                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NEVER)
+                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NO_DATA)
                 .with(PostgresConnectorConfig.TABLE_INCLUDE_LIST, "public.alias_table")
                 .with("column.propagate.source.type", "public.alias_table.value"), false);
 
@@ -2615,7 +3022,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         startConnector(config -> config
                 .with(PostgresConnectorConfig.DECIMAL_HANDLING_MODE, DecimalHandlingMode.DOUBLE)
                 .with(PostgresConnectorConfig.INCLUDE_UNKNOWN_DATATYPES, true)
-                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NEVER)
+                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NO_DATA)
                 .with(PostgresConnectorConfig.TABLE_INCLUDE_LIST, "public.alias_table"),
                 false);
 
@@ -2773,7 +3180,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         TestHelper.execute("CREATE TABLE enum_table (pk SERIAL, PRIMARY KEY (pk));");
         startConnector(config -> config
                 .with(PostgresConnectorConfig.INCLUDE_UNKNOWN_DATATYPES, true)
-                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NEVER)
+                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NO_DATA)
                 .with("column.propagate.source.type", "public.enum_table.value")
                 .with(PostgresConnectorConfig.TABLE_INCLUDE_LIST, "public.enum_table"), false);
 
@@ -2810,7 +3217,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         TestHelper.execute("CREATE TABLE enum_table (pk SERIAL, PRIMARY KEY (pk));");
         startConnector(config -> config
                 .with(PostgresConnectorConfig.INCLUDE_UNKNOWN_DATATYPES, true)
-                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NEVER)
+                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NO_DATA)
                 .with("column.propagate.source.type", "public.enum_table.value")
                 .with(PostgresConnectorConfig.TABLE_INCLUDE_LIST, "public.enum_table"), false);
 
@@ -2849,7 +3256,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         TestHelper.execute("CREATE TABLE enum_array_table (pk SERIAL, PRIMARY KEY (pk));");
         startConnector(config -> config
                 .with(PostgresConnectorConfig.INCLUDE_UNKNOWN_DATATYPES, false)
-                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NEVER)
+                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NO_DATA)
                 .with("column.propagate.source.type", "public.enum_array_table.value")
                 .with(PostgresConnectorConfig.TABLE_INCLUDE_LIST, "public.enum_array_table"), false);
 
@@ -2912,7 +3319,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
                 + "timestamptza timestamptz[] NOT NULL, primary key(pk));");
         startConnector(config -> config
                 .with(PostgresConnectorConfig.INCLUDE_UNKNOWN_DATATYPES, false)
-                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NEVER)
+                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NO_DATA)
                 .with(PostgresConnectorConfig.TABLE_INCLUDE_LIST, "public.time_array_table"), false);
 
         waitForStreamingToStart();
@@ -2977,7 +3384,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         TestHelper.execute("CREATE TABLE enum_table (pk SERIAL, data varchar(25) NOT NULL, value test_type NOT NULL DEFAULT 'V1', PRIMARY KEY (pk));");
         startConnector(config -> config
                 .with(PostgresConnectorConfig.INCLUDE_UNKNOWN_DATATYPES, false)
-                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NEVER)
+                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NO_DATA)
                 .with("column.propagate.source.type", "public.enum_table.value")
                 .with(PostgresConnectorConfig.TABLE_INCLUDE_LIST, "public.enum_table"), false);
 
@@ -3169,7 +3576,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         TestHelper.execute("CREATE TABLE test_table (id SERIAL, c1 INT, c2 INT, c3a NUMERIC(5,2), c3b VARCHAR(128), f1 float(10), f2 decimal(8,4), primary key (id));");
 
         startConnector(config -> config
-                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NEVER)
+                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NO_DATA)
                 .with("datatype.propagate.source.type", ".+\\.NUMERIC,.+\\.VARCHAR,.+\\.FLOAT4"), false);
 
         waitForStreamingToStart();
@@ -3380,12 +3787,66 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
     }
 
     @Test()
-    @FixFor("DBZ-6635")
+    @FixFor({ "DBZ-6635", "DBZ-7316" })
     public void testSendingHeartbeatsWithoutWalUpdates() throws Exception {
-        startConnector(config -> config
-                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NEVER)
-                .with(Heartbeat.HEARTBEAT_INTERVAL, "100"));
+        Function<Configuration.Builder, Configuration.Builder> configMapper = config -> config
+                .with(PostgresConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NO_DATA)
+                .with(Heartbeat.HEARTBEAT_INTERVAL, "100")
+                .with(PostgresConnectorConfig.DROP_SLOT_ON_STOP, false);
 
+        // Start and stop the connector to ensure that the replication slot is created, and also
+        // to test that some initial heartbeats are created (DBZ-6635). Note that even though we
+        // aren't explicitly making any database changes to stream here, PG often will have some
+        // WAL activity to consume anyway that the searchWalPosition function will find.
+        startConnector(configMapper);
+        waitForStreamingToStart();
+        waitForSeveralHeartbeats();
+        stopConnector();
+
+        // Completely drain any remaining records from the first connector start, so that we are
+        // starting completely fresh with the connector restart.
+        consumeAvailableRecords(null);
+
+        // Also make sure that the PG replication slot is COMPLETELY CLEARED. (While manually reproducing DBZ-7316
+        // it was noted that sometimes there is still WAL to consume after the connector is stopped. So this is just
+        // being extra-safe that the next portion of the test really tests with an empty WAL to consume).
+        TestHelper.execute(getReplicationSlotChangesQuery());
+        try (PostgresConnection connection = TestHelper.create()) {
+            // Assert that the previous statement did indeed clear out the pending changes in the replication slot
+            String query = String.format("SELECT count(*) AS change_count FROM (%s) AS changes", getReplicationSlotChangesQuery());
+            long changeCount = connection.queryAndMap(
+                    query,
+                    rs -> {
+                        assertThat(rs.next()).isTrue();
+                        return rs.getLong(1);
+                    });
+            assertThat(changeCount).isEqualTo(0);
+        }
+
+        // Start the connector again. This time, we're resuming from an existing replication slot,
+        // so the searchWalPosition function will be looking for a place to resume. We need to
+        // test that the loop in searchWalPosition is emitting heartbeats (DBZ-7316) when there
+        // is no WAL to consume (since we just cleared it out and asserted there was none).
+        startConnector(configMapper);
+        waitForSeveralHeartbeats();
+
+        // Manual cleanup, since DROP_SLOT_ON_STOP is false
+        stopConnector();
+        TestHelper.dropDefaultReplicationSlot();
+        TestHelper.dropPublication();
+    }
+
+    private void assertHeartBeatRecord(SourceRecord heartbeat) {
+        assertEquals("__debezium-heartbeat." + TestHelper.TEST_SERVER, heartbeat.topic());
+
+        Struct key = (Struct) heartbeat.key();
+        assertThat(key.get("serverName")).isEqualTo(TestHelper.TEST_SERVER);
+
+        Struct value = (Struct) heartbeat.value();
+        assertThat(value.getInt64("ts_ms")).isLessThanOrEqualTo(Instant.now().toEpochMilli());
+    }
+
+    private void waitForSeveralHeartbeats() {
         final AtomicInteger heartbeatCount = new AtomicInteger();
         Awaitility.await().atMost(10, TimeUnit.SECONDS).until(() -> {
             final SourceRecord record = consumeRecord();
@@ -3399,14 +3860,16 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         });
     }
 
-    private void assertHeartBeatRecord(SourceRecord heartbeat) {
-        assertEquals("__debezium-heartbeat." + TestHelper.TEST_SERVER, heartbeat.topic());
-
-        Struct key = (Struct) heartbeat.key();
-        assertThat(key.get("serverName")).isEqualTo(TestHelper.TEST_SERVER);
-
-        Struct value = (Struct) heartbeat.value();
-        assertThat(value.getInt64("ts_ms")).isLessThanOrEqualTo(Instant.now().toEpochMilli());
+    private String getReplicationSlotChangesQuery() {
+        switch (TestHelper.decoderPlugin()) {
+            case DECODERBUFS:
+                return "SELECT pg_logical_slot_get_binary_changes('" + ReplicationConnection.Builder.DEFAULT_SLOT_NAME + "', " +
+                        "NULL, NULL)";
+            case PGOUTPUT:
+                return "SELECT pg_logical_slot_get_binary_changes('" + ReplicationConnection.Builder.DEFAULT_SLOT_NAME + "', " +
+                        "NULL, NULL, 'proto_version', '1', 'publication_names', '" + ReplicationConnection.Builder.DEFAULT_PUBLICATION_NAME + "')";
+        }
+        throw new UnsupportedOperationException("Test must be updated for new logical decoder type.");
     }
 
     private void assertInsert(String statement, List<SchemaAndValueField> expectedSchemaAndValuesByColumn) {

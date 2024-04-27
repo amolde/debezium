@@ -9,6 +9,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 import org.apache.kafka.common.config.ConfigDef;
+import org.apache.kafka.connect.components.Versioned;
 import org.apache.kafka.connect.connector.ConnectRecord;
 import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Schema;
@@ -25,10 +26,11 @@ import org.slf4j.LoggerFactory;
 
 import io.debezium.common.annotation.Incubating;
 import io.debezium.config.Configuration;
+import io.debezium.connector.mongodb.Module;
 import io.debezium.connector.mongodb.transforms.ExtractNewDocumentState;
 import io.debezium.connector.mongodb.transforms.MongoDataConverter;
-import io.debezium.data.Envelope;
 import io.debezium.time.Timestamp;
+import io.debezium.transforms.ConnectRecordUtil;
 import io.debezium.transforms.outbox.EventRouterConfigDefinition;
 import io.debezium.transforms.outbox.EventRouterDelegate;
 
@@ -38,7 +40,7 @@ import io.debezium.transforms.outbox.EventRouterDelegate;
  * @author Sungho Hwang
  */
 @Incubating
-public class MongoEventRouter<R extends ConnectRecord<R>> implements Transformation<R> {
+public class MongoEventRouter<R extends ConnectRecord<R>> implements Transformation<R>, Versioned {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(MongoEventRouter.class);
 
@@ -54,7 +56,7 @@ public class MongoEventRouter<R extends ConnectRecord<R>> implements Transformat
     private String fieldPayload;
     private boolean expandPayload;
 
-    private final ExtractField<R> afterExtractor = new ExtractField.Value<>();
+    private ExtractField<R> afterExtractor;
     private final EventRouterDelegate<R> eventRouterDelegate = new EventRouterDelegate<>();
 
     @Override
@@ -87,15 +89,17 @@ public class MongoEventRouter<R extends ConnectRecord<R>> implements Transformat
         expandPayload = config.getBoolean(MongoEventRouterConfigDefinition.EXPAND_JSON_PAYLOAD);
         fieldPayload = config.getString(MongoEventRouterConfigDefinition.FIELD_PAYLOAD);
 
-        final Map<String, String> afterExtractorConfig = new HashMap<>();
-        afterExtractorConfig.put("field", Envelope.FieldName.AFTER);
-
-        afterExtractor.configure(afterExtractorConfig);
+        afterExtractor = ConnectRecordUtil.extractAfterDelegate();
 
         // Convert configuration fields from MongoDB Outbox Event Router to SQL Outbox Event Router's
         Map<String, ?> convertedConfigMap = convertConfigMap(configMap);
 
         eventRouterDelegate.configure(convertedConfigMap);
+    }
+
+    @Override
+    public String version() {
+        return Module.version();
     }
 
     /**

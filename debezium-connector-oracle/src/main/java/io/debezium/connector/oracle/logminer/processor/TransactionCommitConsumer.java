@@ -142,6 +142,22 @@ public class TransactionCommitConsumer implements AutoCloseable, BlockingConsume
         String rowId = rowIdFromEvent(table, event);
         RowState rowState = rows.get(rowId);
         DmlEvent accumulatorEvent = (null == rowState) ? null : rowState.event;
+
+        // DBZ-6963
+        // This short-circuits the commit consumer's accumulation logic by assessing whether the
+        // table has any LOB columns (clob, blob, or xml). If the table does not, then there is
+        // no need to perform any of these steps as it should never be eligible for merging.
+        final List<Column> lobColumns = schema.getLobColumnsForTable(table.id());
+        if (lobColumns.isEmpty()) {
+            // There should never be a use case where the accumulator event is not null in this code
+            // path because given that the table has no LOB columns, it won't ever be added to the
+            // queue with the logic below. Therefore, there is no need to attempt to dispatch the
+            // accumulator as it should be null.
+            LOGGER.debug("\tEvent for table {} has no LOB columns, dispatching.", table.id());
+            dispatchChangeEvent(event);
+            return;
+        }
+
         if (!tryMerge(accumulatorEvent, event)) {
             prepareAndDispatch(accumulatorEvent);
             if (rowId.equals(currentLobDetails.rowId)) {
@@ -216,7 +232,10 @@ public class TransactionCommitConsumer implements AutoCloseable, BlockingConsume
 
         final XmlUnderConstruction xml = (XmlUnderConstruction) getConstructable(currentXmlDetails);
         try {
-            xml.add(new XmlFragment(event));
+            final XmlWriteEvent writeEvent = (XmlWriteEvent) event;
+            if (!Objects.isNull(writeEvent.getXml())) {
+                xml.add(new XmlFragment(writeEvent));
+            }
         }
         catch (DebeziumException exception) {
             LOGGER.warn("\tInvalid XML manipulation event: {} ; ignoring {} {}", exception, event.getEventType(), event);
@@ -753,12 +772,11 @@ public class TransactionCommitConsumer implements AutoCloseable, BlockingConsume
     }
 
     static class XmlFragment extends Fragment {
-        XmlFragment(final LogMinerEvent event) {
+        XmlFragment(final XmlWriteEvent event) {
             if (EventType.XML_WRITE != event.getEventType()) {
                 throw new IllegalArgumentException("can only construct XmlFragments from XML_WRITE events");
             }
-            final XmlWriteEvent writeEvent = (XmlWriteEvent) event;
-            this.data = writeEvent.getXml();
+            this.data = event.getXml();
         }
 
         XmlFragment(String data) {

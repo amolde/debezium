@@ -13,12 +13,6 @@ ifdef::community[]
 
 toc::[]
 
-[NOTE]
-====
-This connector is currently in an incubating state. In future versions, we might change the exact semantics, configuration options, and so forth, depending on the feedback that we receive.
-Please let us know if you encounter any problems.
-====
-
 [[jdbc-overview]]
 == Overview
 endif::community[]
@@ -566,21 +560,51 @@ The following example shows a JSON request for registering an instance of the {p
     }
 }
 ----
-<1> The name that is assigned to the connector when you register it with Kafka Connect service.
-<2> The name of the JDBC sink connector class.
-<3> The maximum number of tasks to create for this connector.
-<4> The JDBC URL that the connector uses to connect to the sink database that it writes to.
-<5> The name of the database user used for authentication.
-<6> The password of the database user used for authentication.
-<7> The xref:jdbc-property-insert-mode[insert.mode] that the connector uses.
-<8> Enables the deletion of records in the database.
+Descriptions of JDBC connector configuration settings
+[cols="1,7",options="header",subs="+attributes"]
+|===
+|Item |Description
+
+|1
+|The name that is assigned to the connector when you register it with Kafka Connect service.
+
+|2
+|The name of the JDBC sink connector class.
+
+|3
+|The maximum number of tasks to create for this connector.
+
+|4
+|The JDBC URL that the connector uses to connect to the sink database that it writes to.
+
+|5
+|The name of the database user that is used for authentication.
+
+|6
+|The password of the database user used for authentication.
+
+|7
+|The xref:jdbc-property-insert-mode[insert.mode] that the connector uses.
+
+|8
+|Enables the deletion of records in the database.
 For more information, see the xref:jdbc-property-delete-enabled[delete.enabled] configuration property.
-<9> Specifies the method used to resolve primary key columns.
+
+|9
+|Specifies the method used to resolve primary key columns.
 For more information, see the xref:jdbc-property-primary-key-mode[primary.key.mode] configuration property.
-<10> Enables the connector to evolve the destination database's schema.
+
+|10
+|Enables the connector to evolve the destination database's schema.
 For more information, see the xref:jdbc-property-schema-evolution[schema.evolution] configuration property.
-<11> Specifies the timezone used when writing temporal field types.
-<12> List of topics to consume, separated by commas.
+
+|11
+|Specifies the timezone used when writing temporal field types.
+
+|12
+|List of topics to consume, separated by commas.
+
+|===
 
 For a complete list of configuration properties that you can set for the {prodname} JDBC connector, see xref:jdbc-connector-properties[JDBC connector properties].
 
@@ -647,6 +671,10 @@ Do not use this property in combination with the xref:jdbc-property-connection-t
 |===
 |Property |Default |Description
 
+|[[jdbc-property-connection-provider]]<<jdbc-property-connection-provider, `+connection.provider+`>>
+|`org.hibernate.c3p0.internal.C3P0ConnectionProvider`
+|The connection provider implementation to use.
+
 |[[jdbc-property-connection-url]]<<jdbc-property-connection-url, `+connection.url+`>>
 |No default
 |The JDBC connection URL used to connect to the database.
@@ -663,7 +691,7 @@ Do not use this property in combination with the xref:jdbc-property-connection-t
 |`5`
 |Specifies the minimum number of connections in the pool.
 
-|[[jdbc-property-connection-pool-max-size]]<<jdbc-property-connection-pool-max-size, `+connection.pool.min_size+`>>
+|[[jdbc-property-connection-pool-max-size]]<<jdbc-property-connection-pool-max-size, `+connection.pool.max_size+`>>
 |`32`
 |Specifies the maximum number of concurrent connections that the pool maintains.
 
@@ -778,6 +806,31 @@ The default is `public`; however, if the PostGIS extension was installed in anot
 |`false`
 |Specifies whether the connector automatically sets an `IDENTITY_INSERT` before an `INSERT` or `UPSERT` operation into the identity column of SQL Server tables, and then unsets it immediately after the operation.
 When the default setting (`false`) is in effect, an `INSERT` or `UPSERT` operation into the `IDENTITY` column of a table results in a SQL exception.
+
+|[[jdbc-property-batch-size]]<<jdbc-property-batch-size, `+batch.size+`>>
+|`500`
+|Specifies how many records to attempt to batch together into the destination table.
+
+[NOTE]
+====
+Note that if you set `_consumer.max.poll.records_` in the Connect worker properties to a value lower than `_batch.size_`, batch processing will be caped by `_consumer.max.poll.records_` and the desired `_batch.size_` won’t be reached.
+You can also configure the connector’s underlying consumer’s `_max.poll.records_` using `_consumer.override.max.poll.records_` in the connector configuration.
+====
+
+|[[jdbc-property-field-include-list]]<<jdbc-property-field-include-list, `+field.include.list+`>>
+|_empty string_
+|An optional, comma-separated list of field names that match the fully-qualified names of fields to include from the change event value.
+Fully-qualified names for fields are of the form `_fieldName_` or `_topicName_:_fieldName_`. +
+ +
+If you include this property in the configuration, do not set the `field.exclude.list` property.
+
+|[[jdbc-property-field-exclude-list]]<<jdbc-property-field-exclude-list, `+field.exclude.list+`>>
+|_empty string_
+|An optional, comma-separated list of field names that match the fully-qualified names of fields to exclude from the change event value.
+Fully-qualified names for fields are of the form `_fieldName_` or `_topicName_:_fieldName_`. +
+ +
+If you include this property in the configuration, do not set the `field.include.list` property.
+
 |===
 
 [[jdbc-connector-properties-extendable]]

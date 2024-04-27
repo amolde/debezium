@@ -26,16 +26,11 @@ public class RecordAndMetadataHeaderImpl extends RecordAndMetadataBaseImpl imple
     private final MetadataSource metadataSource;
     private final JsonConverter jsonHeaderConverter;
 
-    public RecordAndMetadataHeaderImpl(Struct record, Schema dataSchema, Headers headers, MetadataSource metadataSource, JsonConverter jsonHeaderConverter) {
-        super(record, dataSchema);
+    public RecordAndMetadataHeaderImpl(Struct record, Schema originalDataSchema, Headers headers, MetadataSource metadataSource, JsonConverter jsonHeaderConverter) {
+        super(record, originalDataSchema);
         this.headers = headers;
         this.metadataSource = metadataSource;
         this.jsonHeaderConverter = jsonHeaderConverter;
-    }
-
-    @Override
-    public Schema dataSchema(String... dataFields) {
-        return getValueFromHeaderOrByDefault(metadataSource.global(), null, null, () -> super.dataSchema, () -> super.dataSchema(dataFields));
     }
 
     @Override
@@ -70,6 +65,16 @@ public class RecordAndMetadataHeaderImpl extends RecordAndMetadataBaseImpl imple
             Schema ts_msSchema = this.source().schema().field(Envelope.FieldName.TIMESTAMP).schema();
             return new SchemaAndValue(ts_msSchema, ts_ms);
         }, super::timestamp);
+    }
+
+    @Override
+    public String dataSchemaName() {
+        return getValueFromHeaderOrByDefault(metadataSource.dataSchemaName(), CloudEventsMaker.DATA_SCHEMA_NAME_PARAM, false, null, super::dataSchemaName);
+    }
+
+    @Override
+    public Schema dataSchema(String... dataFields) {
+        return getValueFromHeaderOrByDefault(metadataSource.global(), null, null, super::dataSchema, () -> super.dataSchema(dataFields));
     }
 
     private <T> T getValueFromHeaderOrByDefault(MetadataSourceValue metadataSourceValue,

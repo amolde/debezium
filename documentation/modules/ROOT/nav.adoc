@@ -20,7 +20,8 @@
 ** xref:connectors/cassandra.adoc[Cassandra]
 ** xref:connectors/vitess.adoc[Vitess]
 ** xref:connectors/spanner.adoc[Spanner]
-** xref:connectors/jdbc.adoc[Jdbc]
+** xref:connectors/jdbc.adoc[JDBC]
+** xref:connectors/informix.adoc[Informix]
 * Transformations
 ** xref:transformations/index.adoc[Overview]
 ** xref:transformations/topic-routing.adoc[Topic Routing]
@@ -33,11 +34,14 @@
 ** xref:transformations/schema-change-event-filter.adoc[Schema Change Event Filtering]
 ** xref:transformations/content-based-routing.adoc[Content-Based Routing]
 ** xref:transformations/applying-transformations-selectively.adoc[Using SMT Predicates to Selectively Apply Transformations]
-** xref:transformations/compute-partition.adoc[Compute Partition [Deprecated\]]
 ** xref:transformations/partition-routing.adoc[Partition Routing]
 ** xref:transformations/header-to-value.adoc[HeaderToValue]
 ** xref:transformations/timezone-converter.adoc[Timezone Converter]
 ** xref:transformations/timescaledb.adoc[TimescaleDB Integration]
+** xref:transformations/convert-cloudevent-to-saveable-form.adoc[Convert CloudEvents to Saveable Form]
+* Post Processors
+** xref:post-processors/index.adoc[Overview]
+** xref:post-processors/reselect-columns.adoc[Reselect Columns]
 * API and SPI
 ** xref:development/engine.adoc[Debezium Engine]
 ** xref:development/converters.adoc[Custom Converters]
@@ -53,5 +57,4 @@
 ** xref:operations/monitoring.adoc[Monitoring]
 ** xref:operations/kubernetes.adoc[Running on Kubernetes]
 ** xref:operations/openshift.adoc[Running on Openshift]
-** xref:operations/embedded.adoc[Embedding Debezium]
 ** xref:operations/debezium-ui.adoc[Debezium UI]

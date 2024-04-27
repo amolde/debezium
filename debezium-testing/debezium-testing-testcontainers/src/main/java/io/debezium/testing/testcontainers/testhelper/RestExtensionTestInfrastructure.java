@@ -7,6 +7,7 @@ package io.debezium.testing.testcontainers.testhelper;
 
 import java.nio.file.Paths;
 import java.time.Duration;
+import java.time.temporal.ChronoUnit;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
@@ -21,6 +22,7 @@ import org.testcontainers.containers.Network;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.containers.output.Slf4jLogConsumer;
 import org.testcontainers.containers.startupcheck.MinimumDurationRunningStartupCheckStrategy;
+import org.testcontainers.containers.wait.strategy.LogMessageWaitStrategy;
 import org.testcontainers.images.builder.ImageFromDockerfile;
 import org.testcontainers.lifecycle.Startable;
 import org.testcontainers.utility.DockerImageName;
@@ -43,6 +45,7 @@ public class RestExtensionTestInfrastructure {
         SQLSERVER,
         MONGODB,
         ORACLE,
+        MARIADB,
         NONE
     }
 
@@ -77,6 +80,7 @@ public class RestExtensionTestInfrastructure {
             .memberCount(1)
             .network(NETWORK)
             .imageName(DockerImageName.parse("mongo:5.0"))
+            .startupTimeout(Duration.ofSeconds(CI_CONTAINER_STARTUP_TIME))
             .build();
 
     private static final MSSQLServerContainer<?> SQL_SERVER_CONTAINER = new MSSQLServerContainer<>(DockerImageName.parse("mcr.microsoft.com/mssql/server:2019-latest"))
@@ -86,9 +90,14 @@ public class RestExtensionTestInfrastructure {
             .withEnv("MSSQL_PID", "Standard")
             .withEnv("MSSQL_AGENT_ENABLED", "true")
             .withPassword("Password!")
-            .withStartupCheckStrategy(new MinimumDurationRunningStartupCheckStrategy(Duration.ofSeconds(5)))
             .withInitScript("initialize-sqlserver-database.sql")
-            .acceptLicense();
+            .acceptLicense()
+            .waitingFor(new LogMessageWaitStrategy()
+                    .withRegEx(".*SQL Server is now ready for client connections\\..*\\s")
+                    .withTimes(1)
+                    .withStartupTimeout(Duration.of(CI_CONTAINER_STARTUP_TIME * 3, ChronoUnit.SECONDS)))
+            .withStartupCheckStrategy(new MinimumDurationRunningStartupCheckStrategy(Duration.ofSeconds(10)))
+            .withConnectTimeoutSeconds(300);
 
     private static final OracleContainer ORACLE_CONTAINER = (OracleContainer) new OracleContainer()
             .withNetwork(NETWORK)
@@ -128,7 +137,8 @@ public class RestExtensionTestInfrastructure {
     }
 
     public static void stopContainers() {
-        Stream<Startable> containers = Stream.of(DEBEZIUM_CONTAINER, SQL_SERVER_CONTAINER, MONGODB_REPLICA, MYSQL_CONTAINER, POSTGRES_CONTAINER, KAFKA_CONTAINER);
+        Stream<Startable> containers = Stream.of(DEBEZIUM_CONTAINER, ORACLE_CONTAINER, SQL_SERVER_CONTAINER, MONGODB_REPLICA, MYSQL_CONTAINER, POSTGRES_CONTAINER,
+                KAFKA_CONTAINER);
         MoreStartables.deepStopSync(containers);
         DEBEZIUM_CONTAINER = null;
     }
@@ -140,9 +150,6 @@ public class RestExtensionTestInfrastructure {
             containers.get().forEach(container -> {
                 if (container instanceof GenericContainer<?> && !(container instanceof OracleContainer)) {
                     ((GenericContainer<?>) container).withStartupTimeout(Duration.ofSeconds(CI_CONTAINER_STARTUP_TIME));
-                }
-                if (container instanceof MongoDbReplicaSet) {
-                    ((MongoDbReplicaSet) container).withStartupTimeout(Duration.ofSeconds(CI_CONTAINER_STARTUP_TIME));
                 }
             });
         }
@@ -167,11 +174,10 @@ public class RestExtensionTestInfrastructure {
                 .withBuildArg("DEBEZIUM_VERSION", debeziumVersion))
                 .withEnv("ENABLE_DEBEZIUM_SCRIPTING", "true")
                 .withEnv("CONNECT_REST_EXTENSION_CLASSES", restExtensionClasses)
-                .withEnv("ENABLE_JOLOKIA", "true")
-                .withExposedPorts(8083, 8778)
                 .withNetwork(NETWORK)
                 .withKafka(KAFKA_CONTAINER.getNetwork(), KAFKA_HOSTNAME + ":9092")
                 .withLogConsumer(new Slf4jLogConsumer(LOGGER))
+                .enableJMX()
                 .dependsOn(KAFKA_CONTAINER);
     }
 

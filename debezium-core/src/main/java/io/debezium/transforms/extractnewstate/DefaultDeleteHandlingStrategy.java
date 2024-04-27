@@ -6,6 +6,7 @@
 package io.debezium.transforms.extractnewstate;
 
 import org.apache.kafka.connect.connector.ConnectRecord;
+import org.apache.kafka.connect.data.Struct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -27,7 +28,7 @@ public class DefaultDeleteHandlingStrategy<R extends ConnectRecord<R>> extends A
     }
 
     @Override
-    public R handleTruncateRecord(R record) {
+    public R handleTombstoneRecord(R record) {
         switch (deleteTombstoneHandling) {
             case DROP:
             case TOMBSTONE:
@@ -48,12 +49,20 @@ public class DefaultDeleteHandlingStrategy<R extends ConnectRecord<R>> extends A
                 LOGGER.trace("Delete message {} requested to be dropped", record.key());
                 return null;
             case TOMBSTONE:
+                // NOTE
+                // Debezium TOMBSTONE has both value and valueSchema to null, instead here we are generating
+                // a record only with null value that by JDBC connector is treated as a flattened delete.
+                // Any change to this behavior can have impact on JDBC connector.
                 return afterDelegate.apply(record);
             case REWRITE:
             case REWRITE_WITH_TOMBSTONE:
                 LOGGER.trace("Delete message {} requested to be rewritten", record.key());
                 R oldRecord = beforeDelegate.apply(record);
-                return removedDelegate.apply(oldRecord);
+                // need to add the rewrite "__deleted" field manually since mongodb's value is a string type
+                if (oldRecord.value() instanceof Struct) {
+                    return removedDelegate.apply(oldRecord);
+                }
+                return oldRecord;
             default:
                 throw new DebeziumException("Unknown delete handling mode: " + deleteTombstoneHandling);
         }
@@ -66,7 +75,10 @@ public class DefaultDeleteHandlingStrategy<R extends ConnectRecord<R>> extends A
             case REWRITE:
             case REWRITE_WITH_TOMBSTONE:
                 LOGGER.trace("Insert/update message {} requested to be rewritten", record.key());
-                return updatedDelegate.apply(newRecord);
+                // need to add the rewrite "__deleted" field manually since mongodb's value is a string type
+                if (newRecord.value() instanceof Struct) {
+                    return updatedDelegate.apply(newRecord);
+                }
             default:
                 return newRecord;
         }

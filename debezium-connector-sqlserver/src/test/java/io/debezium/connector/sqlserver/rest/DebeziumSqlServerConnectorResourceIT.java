@@ -26,12 +26,12 @@ import io.debezium.connector.sqlserver.Module;
 import io.debezium.connector.sqlserver.SqlServerConnector;
 import io.debezium.connector.sqlserver.SqlServerConnectorConfig;
 import io.debezium.storage.kafka.history.KafkaSchemaHistory;
+import io.debezium.testing.testcontainers.Connector;
 import io.debezium.testing.testcontainers.ConnectorConfiguration;
 import io.debezium.testing.testcontainers.testhelper.RestExtensionTestInfrastructure;
 import io.restassured.http.ContentType;
 
 public class DebeziumSqlServerConnectorResourceIT {
-
     @BeforeClass
     public static void checkCondition() {
         Assume.assumeThat("Skipping DebeziumSqlServerConnectorResourceIT tests when assembly profile is not active!",
@@ -102,6 +102,120 @@ public class DebeziumSqlServerConnectorResourceIT {
                                         "The 'database.hostname' value is invalid: A value is required")));
     }
 
+    @Test
+    public void testFiltersWithEmptyFilters() {
+        ConnectorConfiguration config = getSqlServerConnectorConfiguration(1);
+
+        given()
+                .port(RestExtensionTestInfrastructure.getDebeziumContainer().getFirstMappedPort())
+                .when().contentType(ContentType.JSON).accept(ContentType.JSON).body(config.toJson())
+                .put(DebeziumSqlServerConnectorResource.BASE_PATH + DebeziumSqlServerConnectorResource.VALIDATE_FILTERS_ENDPOINT)
+                .then().log().all()
+                .statusCode(200)
+                .assertThat().body("status", equalTo("VALID"))
+                .body("validationResults.size()", is(0))
+                .body("matchingCollections.size()", is(5))
+                .body("matchingCollections",
+                        hasItems(
+                                Map.of("realm", "testDB", "namespace", "inventory", "name", "products_on_hand", "identifier", "testDB.inventory.products_on_hand"),
+                                Map.of("realm", "testDB", "namespace", "inventory", "name", "customers", "identifier", "testDB.inventory.customers"),
+                                Map.of("realm", "testDB", "namespace", "inventory", "name", "orders", "identifier", "testDB.inventory.orders"),
+                                Map.of("realm", "testDB", "namespace", "inventory", "name", "products", "identifier", "testDB.inventory.products"),
+                                Map.of("realm", "testDB2", "namespace", "inventory", "name", "products", "identifier", "testDB2.inventory.products")));
+    }
+
+    @Test
+    public void testFiltersWithValidTableIncludeList() {
+        ConnectorConfiguration config = getSqlServerConnectorConfiguration(1)
+                .with(SqlServerConnectorConfig.TABLE_INCLUDE_LIST.name(), "inventory\\.product.*");
+
+        given()
+                .port(RestExtensionTestInfrastructure.getDebeziumContainer().getFirstMappedPort())
+                .when().contentType(ContentType.JSON).accept(ContentType.JSON).body(config.toJson())
+                .put(DebeziumSqlServerConnectorResource.BASE_PATH + DebeziumSqlServerConnectorResource.VALIDATE_FILTERS_ENDPOINT)
+                .then().log().all()
+                .statusCode(200)
+                .assertThat().body("status", equalTo("VALID"))
+                .body("validationResults.size()", is(0))
+                .body("matchingCollections.size()", is(3))
+                .body("matchingCollections",
+                        hasItems(
+                                Map.of("realm", "testDB", "namespace", "inventory", "name", "products_on_hand", "identifier", "testDB.inventory.products_on_hand"),
+                                Map.of("realm", "testDB", "namespace", "inventory", "name", "products", "identifier", "testDB.inventory.products"),
+                                Map.of("realm", "testDB2", "namespace", "inventory", "name", "products", "identifier", "testDB2.inventory.products")));
+    }
+
+    @Test
+    public void testFiltersWithInvalidTableIncludeList() {
+        ConnectorConfiguration config = getSqlServerConnectorConfiguration(1)
+                .with(SqlServerConnectorConfig.TABLE_INCLUDE_LIST.name(), "+");
+
+        given()
+                .port(RestExtensionTestInfrastructure.getDebeziumContainer().getFirstMappedPort())
+                .when().contentType(ContentType.JSON).accept(ContentType.JSON).body(config.toJson())
+                .put(DebeziumSqlServerConnectorResource.BASE_PATH + DebeziumSqlServerConnectorResource.VALIDATE_FILTERS_ENDPOINT)
+                .then().log().all()
+                .statusCode(200)
+                .assertThat().body("status", equalTo("INVALID"))
+                .body("matchingCollections.size()", is(0))
+                .body("validationResults.size()", is(1))
+                .rootPath("validationResults[0]")
+                .body("property", equalTo("table.include.list"))
+                .body("message", equalTo(
+                        "The 'table.include.list' value is invalid: A comma-separated list of valid regular expressions is expected, but Dangling meta character '+' near index 0\n+\n^"));
+    }
+
+    @Test
+    public void testFiltersWithInvalidSchemaExcludeList() {
+        ConnectorConfiguration config = getSqlServerConnectorConfiguration(1)
+                .with(SqlServerConnectorConfig.TABLE_EXCLUDE_LIST.name(), "+");
+
+        given()
+                .port(RestExtensionTestInfrastructure.getDebeziumContainer().getFirstMappedPort())
+                .when().contentType(ContentType.JSON).accept(ContentType.JSON).body(config.toJson())
+                .put(DebeziumSqlServerConnectorResource.BASE_PATH + DebeziumSqlServerConnectorResource.VALIDATE_FILTERS_ENDPOINT)
+                .then().log().all()
+                .statusCode(200)
+                .assertThat().body("status", equalTo("INVALID"))
+                .body("matchingCollections.size()", is(0))
+                .body("validationResults.size()", is(1))
+                .rootPath("validationResults[0]")
+                .body("property", equalTo("table.exclude.list"))
+                .body("message", equalTo(
+                        "The 'table.exclude.list' value is invalid: A comma-separated list of valid regular expressions is expected, but Dangling meta character '+' near index 0\n+\n^"));
+    }
+
+    @Test
+    public void testMetricsEndpoint() {
+        ConnectorConfiguration config = getSqlServerConnectorConfiguration(1);
+
+        var connectorName = "my-sqlserver-connector";
+        RestExtensionTestInfrastructure.getDebeziumContainer().registerConnector(
+                connectorName,
+                config);
+
+        RestExtensionTestInfrastructure.getDebeziumContainer().ensureConnectorState(connectorName, Connector.State.RUNNING);
+        RestExtensionTestInfrastructure.waitForConnectorTaskStatus(connectorName, 0, Connector.State.RUNNING);
+        RestExtensionTestInfrastructure.getDebeziumContainer().waitForStreamingRunning("sql_server", config.asProperties().getProperty("topic.prefix"), "streaming",
+                String.valueOf(0));
+
+        given()
+                .port(RestExtensionTestInfrastructure.getDebeziumContainer().getFirstMappedPort())
+                .when().contentType(ContentType.JSON).accept(ContentType.JSON).body(config.toJson())
+                .get(DebeziumSqlServerConnectorResource.BASE_PATH + DebeziumSqlServerConnectorResource.CONNECTOR_METRICS_ENDPOINT, connectorName)
+                .then().log().all()
+                .statusCode(200)
+                .body("name", equalTo(connectorName))
+                .body("connector.metrics.Connected", equalTo("true"))
+                .body("tasks[0].namespaces[0].name", equalTo("testDB"))
+                .body("tasks[0].namespaces[0].metrics.MilliSecondsSinceLastEvent", equalTo("-1"))
+                .body("tasks[0].namespaces[0].metrics.TotalNumberOfEventsSeen", equalTo("0"))
+                .body("tasks[0].namespaces[1].name", equalTo("testDB2"))
+                .body("tasks[0].namespaces[1].metrics.MilliSecondsSinceLastEvent", equalTo("-1"))
+                .body("tasks[0].namespaces[1].metrics.TotalNumberOfEventsSeen", equalTo("0"));
+
+    }
+
     public static ConnectorConfiguration getSqlServerConnectorConfiguration(int id, String... options) {
         final ConnectorConfiguration config = ConnectorConfiguration.forJdbcContainer(RestExtensionTestInfrastructure.getSqlServerContainer())
                 .with(ConnectorConfiguration.USER, "sa")
@@ -111,6 +225,7 @@ public class DebeziumSqlServerConnectorResourceIT {
                 .with(SqlServerConnectorConfig.DATABASE_NAMES.name(), "testDB,testDB2")
                 .with(SqlServerConnectorConfig.SNAPSHOT_MODE.name(), "initial")
                 .with(SqlServerConnectorConfig.TOPIC_PREFIX.name(), "dbserver" + id)
+                .with("driver.encrypt", false)
                 .with("database.encrypt", false);
 
         if (options != null && options.length > 0) {

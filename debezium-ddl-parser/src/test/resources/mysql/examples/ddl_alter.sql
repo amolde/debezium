@@ -29,6 +29,8 @@ alter table add_test add column if not exists col1 varchar(255);
 alter table add_test add column if not exists col4 varchar(255);
 alter table add_test add index if not exists ix_add_test_col1 using btree (col1) comment 'test index';
 alter table add_test add index if not exists ix_add_test_col4 using btree (col4) comment 'test index';
+ALTER TABLE `deals` ADD INDEX `idx_custom_field_30c4f4a7c529ccf0825b2fac732bebfd843ed764` ((cast(json_unquote(json_extract(`custom_fields`,_utf8mb4'$."30c4f4a7c529ccf0825b2fac732bebfd843ed764".value')) as DOUBLE)));
+ALTER TABLE `deals` ADD INDEX `idx_custom_field_30c4f4a7c529ccf0825b2fac732bebfd843ed764` ((cast(json_unquote(json_extract(`custom_fields`,_utf8mb4'$."30c4f4a7c529ccf0825b2fac732bebfd843ed764".value')) as FLOAT)));
 alter table add_test alter index ix_add_test_col1 invisible;
 alter table add_test alter index ix_add_test_col1 visible;
 alter table add_test change column if exists col8 col9 tinyint;
@@ -57,6 +59,9 @@ ALTER TABLE T1 ALTER I SET VISIBLE;
 ALTER TABLE T1 ALTER I SET INVISIBLE;
 ALTER TABLE IF EXISTS `add_test` ADD COLUMN IF NOT EXISTS `new_col` TEXT DEFAULT 'my_default';
 alter table user_details add index if not exists `country_id_index` (country_id), algorithm=NOCOPY;
+-- # MariaDB Specific
+ALTER TABLE t1 PARTITION BY SYSTEM_TIME INTERVAL 1 HOUR;
+ALTER TABLE t1 PARTITION BY SYSTEM_TIME INTERVAL 1 HOUR AUTO;
 #end
 #begin
 -- Alter database
@@ -149,3 +154,5 @@ ALTER TABLE t1 ADD PARTITION IF NOT EXISTS (PARTITION p3 VALUES LESS THAN (2002)
 -- Alter sequence
 ALTER SEQUENCE IF EXISTS s2 start=100;
 ALTER SEQUENCE s1 CACHE=1000 NOCYCLE RESTART WITH 1;
+ALTER TABLE `TABLE_NAME` DROP FOREIGN KEY `TABLE_NAME`.`FK_COLUMN`;
+ALTER TABLE `order` ADD cancelled TINYINT(1) DEFAULT 0 NOT NULL, ADD delivered TINYINT(1) DEFAULT 0 NOT NULL, ADD returning TINYINT(1) DEFAULT 0 NOT NULL

@@ -6,27 +6,19 @@
 package io.debezium.connector.mysql;
 
 import java.sql.SQLException;
-import java.util.List;
-import java.util.Map;
 import java.util.function.Consumer;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import io.debezium.DebeziumException;
+import io.debezium.connector.binlog.BinlogReadOnlyIncrementalSnapshotChangeEventSource;
+import io.debezium.connector.binlog.gtid.GtidSet;
+import io.debezium.connector.mysql.gtid.MySqlGtidSet;
 import io.debezium.jdbc.JdbcConnection;
 import io.debezium.pipeline.EventDispatcher;
 import io.debezium.pipeline.notification.NotificationService;
-import io.debezium.pipeline.signal.SignalPayload;
-import io.debezium.pipeline.signal.actions.snapshotting.SnapshotConfiguration;
-import io.debezium.pipeline.signal.channels.KafkaSignalChannel;
-import io.debezium.pipeline.source.snapshot.incremental.AbstractIncrementalSnapshotChangeEventSource;
 import io.debezium.pipeline.source.spi.DataChangeEventListener;
 import io.debezium.pipeline.source.spi.SnapshotProgressListener;
-import io.debezium.pipeline.spi.OffsetContext;
-import io.debezium.relational.RelationalDatabaseConnectorConfig;
+import io.debezium.relational.TableId;
 import io.debezium.schema.DatabaseSchema;
-import io.debezium.spi.schema.DataCollectionId;
 import io.debezium.util.Clock;
 
 /**
@@ -77,14 +69,13 @@ import io.debezium.util.Clock;
  * <b>No updates for included tables</b>
  * <p>It’s important to receive binlog events for the incremental snapshot to make progress. All binlog events are checked against the low and high watermarks, including the events from the tables that aren’t included in the connector. This guarantees that the window processing mode gets updated even when none of the tables included in the connector are getting binlog events.</p>
  */
-public class MySqlReadOnlyIncrementalSnapshotChangeEventSource<T extends DataCollectionId> extends AbstractIncrementalSnapshotChangeEventSource<MySqlPartition, T> {
+public class MySqlReadOnlyIncrementalSnapshotChangeEventSource extends BinlogReadOnlyIncrementalSnapshotChangeEventSource<MySqlPartition, MySqlOffsetContext> {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(MySqlReadOnlyIncrementalSnapshotChangeEventSource.class);
     private static final String SHOW_MASTER_STMT = "SHOW MASTER STATUS";
 
-    public MySqlReadOnlyIncrementalSnapshotChangeEventSource(RelationalDatabaseConnectorConfig config,
+    public MySqlReadOnlyIncrementalSnapshotChangeEventSource(MySqlConnectorConfig config,
                                                              JdbcConnection jdbcConnection,
-                                                             EventDispatcher<MySqlPartition, T> dispatcher,
+                                                             EventDispatcher<MySqlPartition, TableId> dispatcher,
                                                              DatabaseSchema<?> databaseSchema,
                                                              Clock clock,
                                                              SnapshotProgressListener<MySqlPartition> progressListener,
@@ -94,94 +85,14 @@ public class MySqlReadOnlyIncrementalSnapshotChangeEventSource<T extends DataCol
     }
 
     @Override
-    public void processMessage(MySqlPartition partition, DataCollectionId dataCollectionId, Object key, OffsetContext offsetContext) throws InterruptedException {
-        if (getContext() == null) {
-            LOGGER.warn("Context is null, skipping message processing");
-            return;
-        }
-        LOGGER.trace("Checking window for table '{}', key '{}', window contains '{}'", dataCollectionId, key, window);
-        boolean windowClosed = getContext().updateWindowState(offsetContext);
-        if (windowClosed) {
-            sendWindowEvents(partition, offsetContext);
-            readChunk(partition, offsetContext);
-        }
-        else if (!window.isEmpty() && getContext().deduplicationNeeded()) {
-            deduplicateWindow(dataCollectionId, key);
-        }
-    }
-
-    @Override
-    public void processHeartbeat(MySqlPartition partition, OffsetContext offsetContext) throws InterruptedException {
-        if (getContext() == null) {
-            LOGGER.warn("Context is null, skipping message processing");
-            return;
-        }
-        readUntilGtidChange(partition, offsetContext);
-    }
-
-    private void readUntilGtidChange(MySqlPartition partition, OffsetContext offsetContext) throws InterruptedException {
-        String currentGtid = getContext().getCurrentGtid(offsetContext);
-        while (getContext().snapshotRunning() && getContext().reachedHighWatermark(currentGtid)) {
-            getContext().closeWindow();
-            sendWindowEvents(partition, offsetContext);
-            readChunk(partition, offsetContext);
-            if (currentGtid == null && getContext().watermarksChanged()) {
-                return;
-            }
-        }
-    }
-
-    @Override
-    public void processFilteredEvent(MySqlPartition partition, OffsetContext offsetContext) throws InterruptedException {
-        if (getContext() == null) {
-            LOGGER.warn("Context is null, skipping message processing");
-            return;
-        }
-        boolean windowClosed = getContext().updateWindowState(offsetContext);
-        if (windowClosed) {
-            sendWindowEvents(partition, offsetContext);
-            readChunk(partition, offsetContext);
-        }
-    }
-
-    @Override
-    public void processTransactionStartedEvent(MySqlPartition partition, OffsetContext offsetContext) throws InterruptedException {
-        if (getContext() == null) {
-            LOGGER.warn("Context is null, skipping message processing");
-            return;
-        }
-        boolean windowClosed = getContext().updateWindowState(offsetContext);
-        if (windowClosed) {
-            sendWindowEvents(partition, offsetContext);
-            readChunk(partition, offsetContext);
-        }
-    }
-
-    @Override
-    public void processTransactionCommittedEvent(MySqlPartition partition, OffsetContext offsetContext) throws InterruptedException {
-        if (getContext() == null) {
-            LOGGER.warn("Context is null, skipping message processing");
-            return;
-        }
-        readUntilGtidChange(partition, offsetContext);
-    }
-
-    protected void updateLowWatermark() {
-        getExecutedGtidSet(getContext()::setLowWatermark);
-    }
-
-    protected void updateHighWatermark() {
-        getExecutedGtidSet(getContext()::setHighWatermark);
-    }
-
-    private void getExecutedGtidSet(Consumer<GtidSet> watermark) {
+    protected void getExecutedGtidSet(Consumer<GtidSet> watermark) {
         try {
             jdbcConnection.query(SHOW_MASTER_STMT, rs -> {
                 if (rs.next()) {
                     if (rs.getMetaData().getColumnCount() > 4) {
                         // This column exists only in MySQL 5.6.5 or later ...
                         final String gtidSet = rs.getString(5); // GTID set, may be null, blank, or contain a GTID set
-                        watermark.accept(new GtidSet(gtidSet));
+                        watermark.accept(new MySqlGtidSet(gtidSet));
                     }
                     else {
                         throw new UnsupportedOperationException("Need to add support for executed GTIDs for versions prior to 5.6.5");
@@ -195,51 +106,4 @@ public class MySqlReadOnlyIncrementalSnapshotChangeEventSource<T extends DataCol
         }
     }
 
-    @Override
-    protected void emitWindowOpen() {
-        updateLowWatermark();
-    }
-
-    @Override
-    protected void emitWindowClose(MySqlPartition partition, OffsetContext offsetContext) throws InterruptedException {
-        updateHighWatermark();
-        if (getContext().serverUuidChanged()) {
-            rereadChunk(partition, offsetContext);
-        }
-    }
-
-    @Override
-    protected void sendEvent(MySqlPartition partition, EventDispatcher<MySqlPartition, T> dispatcher,
-                             OffsetContext offsetContext, Object[] row)
-            throws InterruptedException {
-        SourceInfo sourceInfo = ((MySqlOffsetContext) offsetContext).getSource();
-        String query = sourceInfo.getQuery();
-        sourceInfo.setQuery(null);
-        super.sendEvent(partition, dispatcher, offsetContext, row);
-        sourceInfo.setQuery(query);
-    }
-
-    @Override
-    public void addDataCollectionNamesToSnapshot(SignalPayload<MySqlPartition> signalPayload,
-                                                 SnapshotConfiguration snapshotConfiguration)
-            throws InterruptedException {
-
-        final Map<String, Object> additionalData = signalPayload.additionalData;
-
-        super.addDataCollectionNamesToSnapshot(signalPayload, snapshotConfiguration);
-
-        getContext().setSignalOffset((Long) additionalData.get(KafkaSignalChannel.CHANNEL_OFFSET));
-    }
-
-    @Override
-    public void stopSnapshot(MySqlPartition partition, OffsetContext offsetContext, Map<String, Object> additionalData, List<String> dataCollectionIds) {
-        {
-            super.stopSnapshot(partition, offsetContext, additionalData, dataCollectionIds);
-            getContext().setSignalOffset((Long) additionalData.get(KafkaSignalChannel.CHANNEL_OFFSET));
-        }
-    }
-
-    private MySqlReadOnlyIncrementalSnapshotContext<T> getContext() {
-        return (MySqlReadOnlyIncrementalSnapshotContext<T>) context;
-    }
 }

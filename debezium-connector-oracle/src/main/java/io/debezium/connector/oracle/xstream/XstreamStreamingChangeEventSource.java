@@ -13,6 +13,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.debezium.DebeziumException;
 import io.debezium.connector.oracle.OracleConnection;
 import io.debezium.connector.oracle.OracleConnectorConfig;
 import io.debezium.connector.oracle.OracleDatabaseSchema;
@@ -44,6 +45,9 @@ import oracle.streams.XStreamUtility;
 public class XstreamStreamingChangeEventSource implements StreamingChangeEventSource<OraclePartition, OracleOffsetContext> {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(XstreamStreamingChangeEventSource.class);
+
+    private static final int DEFAULT_MAX_ATTACH_RETRIES = 10;
+    private static final int DEFAULT_MAX_ATTACH_RETRY_DELAY_SECONDS = 10;
 
     private final OracleConnectorConfig connectorConfig;
     private final OracleConnection jdbcConnection;
@@ -115,8 +119,10 @@ public class XstreamStreamingChangeEventSource implements StreamingChangeEventSo
                     startPosition = convertScnToPosition(offsetContext.getScn());
                 }
 
-                xsOut = XStreamOut.attach((oracle.jdbc.OracleConnection) xsConnection.connection(), xStreamServerName,
-                        startPosition, 1, 1, XStreamOut.DEFAULT_MODE);
+                xsOut = performAttachWithRetries(xsConnection, startPosition);
+                if (xsOut == null) {
+                    throw new DebeziumException("Failed to attach to the Oracle XStream outbound server");
+                }
 
                 // 2. receive events while running
                 while (context.isRunning()) {
@@ -166,6 +172,34 @@ public class XstreamStreamingChangeEventSource implements StreamingChangeEventSo
     @Override
     public OracleOffsetContext getOffsetContext() {
         return effectiveOffset;
+    }
+
+    private XStreamOut performAttachWithRetries(OracleConnection xsConnection, byte[] startPosition) throws Exception {
+        XStreamOut out = null;
+        for (int attempt = 1; attempt <= DEFAULT_MAX_ATTACH_RETRIES; attempt++) {
+            try {
+                out = XStreamOut.attach((oracle.jdbc.OracleConnection) xsConnection.connection(), xStreamServerName,
+                        startPosition, 1, 1, XStreamOut.DEFAULT_MODE);
+                break;
+            }
+            catch (StreamsException e) {
+                if (!isAttachExceptionRetriable(e) || attempt == DEFAULT_MAX_ATTACH_RETRIES) {
+                    if (attempt == DEFAULT_MAX_ATTACH_RETRIES) {
+                        LOGGER.warn("Failed to attach to outbound server with max attempts", e);
+                    }
+                    throw e;
+                }
+                LOGGER.warn("Failed to attach to outbound server, retrying: {}", e.getMessage());
+            }
+        }
+        return out;
+    }
+
+    private boolean isAttachExceptionRetriable(StreamsException e) {
+        return e.getErrorCode() == 26653
+                || e.getErrorCode() == 23656
+                || e.getMessage().contains("did not start properly and is currently in state")
+                || e.getMessage().contains("Timeout occurred while starting XStream process");
     }
 
     private byte[] convertScnToPosition(Scn scn) {

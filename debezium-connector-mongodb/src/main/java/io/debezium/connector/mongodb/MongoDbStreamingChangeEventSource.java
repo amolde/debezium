@@ -5,10 +5,6 @@
  */
 package io.debezium.connector.mongodb;
 
-import java.time.Duration;
-import java.util.List;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 
 import org.bson.BsonDocument;
@@ -16,24 +12,25 @@ import org.bson.BsonString;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.mongodb.MongoException;
 import com.mongodb.client.ChangeStreamIterable;
-import com.mongodb.client.MongoChangeStreamCursor;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.model.changestream.ChangeStreamDocument;
 import com.mongodb.client.model.changestream.FullDocument;
 import com.mongodb.client.model.changestream.FullDocumentBeforeChange;
 
-import io.debezium.connector.mongodb.connection.ConnectionContext;
 import io.debezium.connector.mongodb.connection.MongoDbConnection;
-import io.debezium.connector.mongodb.connection.ReplicaSet;
+import io.debezium.connector.mongodb.events.BufferingChangeStreamCursor;
+import io.debezium.connector.mongodb.events.BufferingChangeStreamCursor.ResumableChangeStreamEvent;
+import io.debezium.connector.mongodb.events.SplitEventHandler;
+import io.debezium.connector.mongodb.metrics.MongoDbStreamingChangeEventSourceMetrics;
 import io.debezium.connector.mongodb.recordemitter.MongoDbChangeRecordEmitter;
+import io.debezium.function.BlockingRunnable;
 import io.debezium.pipeline.ErrorHandler;
 import io.debezium.pipeline.EventDispatcher;
 import io.debezium.pipeline.source.spi.StreamingChangeEventSource;
-import io.debezium.pipeline.txmetadata.TransactionContext;
+import io.debezium.snapshot.SnapshotterService;
 import io.debezium.util.Clock;
-import io.debezium.util.Metronome;
-import io.debezium.util.Threads;
 
 /**
  * @author Chris Cranford
@@ -46,44 +43,52 @@ public class MongoDbStreamingChangeEventSource implements StreamingChangeEventSo
     private final EventDispatcher<MongoDbPartition, CollectionId> dispatcher;
     private final ErrorHandler errorHandler;
     private final Clock clock;
-    private final ConnectionContext connectionContext;
-    private final ReplicaSets replicaSets;
+
     private final MongoDbTaskContext taskContext;
-    private final MongoDbConnection.ChangeEventSourceConnectionFactory connections;
+    private final MongoDbStreamingChangeEventSourceMetrics streamingMetrics;
+    private final SnapshotterService snapshotterService;
     private MongoDbOffsetContext effectiveOffset;
 
     public MongoDbStreamingChangeEventSource(MongoDbConnectorConfig connectorConfig, MongoDbTaskContext taskContext,
-                                             MongoDbConnection.ChangeEventSourceConnectionFactory connections, ReplicaSets replicaSets,
                                              EventDispatcher<MongoDbPartition, CollectionId> dispatcher,
-                                             ErrorHandler errorHandler, Clock clock) {
+                                             ErrorHandler errorHandler, Clock clock, MongoDbStreamingChangeEventSourceMetrics streamingMetrics,
+                                             SnapshotterService snapshotterService) {
         this.connectorConfig = connectorConfig;
-        this.connectionContext = taskContext.getConnectionContext();
         this.dispatcher = dispatcher;
         this.errorHandler = errorHandler;
         this.clock = clock;
-        this.replicaSets = replicaSets;
         this.taskContext = taskContext;
-        this.connections = connections;
+        this.streamingMetrics = streamingMetrics;
+        this.snapshotterService = snapshotterService;
     }
 
     @Override
     public void init(MongoDbOffsetContext offsetContext) {
-
         this.effectiveOffset = offsetContext == null ? emptyOffsets(connectorConfig) : offsetContext;
     }
 
+    /**
+     *
+     * @param context contextual information for this source's execution
+     * @param partition the source partition from which the changes should be streamed
+     * @param offsetContext unused as effective offset is build by {@link #init(MongoDbOffsetContext)}
+     */
     @Override
-    public void execute(ChangeEventSourceContext context, MongoDbPartition partition, MongoDbOffsetContext offsetContext)
-            throws InterruptedException {
-        final List<ReplicaSet> validReplicaSets = replicaSets.all();
+    public void execute(ChangeEventSourceContext context, MongoDbPartition partition, MongoDbOffsetContext offsetContext) {
 
-        if (validReplicaSets.size() == 1) {
-            // Streams the replica-set changes in the current thread
-            streamChangesForReplicaSet(context, partition, validReplicaSets.get(0), offsetContext);
+        if (!snapshotterService.getSnapshotter().shouldStream()) {
+            LOGGER.info("Streaming is not enabled in configuration");
+            return;
         }
-        else if (validReplicaSets.size() > 1) {
-            // Starts a thread for each replica-set and executes the streaming process
-            streamChangesForReplicaSets(context, partition, validReplicaSets, offsetContext);
+
+        try (MongoDbConnection mongo = taskContext.getConnection(dispatcher, partition)) {
+            mongo.execute("Reading change stream", client -> {
+                readChangeStream(client, context, partition);
+            });
+        }
+        catch (Throwable t) {
+            LOGGER.error("Streaming failed", t);
+            errorHandler.setProducerThrowable(t);
         }
     }
 
@@ -92,152 +97,150 @@ public class MongoDbStreamingChangeEventSource implements StreamingChangeEventSo
         return effectiveOffset;
     }
 
-    private void streamChangesForReplicaSet(ChangeEventSourceContext context, MongoDbPartition partition,
-                                            ReplicaSet replicaSet, MongoDbOffsetContext offsetContext) {
-        try (MongoDbConnection mongo = connections.get(replicaSet, partition)) {
-            mongo.execute("read from change stream on '" + replicaSet + "'", client -> {
-                readChangeStream(client, replicaSet, context, offsetContext);
-            });
-        }
-        catch (Throwable t) {
-            LOGGER.error("Streaming for replica set {} failed", replicaSet.replicaSetName(), t);
-            errorHandler.setProducerThrowable(t);
-        }
-    }
+    private void readChangeStream(MongoClient client, ChangeEventSourceContext context, MongoDbPartition partition) {
+        LOGGER.info("Reading change stream");
+        final SplitEventHandler<BsonDocument> splitHandler = new SplitEventHandler<>();
+        final ChangeStreamIterable<BsonDocument> stream = initChangeStream(client, effectiveOffset);
 
-    private void streamChangesForReplicaSets(ChangeEventSourceContext context, MongoDbPartition partition,
-                                             List<ReplicaSet> replicaSets, MongoDbOffsetContext offsetContext) {
-        final int threads = replicaSets.size();
-        final ExecutorService executor = Threads.newFixedThreadPool(MongoDbConnector.class, taskContext.serverName(), "replicator-streaming", threads);
-        final CountDownLatch latch = new CountDownLatch(threads);
-
-        LOGGER.info("Starting {} thread(s) to stream changes for replica sets: {}", threads, replicaSets);
-
-        replicaSets.forEach(replicaSet -> {
-            executor.submit(() -> {
-                try {
-                    streamChangesForReplicaSet(context, partition, replicaSet, offsetContext);
-                }
-                finally {
-                    latch.countDown();
-                }
-            });
-        });
-
-        // Wait for the executor service to terminate.
-        try {
-            latch.await();
-        }
-        catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-
-        executor.shutdown();
-    }
-
-    private void readChangeStream(MongoClient client, ReplicaSet replicaSet, ChangeEventSourceContext context,
-                                  MongoDbOffsetContext offsetContext) {
-        final ReplicaSetPartition rsPartition = effectiveOffset.getReplicaSetPartition(replicaSet);
-        final ReplicaSetOffsetContext rsOffsetContext = effectiveOffset.getReplicaSetOffsetContext(replicaSet);
-
-        LOGGER.info("Reading change stream for '{}'", replicaSet);
-
-        final ChangeStreamIterable<BsonDocument> rsChangeStream = MongoUtil.openChangeStream(client, taskContext);
-        if (taskContext.getCaptureMode().isFullUpdate()) {
-            rsChangeStream.fullDocument(FullDocument.UPDATE_LOOKUP);
-        }
-        if (taskContext.getCaptureMode().isIncludePreImage()) {
-            rsChangeStream.fullDocumentBeforeChange(FullDocumentBeforeChange.WHEN_AVAILABLE);
-        }
-        if (rsOffsetContext.lastResumeToken() != null) {
-            LOGGER.info("Resuming streaming from token '{}'", rsOffsetContext.lastResumeToken());
-
-            final BsonDocument doc = new BsonDocument();
-            doc.put("_data", new BsonString(rsOffsetContext.lastResumeToken()));
-            rsChangeStream.resumeAfter(doc);
-        }
-        else if (rsOffsetContext.lastTimestamp() != null) {
-            LOGGER.info("Resuming streaming from operation time '{}'", rsOffsetContext.lastTimestamp());
-            rsChangeStream.startAtOperationTime(rsOffsetContext.lastTimestamp());
-        }
-
-        if (connectorConfig.getCursorMaxAwaitTime() > 0) {
-            rsChangeStream.maxAwaitTime(connectorConfig.getCursorMaxAwaitTime(), TimeUnit.MILLISECONDS);
-        }
-
-        try (MongoChangeStreamCursor<ChangeStreamDocument<BsonDocument>> cursor = rsChangeStream.cursor()) {
-            // In Replicator, this used cursor.hasNext() but this is a blocking call and I observed that this can
-            // delay the shutdown of the connector by up to 15 seconds or longer. By introducing a Metronome, we
-            // can respond to the stop request much faster and without much overhead.
-            Metronome pause = Metronome.sleeper(Duration.ofMillis(500), clock);
+        try (var cursor = BufferingChangeStreamCursor.fromIterable(stream, taskContext, streamingMetrics, clock).start()) {
             while (context.isRunning()) {
-                // Use tryNext which will return null if no document is yet available from the cursor.
-                // In this situation if not document is available, we'll pause.
-                final ChangeStreamDocument<BsonDocument> event = cursor.tryNext();
-                if (event != null) {
-                    LOGGER.trace("Arrived Change Stream event: {}", event);
-
-                    rsOffsetContext.changeStreamEvent(event);
-                    CollectionId collectionId = new CollectionId(
-                            replicaSet.replicaSetName(),
-                            event.getNamespace().getDatabaseName(),
-                            event.getNamespace().getCollectionName());
-
-                    try {
-                        // Note that this will trigger a heartbeat request
-                        dispatcher.dispatchDataChangeEvent(
-                                rsPartition,
-                                collectionId,
-                                new MongoDbChangeRecordEmitter(
-                                        rsPartition,
-                                        rsOffsetContext,
-                                        clock,
-                                        event, connectorConfig));
-                    }
-                    catch (Exception e) {
-                        errorHandler.setProducerThrowable(e);
-                        return;
-                    }
+                waitWhenStreamingPaused(context);
+                var resumableEvent = cursor.tryNext();
+                if (resumableEvent == null) {
+                    continue;
                 }
-                else {
-                    // No event was returned, so trigger a heartbeat
-                    try {
-                        // Guard against `null` to be protective of issues like SERVER-63772, and situations called out in the Javadocs:
-                        // > resume token [...] can be null if the cursor has either not been iterated yet, or the cursor is closed.
-                        if (cursor.getResumeToken() != null) {
-                            rsOffsetContext.noEvent(cursor);
-                            dispatcher.dispatchHeartbeatEvent(rsPartition, rsOffsetContext);
-                        }
-                    }
-                    catch (InterruptedException e) {
-                        LOGGER.info("Replicator thread is interrupted");
-                        Thread.currentThread().interrupt();
-                        return;
-                    }
 
-                    try {
-                        pause.pause();
-                        if (context.isPaused()) {
-                            LOGGER.info("Streaming will now pause");
-                            context.streamingPaused();
-                            context.waitSnapshotCompletion();
-                            LOGGER.info("Streaming resumed");
-                        }
-                    }
-                    catch (InterruptedException e) {
-                        break;
-                    }
+                var result = resumableEvent.document
+                        .map(doc -> processChangeStreamDocument(doc, splitHandler, partition, effectiveOffset))
+                        .orElseGet(() -> errorHandled(() -> dispatchHeartbeatEvent(resumableEvent, partition, effectiveOffset)));
 
+                if (result == StreamStatus.ERROR) {
+                    return;
                 }
             }
         }
+        catch (MongoException e) {
+            LOGGER.error("Error while reading change stream", e);
+            errorHandler.setProducerThrowable(e);
+        }
+    }
+
+    private void waitWhenStreamingPaused(ChangeEventSourceContext context) {
+        if (context.isPaused()) {
+            errorHandled(() -> {
+                LOGGER.info("Streaming will now pause");
+                context.streamingPaused();
+                context.waitSnapshotCompletion();
+                LOGGER.info("Streaming resumed");
+            });
+        }
+    }
+
+    private StreamStatus processChangeStreamDocument(
+                                                     ChangeStreamDocument<BsonDocument> document,
+                                                     SplitEventHandler<BsonDocument> splitHandler,
+                                                     MongoDbPartition partition,
+                                                     MongoDbOffsetContext offsetContext) {
+        LOGGER.trace("Arrived Change Stream event: {}", document);
+        return splitHandler
+                .handle(document)
+                .map(event -> errorHandled(() -> dispatchChangeEvent(event, partition, offsetContext)))
+                .orElse(StreamStatus.NEXT);
+    }
+
+    private void dispatchChangeEvent(
+                                     ChangeStreamDocument<BsonDocument> event,
+                                     MongoDbPartition partition,
+                                     MongoDbOffsetContext offsetContext)
+            throws InterruptedException {
+        var collectionId = new CollectionId(
+                event.getNamespace().getDatabaseName(),
+                event.getNamespace().getCollectionName());
+
+        var emitter = new MongoDbChangeRecordEmitter(partition, offsetContext, clock, event, connectorConfig);
+        offsetContext.changeStreamEvent(event);
+        dispatcher.dispatchDataChangeEvent(partition, collectionId, emitter);
+    }
+
+    private void dispatchHeartbeatEvent(
+                                        ResumableChangeStreamEvent<BsonDocument> event,
+                                        MongoDbPartition partition,
+                                        MongoDbOffsetContext offsetContext)
+            throws InterruptedException {
+        LOGGER.trace("No Change Stream event arrived");
+        offsetContext.noEvent(event);
+        dispatcher.dispatchHeartbeatEvent(partition, offsetContext);
+    }
+
+    private StreamStatus errorHandled(BlockingRunnable action) {
+        try {
+            action.run();
+            return StreamStatus.DISPATCHED;
+        }
+        catch (InterruptedException e) {
+            LOGGER.info("Replicator thread is interrupted");
+            Thread.currentThread().interrupt();
+            return StreamStatus.ERROR;
+        }
+        catch (Exception e) {
+            errorHandler.setProducerThrowable(e);
+            return StreamStatus.ERROR;
+        }
+    }
+
+    protected ChangeStreamIterable<BsonDocument> initChangeStream(MongoClient client, MongoDbOffsetContext offsetContext) {
+        final ChangeStreamIterable<BsonDocument> stream = MongoUtils.openChangeStream(client, taskContext);
+
+        if (connectorConfig.getCaptureMode().isFullUpdate()) {
+            if (connectorConfig.getCaptureModeFullUpdateType().isPostImage()) {
+                stream.fullDocument(FullDocument.WHEN_AVAILABLE);
+            }
+            else {
+                stream.fullDocument(FullDocument.UPDATE_LOOKUP);
+            }
+        }
+        if (connectorConfig.getCaptureMode().isIncludePreImage()) {
+            stream.fullDocumentBeforeChange(FullDocumentBeforeChange.WHEN_AVAILABLE);
+        }
+        if (offsetContext.lastResumeToken() != null) {
+            LOGGER.info("Resuming streaming from token '{}'", offsetContext.lastResumeToken());
+
+            final BsonDocument doc = new BsonDocument();
+            doc.put("_data", new BsonString(offsetContext.lastResumeToken()));
+            stream.resumeAfter(doc);
+        }
+        else if (offsetContext.lastTimestamp() != null) {
+            LOGGER.info("Resuming streaming from operation time '{}'", offsetContext.lastTimestamp());
+            stream.startAtOperationTime(offsetContext.lastTimestamp());
+        }
+
+        if (connectorConfig.getCursorMaxAwaitTime() > 0) {
+            stream.maxAwaitTime(connectorConfig.getCursorMaxAwaitTime(), TimeUnit.MILLISECONDS);
+        }
+
+        return stream;
     }
 
     protected MongoDbOffsetContext emptyOffsets(MongoDbConnectorConfig connectorConfig) {
         LOGGER.info("Initializing empty Offset context");
-        return new MongoDbOffsetContext(
-                new SourceInfo(connectorConfig),
-                new TransactionContext(),
-                new MongoDbIncrementalSnapshotContext<>(false));
+        return MongoDbOffsetContext.empty(connectorConfig);
+    }
+
+    /**
+     * Indicates the status of event processing
+     */
+    protected enum StreamStatus {
+        /**
+         * Event successfully dispatched
+         */
+        DISPATCHED,
+        /**
+         * No event was dispatched and processing loop should advance to the next iteration immediately
+         */
+        NEXT,
+        /**
+         * An error occurred and processing loop should be terminated
+         */
+        ERROR,
     }
 }

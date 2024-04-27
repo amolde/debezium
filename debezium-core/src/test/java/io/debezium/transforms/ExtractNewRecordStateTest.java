@@ -8,14 +8,13 @@ package io.debezium.transforms;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.Instant;
-import java.util.ArrayList;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
-import org.apache.kafka.connect.data.Schema;
-import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.header.Header;
 import org.apache.kafka.connect.source.SourceRecord;
@@ -23,28 +22,14 @@ import org.junit.Test;
 
 import io.debezium.data.Envelope;
 import io.debezium.doc.FixFor;
-import io.debezium.pipeline.txmetadata.TransactionMonitor;
 
-/**
- * @author Jiri Pechanec
- */
 public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
-
-    private static final String DROP_TOMBSTONES = "drop.tombstones";
-    private static final String HANDLE_DELETES = "delete.handling.mode";
-    private static final String ROUTE_BY_FIELD = "route.by.field";
-    private static final String ADD_FIELDS = "add.fields";
-    private static final String ADD_HEADERS = "add.headers";
-    private static final String ADD_FIELDS_PREFIX = ADD_FIELDS + ".prefix";
-    private static final String ADD_HEADERS_PREFIX = ADD_HEADERS + ".prefix";
-    private static final String DROP_FIELDS_HEADER_NAME = "drop.fields.header.name";
-    private static final String DROP_FIELDS_FROM_KEY = "drop.fields.from.key";
-    private static final String DROP_FIELDS_KEEP_SCHEMA_COMPATIBLE = "drop.fields.keep.schema.compatible";
 
     @Test
     public void testTombstoneDroppedByDefault() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_TOMBSTONE_DELETES, "drop");
             transform.configure(props);
 
             final SourceRecord tombstone = new SourceRecord(new HashMap<>(), new HashMap<>(), "dummy", null, null);
@@ -56,7 +41,8 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testTombstoneDroppedConfigured() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
-            props.put(DROP_TOMBSTONES, "true");
+            // props.put(DROP_TOMBSTONES, "true");
+            props.put(HANDLE_TOMBSTONE_DELETES, "drop");
             transform.configure(props);
 
             final SourceRecord tombstone = new SourceRecord(new HashMap<>(), new HashMap<>(), "dummy", null, null);
@@ -68,7 +54,22 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testTombstoneForwardConfigured() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
-            props.put(DROP_TOMBSTONES, "false");
+            // props.put(DROP_TOMBSTONES, "false");
+            props.put(HANDLE_TOMBSTONE_DELETES, "tombstone");
+            transform.configure(props);
+
+            final SourceRecord tombstone = new SourceRecord(new HashMap<>(), new HashMap<>(), "dummy", null, null);
+            // assertThat(transform.apply(tombstone)).isEqualTo(tombstone);
+            // convert delete event to tombstone record and skip the following tombstone if existed
+            assertThat(transform.apply(tombstone)).isNull();
+        }
+    }
+
+    @Test
+    public void testTombstoneRewriteWithTombstone() {
+        try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
+            final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_TOMBSTONE_DELETES, "rewrite-with-tombstone");
             transform.configure(props);
 
             final SourceRecord tombstone = new SourceRecord(new HashMap<>(), new HashMap<>(), "dummy", null, null);
@@ -80,6 +81,7 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testTruncateDroppedByDefault() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_TOMBSTONE_DELETES, "tombstone");
             transform.configure(props);
 
             final SourceRecord truncate = createTruncateRecord();
@@ -87,20 +89,11 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
         }
     }
 
-    private String getSourceRecordHeaderByKey(SourceRecord record, String headerKey) {
-        Iterator<Header> operationHeader = record.headers().allWithName(headerKey);
-        if (!operationHeader.hasNext()) {
-            return null;
-        }
-
-        Object value = operationHeader.next().value();
-        return value != null ? value.toString() : null;
-    }
-
     @Test
     public void testDeleteDroppedByDefault() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_TOMBSTONE_DELETES, "drop");
             transform.configure(props);
 
             final SourceRecord deleteRecord = createDeleteRecord();
@@ -112,7 +105,7 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testHandleDeleteDrop() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
-            props.put(HANDLE_DELETES, "drop");
+            props.put(HANDLE_TOMBSTONE_DELETES, "drop");
             transform.configure(props);
 
             final SourceRecord deleteRecord = createDeleteRecord();
@@ -124,7 +117,7 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testHandleDeleteNone() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
-            props.put(HANDLE_DELETES, "none");
+            props.put(HANDLE_TOMBSTONE_DELETES, "tombstone");
             transform.configure(props);
 
             final SourceRecord deleteRecord = createDeleteRecord();
@@ -137,7 +130,7 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testHandleDeleteRewrite() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
-            props.put(HANDLE_DELETES, "rewrite");
+            props.put(HANDLE_TOMBSTONE_DELETES, "rewrite");
             transform.configure(props);
 
             final SourceRecord deleteRecord = createDeleteRecord();
@@ -150,7 +143,7 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testHandleCreateRewrite() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
-            props.put(HANDLE_DELETES, "rewrite");
+            props.put(HANDLE_TOMBSTONE_DELETES, "rewrite");
             props.put(ADD_HEADERS, "op");
             transform.configure(props);
 
@@ -167,6 +160,7 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testUnwrapCreateRecord() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_TOMBSTONE_DELETES, "tombstone");
             transform.configure(props);
 
             final SourceRecord createRecord = createCreateRecord();
@@ -181,6 +175,7 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testUnwrapCreateRecordWithOptionalDefaultValue() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_TOMBSTONE_DELETES, "tombstone");
             transform.configure(props);
 
             final SourceRecord createRecord = createCreateRecordWithOptionalNull();
@@ -194,6 +189,7 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testIgnoreUnknownRecord() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_TOMBSTONE_DELETES, "tombstone");
             transform.configure(props);
 
             final SourceRecord unknownRecord = createUnknownRecord();
@@ -209,6 +205,7 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testUnwrapPropagatesRecordHeaders() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_TOMBSTONE_DELETES, "tombstone");
             transform.configure(props);
 
             final SourceRecord createRecord = createCreateRecord();
@@ -229,6 +226,7 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testAddField() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_TOMBSTONE_DELETES, "tombstone");
             props.put(ADD_FIELDS, "op");
             transform.configure(props);
 
@@ -251,6 +249,7 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testAddTimestamp() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props1 = new HashMap<>();
+            props1.put(HANDLE_TOMBSTONE_DELETES, "tombstone");
             props1.put(ADD_FIELDS, "ts_ms");
             transform.configure(props1);
 
@@ -273,6 +272,7 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testAddFields() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_TOMBSTONE_DELETES, "tombstone");
             props.put(ADD_FIELDS, "op , lsn,id");
             props.put(ADD_FIELDS_PREFIX, "prefix.");
             transform.configure(props);
@@ -290,6 +290,7 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testNewFieldAndHeaderMapping() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_TOMBSTONE_DELETES, "tombstone");
             String fieldPrefix = "";
             String headerPrefix = "prefix.";
             props.put(ADD_FIELDS, "op:OP, lsn:LSN, id:ID, source.lsn:source_lsn, transaction.total_order:TOTAL_ORDER");
@@ -323,6 +324,7 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testAddFieldsForMissingOptionalField() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_TOMBSTONE_DELETES, "tombstone");
             props.put(ADD_FIELDS, "op,lsn,id");
             transform.configure(props);
 
@@ -339,6 +341,7 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testAddFieldsSpecifyStruct() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_TOMBSTONE_DELETES, "tombstone");
             props.put(ADD_FIELDS, "op,source.lsn,transaction.id,transaction.total_order");
             transform.configure(props);
 
@@ -356,6 +359,7 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testAddHeader() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_TOMBSTONE_DELETES, "tombstone");
             props.put(ADD_HEADERS, "op");
             transform.configure(props);
 
@@ -372,6 +376,7 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testAddHeaders() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_TOMBSTONE_DELETES, "tombstone");
             props.put(ADD_HEADERS, "op , lsn,id");
             transform.configure(props);
 
@@ -392,6 +397,7 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testAddHeadersForMissingOptionalField() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_TOMBSTONE_DELETES, "tombstone");
             props.put(ADD_HEADERS, "op,lsn,id");
             transform.configure(props);
 
@@ -412,6 +418,7 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testAddHeadersSpecifyStruct() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_TOMBSTONE_DELETES, "tombstone");
             props.put(ADD_HEADERS, "op,source.lsn,transaction.id,transaction.total_order");
             props.put(ADD_HEADERS_PREFIX, "prefix.");
             transform.configure(props);
@@ -434,6 +441,7 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testAddTopicRoutingField() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_TOMBSTONE_DELETES, "tombstone");
             props.put(ROUTE_BY_FIELD, "name");
             transform.configure(props);
 
@@ -447,6 +455,7 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testUpdateTopicRoutingField() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_TOMBSTONE_DELETES, "tombstone");
             props.put(ROUTE_BY_FIELD, "name");
             transform.configure(props);
 
@@ -460,8 +469,8 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testDeleteTopicRoutingField() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_TOMBSTONE_DELETES, "tombstone");
             props.put(ROUTE_BY_FIELD, "name");
-            props.put(HANDLE_DELETES, "none");
 
             transform.configure(props);
 
@@ -475,9 +484,8 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testAddHeadersHandleDeleteRewriteAndTombstone() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
-            props.put(HANDLE_DELETES, "rewrite");
+            props.put(HANDLE_TOMBSTONE_DELETES, "rewrite-with-tombstone");
             props.put(ADD_HEADERS, "op,source.lsn");
-            props.put(DROP_TOMBSTONES, "false");
             transform.configure(props);
 
             final SourceRecord deleteRecord = createDeleteRecord();
@@ -499,7 +507,7 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testAddFieldHandleDeleteRewrite() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
-            props.put(HANDLE_DELETES, "rewrite");
+            props.put(HANDLE_TOMBSTONE_DELETES, "rewrite");
             props.put(ADD_FIELDS, "op");
             transform.configure(props);
 
@@ -515,7 +523,7 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testAddFieldsHandleDeleteRewrite() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
-            props.put(HANDLE_DELETES, "rewrite");
+            props.put(HANDLE_TOMBSTONE_DELETES, "rewrite");
             props.put(ADD_FIELDS, "op,lsn");
             transform.configure(props);
 
@@ -532,9 +540,8 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testAddFieldsHandleDeleteRewriteAndTombstone() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
-            props.put(HANDLE_DELETES, "rewrite");
+            props.put(HANDLE_TOMBSTONE_DELETES, "rewrite-with-tombstone");
             props.put(ADD_FIELDS, "op,lsn");
-            props.put(DROP_TOMBSTONES, "false");
             transform.configure(props);
 
             final SourceRecord deleteRecord = createDeleteRecord();
@@ -553,7 +560,7 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testAddFieldsSpecifyStructHandleDeleteRewrite() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
-            props.put(HANDLE_DELETES, "rewrite");
+            props.put(HANDLE_TOMBSTONE_DELETES, "rewrite");
             props.put(ADD_FIELDS, "op,source.lsn");
             transform.configure(props);
 
@@ -570,6 +577,7 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void testSchemaChangeEventWithOperationHeader() {
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_TOMBSTONE_DELETES, "tombstone");
             props.put(ADD_HEADERS, "op");
             transform.configure(props);
 
@@ -586,14 +594,10 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void dropFieldsFromValueWithSchemaCompatibility() {
         final List<String> dropFields = List.of("id", "name");
         final String dropHeaderName = "drop-fields";
-        final org.apache.kafka.connect.data.Schema dropFieldsSchema = SchemaBuilder
-                .array(SchemaBuilder.OPTIONAL_STRING_SCHEMA)
-                .optional()
-                .name(dropHeaderName)
-                .build();
 
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_TOMBSTONE_DELETES, "drop");
             props.put(DROP_FIELDS_HEADER_NAME, "drop-fields");
             transform.configure(props);
 
@@ -658,14 +662,10 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void dropFieldsFromValueWithoutSchemaCompatibility() {
         final List<String> dropFields = List.of("id", "name");
         final String dropHeaderName = "drop-fields";
-        final org.apache.kafka.connect.data.Schema dropFieldsSchema = SchemaBuilder
-                .array(SchemaBuilder.OPTIONAL_STRING_SCHEMA)
-                .optional()
-                .name(dropHeaderName)
-                .build();
 
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_TOMBSTONE_DELETES, "drop");
             props.put(DROP_FIELDS_HEADER_NAME, "drop-fields");
             props.put(DROP_FIELDS_KEEP_SCHEMA_COMPATIBLE, "false");
             transform.configure(props);
@@ -735,14 +735,10 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void dropFieldsFromValueAndKeyWithSchemaCompatibility() {
         final List<String> dropFields = List.of("id", "name");
         final String dropHeaderName = "drop-fields";
-        final org.apache.kafka.connect.data.Schema dropFieldsSchema = SchemaBuilder
-                .array(SchemaBuilder.OPTIONAL_STRING_SCHEMA)
-                .optional()
-                .name(dropHeaderName)
-                .build();
 
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_TOMBSTONE_DELETES, "drop");
             props.put(DROP_FIELDS_HEADER_NAME, "drop-fields");
             props.put(DROP_FIELDS_FROM_KEY, "true");
             transform.configure(props);
@@ -808,14 +804,10 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
     public void dropFieldsFromValueAndKeyWithoutSchemaCompatibility() {
         final List<String> dropFields = List.of("id", "name");
         final String dropHeaderName = "drop-fields";
-        final org.apache.kafka.connect.data.Schema dropFieldsSchema = SchemaBuilder
-                .array(SchemaBuilder.OPTIONAL_STRING_SCHEMA)
-                .optional()
-                .name(dropHeaderName)
-                .build();
 
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_TOMBSTONE_DELETES, "drop");
             props.put(DROP_FIELDS_HEADER_NAME, "drop-fields");
             props.put(DROP_FIELDS_KEEP_SCHEMA_COMPATIBLE, "false");
             props.put(DROP_FIELDS_FROM_KEY, "true");
@@ -887,6 +879,7 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
 
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_TOMBSTONE_DELETES, "tombstone");
             String fieldPrefix = "";
             props.put(ADD_FIELDS, "notExisting,op:OP, lsn:LSN, id:ID, source.lsn:source_lsn, transaction.total_order:TOTAL_ORDER, changes:META_SRC_CHANGED");
             props.put(ADD_FIELDS_PREFIX, fieldPrefix);
@@ -911,6 +904,7 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
 
         try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
             final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_TOMBSTONE_DELETES, "tombstone");
             String fieldPrefix = "";
             props.put(ADD_FIELDS, "op:OP, lsn:LSN, id:ID, source.lsn:source_lsn, transaction.total_order:TOTAL_ORDER, notExist:META_SRC_CHANGED");
             props.put(ADD_FIELDS_PREFIX, fieldPrefix);
@@ -927,58 +921,28 @@ public class ExtractNewRecordStateTest extends AbstractExtractStateTest {
         }
     }
 
-    private SourceRecord createUpdateRecordWithChangedFields() {
-        Envelope changesEnvelope = Envelope.defineSchema()
-                .withName("changedFields.Envelope")
-                .withRecord(recordSchema)
-                .withSource(sourceSchema)
-                .withSchema(SchemaBuilder.array(Schema.STRING_SCHEMA), "changes")
-                .build();
+    @Test
+    @FixFor("DBZ-7615")
+    public void testEnvelopeTimestampFieldsHandledCorrectly() {
+        try (ExtractNewRecordState<SourceRecord> transform = new ExtractNewRecordState<>()) {
+            final Map<String, String> props = new HashMap<>();
+            props.put(ADD_FIELDS,
+                    "source.table:META_SRC_TABLENAME,source.ts_ms:META_SRC_TS_MS,source.ts_us:META_SRC_TS_US,source.ts_ns:META_SRC_TS_NS,ts_ms:META_TS_MS,ts_us:META_TS_US,ts_ns:META_TS_NS,op:META_SRC_OP,source.scn:META_SRC_SCN,source.snapshot:META_SRC_SNAPSHOT,source.user_name:META_SRC_USER,changes:META_SRC_CHANGES");
+            props.put(DROP_TOMBSTONES, "false");
+            props.put(HANDLE_TOMBSTONE_DELETES, "rewrite");
+            transform.configure(props);
 
-        final Struct before = new Struct(recordSchema);
-        final Struct after = new Struct(recordSchema);
-        final Struct source = new Struct(sourceSchema);
-        final Struct transaction = new Struct(TransactionMonitor.TRANSACTION_BLOCK_SCHEMA);
-        final List<String> changes = new ArrayList<>();
-        changes.add("name");
+            final Instant created = ZonedDateTime.of(2024, 3, 10, 1, 2, 3, 123456, ZoneOffset.UTC).toInstant();
+            final SourceRecord record = createCreateRecordWithCreateTime(created);
 
-        before.put("id", (byte) 1);
-        before.put("name", "myRecord");
-        after.put("id", (byte) 1);
-        after.put("name", "updatedRecord");
-        source.put("lsn", 1234);
-        transaction.put("id", "571");
-        transaction.put("total_order", 42L);
-        transaction.put("data_collection_order", 42L);
-
-        Struct struct = new Struct(changesEnvelope.schema());
-        struct.put(Envelope.FieldName.OPERATION, Envelope.Operation.UPDATE.code());
-        if (before != null) {
-            struct.put(Envelope.FieldName.BEFORE, before);
+            final SourceRecord unwrapped = transform.apply(record);
+            assertThat(((Struct) unwrapped.value()).get("__META_SRC_TS_MS")).isEqualTo(1588252618953L);
+            assertThat(((Struct) unwrapped.value()).get("__META_SRC_TS_US")).isEqualTo(1588252618953000L);
+            assertThat(((Struct) unwrapped.value()).get("__META_SRC_TS_NS")).isEqualTo(1588252618953000000L);
+            assertThat(((Struct) unwrapped.value()).get("__META_TS_MS")).isEqualTo(1710032523000L);
+            assertThat(((Struct) unwrapped.value()).get("__META_TS_US")).isEqualTo(1710032523000123L);
+            assertThat(((Struct) unwrapped.value()).get("__META_TS_NS")).isEqualTo(1710032523000123456L);
         }
-        struct.put(Envelope.FieldName.AFTER, after);
-        if (source != null) {
-            struct.put(Envelope.FieldName.SOURCE, source);
-        }
-        if (Instant.now() != null) {
-            struct.put(Envelope.FieldName.TIMESTAMP, Instant.now().toEpochMilli());
-        }
-
-        struct.put("changes", changes);
-        struct.put("transaction", transaction);
-
-        final SourceRecord updateRecord = new SourceRecord(new HashMap<>(), new HashMap<>(), "dummy", envelope.schema(), struct);
-        return updateRecord;
-    }
-
-    protected SourceRecord addDropFieldsHeader(SourceRecord record, String name, List<String> values) {
-        final org.apache.kafka.connect.data.Schema dropFieldsSchema = SchemaBuilder
-                .array(SchemaBuilder.OPTIONAL_STRING_SCHEMA)
-                .optional()
-                .name(name)
-                .build();
-        record.headers().add(name, values, dropFieldsSchema);
-        return record;
     }
 
 }

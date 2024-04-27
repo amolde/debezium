@@ -39,6 +39,7 @@ import io.debezium.schema.FieldNameSelector;
 import io.debezium.time.MicroTimestamp;
 import io.debezium.time.NanoTimestamp;
 import io.debezium.time.Timestamp;
+import io.debezium.transforms.ConnectRecordUtil;
 import io.debezium.transforms.SmtManager;
 import io.debezium.transforms.outbox.EventRouterConfigDefinition.AdditionalField;
 import io.debezium.transforms.outbox.EventRouterConfigDefinition.AdditionalFieldPlacement;
@@ -63,7 +64,7 @@ public class EventRouterDelegate<R extends ConnectRecord<R>> {
 
     private static final String ENVELOPE_PAYLOAD = "payload";
 
-    private final ExtractField<R> afterExtractor = new ExtractField.Value<>();
+    private ExtractField<R> afterExtractor;
     private final RegexRouter<R> regexRouter = new RegexRouter<>();
     private InvalidOperationBehavior invalidOperationBehavior;
     private final ActivateTracingSpan<R> tracingSmt = new ActivateTracingSpan<>();
@@ -75,6 +76,7 @@ public class EventRouterDelegate<R extends ConnectRecord<R>> {
     private boolean routeTombstoneOnEmptyPayload;
 
     private List<AdditionalField> additionalFields;
+    private boolean additionalFieldsErrorOnMissing;
 
     private final Map<Integer, Schema> versionedValueSchema = new HashMap<>();
     private BoundedConcurrentHashMap<Schema, Schema> payloadSchemaCache;
@@ -186,6 +188,9 @@ public class EventRouterDelegate<R extends ConnectRecord<R>> {
         AtomicReference<Integer> partition = new AtomicReference<>();
 
         additionalFields.forEach((additionalField -> {
+            if (!additionalFieldsErrorOnMissing && eventStruct.schema().field(additionalField.getField()) == null) {
+                return;
+            }
             switch (additionalField.getPlacement()) {
                 case ENVELOPE:
                     structValue.put(
@@ -368,12 +373,11 @@ public class EventRouterDelegate<R extends ConnectRecord<R>> {
 
         regexRouter.configure(regexRouterConfig);
 
-        final Map<String, String> afterExtractorConfig = new HashMap<>();
-        afterExtractorConfig.put("field", Envelope.FieldName.AFTER);
-
-        afterExtractor.configure(afterExtractorConfig);
+        afterExtractor = ConnectRecordUtil.extractAfterDelegate();
 
         additionalFields = parseAdditionalFieldsConfig(config);
+        additionalFieldsErrorOnMissing = config.getBoolean(EventRouterConfigDefinition.FIELDS_ADDITIONAL_ERROR_ON_MISSING);
+
         onlyHeadersInOutputMessage = additionalFields.stream().noneMatch(field -> field.getPlacement() == AdditionalFieldPlacement.ENVELOPE);
 
         payloadSchemaCache = new BoundedConcurrentHashMap<>(10000, 10, BoundedConcurrentHashMap.Eviction.LRU);

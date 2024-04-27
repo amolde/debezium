@@ -376,6 +376,11 @@ public class LogMinerStreamingChangeEventSourceMetrics
     }
 
     @Override
+    public long getAbandonedTransactionCount() {
+        return abandonedTransactionIds.getAll().size();
+    }
+
+    @Override
     public Set<String> getRolledBackTransactionIds() {
         return rolledBackTransactionIds.getAll();
     }
@@ -534,6 +539,16 @@ public class LogMinerStreamingChangeEventSourceMetrics
      */
     public void incrementScnFreezeCount() {
         scnFreezeCount.incrementAndGet();
+    }
+
+    /**
+     * Sets the number of times the system change number is considered frozen and has not changed over several consecutive
+     * LogMiner query batches.
+     *
+     * @param scnFreezeCount number of times the system change number is considered frozen
+     */
+    public void setScnFreezeCount(long scnFreezeCount) {
+        this.scnFreezeCount.set(scnFreezeCount);
     }
 
     /**

@@ -11,6 +11,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.config.ConfigValue;
@@ -19,10 +20,12 @@ import org.apache.kafka.connect.source.ExactlyOnceSupport;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.debezium.DebeziumException;
 import io.debezium.config.Configuration;
 import io.debezium.connector.common.RelationalBaseSourceConnector;
 import io.debezium.connector.postgresql.connection.PostgresConnection;
 import io.debezium.relational.RelationalDatabaseConnectorConfig;
+import io.debezium.relational.TableId;
 
 /**
  * A Kafka Connect source connector that creates tasks which use Postgresql streaming replication off a logical replication slot
@@ -90,7 +93,6 @@ public class PostgresConnector extends RelationalBaseSourceConnector {
                 // Prepare connection without initial statement execution
                 connection.connection(false);
                 testConnection(connection);
-                checkWalLevel(connection, postgresConfig);
                 checkLoginReplicationRoles(connection);
             }
             catch (SQLException e) {
@@ -140,21 +142,6 @@ public class PostgresConnector extends RelationalBaseSourceConnector {
         }
     }
 
-    private static void checkWalLevel(PostgresConnection connection, PostgresConnectorConfig config) throws SQLException {
-        final String walLevel = connection.queryAndMap(
-                "SHOW wal_level",
-                connection.singleResultMapper(rs -> rs.getString("wal_level"), "Could not fetch wal_level"));
-        if (!"logical".equals(walLevel)) {
-            if (config.getSnapshotter() != null && config.getSnapshotter().shouldStream()) {
-                // Logical WAL_LEVEL is only necessary for CDC snapshotting
-                throw new SQLException("Postgres server wal_level property must be 'logical' but is: '" + walLevel + "'");
-            }
-            else {
-                LOGGER.warn("WAL_LEVEL check failed but this is ignored as CDC was not requested");
-            }
-        }
-    }
-
     private static void testConnection(PostgresConnection connection) throws SQLException {
         connection.execute("SELECT version()");
         LOGGER.info("Successfully tested connection for {} with user '{}'", connection.connectionString(),
@@ -164,5 +151,19 @@ public class PostgresConnector extends RelationalBaseSourceConnector {
     @Override
     protected Map<String, ConfigValue> validateAllFields(Configuration config) {
         return config.validate(PostgresConnectorConfig.ALL_FIELDS);
+    }
+
+    @SuppressWarnings("unchecked")
+    @Override
+    public List<TableId> getMatchingCollections(Configuration config) {
+        PostgresConnectorConfig connectorConfig = new PostgresConnectorConfig(config);
+        try (PostgresConnection connection = new PostgresConnection(connectorConfig.getJdbcConfig(), PostgresConnection.CONNECTION_GENERAL)) {
+            return connection.readTableNames(connectorConfig.databaseName(), null, null, new String[]{ "TABLE" }).stream()
+                    .filter(tableId -> connectorConfig.getTableFilters().dataCollectionFilter().isIncluded(tableId))
+                    .collect(Collectors.toList());
+        }
+        catch (SQLException e) {
+            throw new DebeziumException(e);
+        }
     }
 }

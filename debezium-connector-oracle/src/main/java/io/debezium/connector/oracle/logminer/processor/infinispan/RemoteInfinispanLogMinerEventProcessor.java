@@ -15,6 +15,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Properties;
 
+import org.checkerframework.checker.units.qual.C;
 import org.infinispan.client.hotrod.RemoteCache;
 import org.infinispan.client.hotrod.RemoteCacheManager;
 import org.infinispan.client.hotrod.configuration.Configuration;
@@ -94,6 +95,7 @@ public class RemoteInfinispanLogMinerEventProcessor extends AbstractInfinispanLo
         this.schemaChangesCache = createCache(SCHEMA_CHANGES_CACHE_NAME, connectorConfig, LOG_MINING_BUFFER_INFINISPAN_CACHE_SCHEMA_CHANGES);
         this.eventCache = createCache(EVENTS_CACHE_NAME, connectorConfig, LOG_MINING_BUFFER_INFINISPAN_CACHE_EVENTS);
 
+        reCreateInMemoryCache();
         displayCacheStatistics();
     }
 
@@ -158,8 +160,8 @@ public class RemoteInfinispanLogMinerEventProcessor extends AbstractInfinispanLo
     @Override
     protected Optional<InfinispanTransaction> getOldestTransactionInCache() {
         InfinispanTransaction transaction = null;
-        if (!transactionCache.isEmpty()) {
-            try (CloseableIterator<InfinispanTransaction> iterator = transactionCache.values().iterator()) {
+        try (CloseableIterator<InfinispanTransaction> iterator = transactionCache.values().iterator()) {
+            if (iterator.hasNext()) {
                 // Seed with the first element
                 transaction = iterator.next();
                 while (iterator.hasNext()) {

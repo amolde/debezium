@@ -81,7 +81,9 @@ CONNECTORS_PER_VERSION = [
     '2.2' : ['mongodb', 'mysql', 'postgres', 'sqlserver', 'oracle', 'cassandra-3', 'cassandra-4', 'db2', 'vitess', 'spanner', 'jdbc'],
     '2.3' : ['mongodb', 'mysql', 'postgres', 'sqlserver', 'oracle', 'cassandra-3', 'cassandra-4', 'db2', 'vitess', 'spanner', 'jdbc'],
     '2.4' : ['mongodb', 'mysql', 'postgres', 'sqlserver', 'oracle', 'cassandra-3', 'cassandra-4', 'db2', 'vitess', 'spanner', 'jdbc'],
-    '2.5' : ['mongodb', 'mysql', 'postgres', 'sqlserver', 'oracle', 'cassandra-3', 'cassandra-4', 'db2', 'vitess', 'spanner', 'jdbc', 'informix']
+    '2.5' : ['mongodb', 'mysql', 'postgres', 'sqlserver', 'oracle', 'cassandra-3', 'cassandra-4', 'db2', 'vitess', 'spanner', 'jdbc', 'informix'],
+    '2.6' : ['mongodb', 'mysql', 'postgres', 'sqlserver', 'oracle', 'cassandra-3', 'cassandra-4', 'db2', 'vitess', 'spanner', 'jdbc', 'informix', 'ibmi'],
+    '2.7' : ['mongodb', 'mysql', 'postgres', 'sqlserver', 'oracle', 'cassandra-3', 'cassandra-4', 'db2', 'vitess', 'spanner', 'jdbc', 'informix', 'ibmi']
 ]
 
 CONNECTORS = CONNECTORS_PER_VERSION[VERSION_MAJOR_MINOR]
@@ -240,7 +242,7 @@ def mvnRelease(repoDir, repoName, branchName, buildArgs = '') {
         withCredentials([
             string(credentialsId: 'debezium-ci-gpg-passphrase', variable: 'GPG_PASSPHRASE'),
             usernamePassword(credentialsId: GIT_CREDENTIALS_ID, passwordVariable: 'GIT_PASSWORD', usernameVariable: 'GIT_USERNAME')]) {
-            def mvnlog = sh(script: "mvn release:perform -DlocalCheckout=$DRY_RUN -DconnectionUrl=scm:git:https://\${GIT_USERNAME}:\${GIT_PASSWORD}@${repoName} -Darguments=\"-s $HOME/.m2/settings-snapshots.xml -Dgpg.homedir=\$WORKSPACE/$GPG_DIR -Dgpg.passphrase=$GPG_PASSPHRASE -DskipTests -DskipITs $buildArgs\" $buildArgs", returnStdout: true).trim()
+            def mvnlog = sh(script: "mvn release:perform -DstagingProgressTimeoutMinutes=30 -DlocalCheckout=$DRY_RUN -DconnectionUrl=scm:git:https://\${GIT_USERNAME}:\${GIT_PASSWORD}@${repoName} -Darguments=\"-s $HOME/.m2/settings-snapshots.xml -DstagingProgressTimeoutMinutes=30 -Dgpg.homedir=\$WORKSPACE/$GPG_DIR -Dgpg.passphrase=$GPG_PASSPHRASE -DskipTests -DskipITs $buildArgs\" $buildArgs", returnStdout: true).trim()
             echo mvnlog
             def match = mvnlog =~ /Created staging repository with ID \"(iodebezium-.+)\"/
             if (!match[0]) {
@@ -326,11 +328,12 @@ node('release-node') {
 
             dir(DEBEZIUM_DIR) {
                 ORACLE_ARTIFACT_VERSION = (readFile('pom.xml') =~ /(?ms)<version.oracle.driver>(.+)<\/version.oracle.driver>/)[0][1]
+                ORACLE_INSTANTCLIENT_ARTIFACT_VERSION = (readFile('pom.xml') =~ /(?ms)<version.oracle.instantclient>(.+)<\/version.oracle.instantclient>/)[0][1]
                 ORACLE_ARTIFACT_DIR = "$HOME_DIR/oracle-libs/${ORACLE_ARTIFACT_VERSION}.0"
             }
             dir(ORACLE_ARTIFACT_DIR) {
                 sh "mvn install:install-file -DgroupId=com.oracle.instantclient -DartifactId=ojdbc8 -Dversion=$ORACLE_ARTIFACT_VERSION -Dpackaging=jar -Dfile=ojdbc8.jar"
-                sh "mvn install:install-file -DgroupId=com.oracle.instantclient -DartifactId=xstreams -Dversion=$ORACLE_ARTIFACT_VERSION -Dpackaging=jar -Dfile=xstreams.jar"
+                sh "mvn install:install-file -DgroupId=com.oracle.instantclient -DartifactId=xstreams -Dversion=$ORACLE_INSTANTCLIENT_ARTIFACT_VERSION -Dpackaging=jar -Dfile=xstreams.jar"
             }
         }
 
@@ -432,6 +435,11 @@ node('release-node') {
                 def buildArgs = "-Dversion.debezium=$RELEASE_VERSION"
                 dir(id) {
                     sh "git checkout -b $CANDIDATE_BRANCH"
+                    // Obtain dependecies not available in Maven Central (introduced for Cassandra Enerprise)
+                    if (fileExists(INSTALL_ARTIFACTS_SCRIPT)) {
+                        sh "./$INSTALL_ARTIFACTS_SCRIPT"
+                    }
+                    sh "mvn clean install -DskipTests -DskipITs -Passembly"
                     modifyFile("pom.xml") {
                         it.replaceFirst('<version>.+</version>\n    </parent>', "<version>$RELEASE_VERSION</version>\n    </parent>")
                     }
@@ -452,10 +460,6 @@ node('release-node') {
                         sh "mvn clean install -P$profiles -DskipTests -DskipITs"
                     }
                     sh "git commit -a -m '[release] Stable parent $RELEASE_VERSION for release'"
-                    // Obtain dependecies not available in Maven Central (introduced for Cassandra Enerprise)
-                    if (fileExists(INSTALL_ARTIFACTS_SCRIPT)) {
-                        sh "./$INSTALL_ARTIFACTS_SCRIPT"
-                    }
                     if(id != "operator") {
                         // Don't repeat build for operator
                         sh "mvn clean install -DskipTests -DskipITs"
@@ -494,7 +498,7 @@ node('release-node') {
             }
             echo "MD5 sums calculated: ${sums}"
             def serverSum = sh(script: "md5sum -b $LOCAL_MAVEN_REPO/io/debezium/debezium-server-dist/$RELEASE_VERSION/debezium-server-dist-${RELEASE_VERSION}.tar.gz | awk '{print \$1}'", returnStdout: true).trim()
-            def operatorSum = sh(script: "md5sum -b $LOCAL_MAVEN_REPO/io/debezium/debezium-operator/$RELEASE_VERSION/debezium-operator-${RELEASE_VERSION}.tar.gz | awk '{print \$1}'", returnStdout: true).trim()
+            def operatorSum = sh(script: "md5sum -b $LOCAL_MAVEN_REPO/io/debezium/debezium-operator-dist/$RELEASE_VERSION/debezium-operator-dist-${RELEASE_VERSION}.tar.gz | awk '{print \$1}'", returnStdout: true).trim()
             sums['SCRIPTING'] = sh(script: "md5sum -b $LOCAL_MAVEN_REPO/io/debezium/debezium-scripting/$RELEASE_VERSION/debezium-scripting-${RELEASE_VERSION}.tar.gz | awk '{print \$1}'", returnStdout: true).trim()
             sums['KCRESTEXT'] = sh(script: "md5sum -b $LOCAL_MAVEN_REPO/io/debezium/debezium-connect-rest-extension/$RELEASE_VERSION/debezium-connect-rest-extension-${RELEASE_VERSION}.tar.gz | awk '{print \$1}'", returnStdout: true).trim()
             dir("$IMAGES_DIR/connect/$IMAGE_TAG") {

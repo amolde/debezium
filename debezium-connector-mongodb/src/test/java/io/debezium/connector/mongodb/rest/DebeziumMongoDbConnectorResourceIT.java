@@ -25,6 +25,7 @@ import org.testcontainers.utility.MountableFile;
 import io.debezium.connector.mongodb.Module;
 import io.debezium.connector.mongodb.MongoDbConnector;
 import io.debezium.connector.mongodb.MongoDbConnectorConfig;
+import io.debezium.testing.testcontainers.Connector;
 import io.debezium.testing.testcontainers.ConnectorConfiguration;
 import io.debezium.testing.testcontainers.testhelper.RestExtensionTestInfrastructure;
 import io.debezium.testing.testcontainers.util.DockerUtils;
@@ -103,6 +104,133 @@ public class DebeziumMongoDbConnectorResourceIT {
                         Map.of("property", MongoDbConnectorConfig.CONNECTION_STRING.name(), "message",
                                 "The 'mongodb.connection.string' value is invalid: Missing connection string"),
                         Map.of("property", MongoDbConnectorConfig.TOPIC_PREFIX.name(), "message", "The 'topic.prefix' value is invalid: A value is required")));
+    }
+
+    @Test
+    public void testFiltersWithEmptyFilters() {
+        ConnectorConfiguration config = getMongoDbConnectorConfiguration(1);
+
+        given()
+                .port(RestExtensionTestInfrastructure.getDebeziumContainer().getFirstMappedPort())
+                .when().contentType(ContentType.JSON).accept(ContentType.JSON).body(config.toJson())
+                .put(DebeziumMongoDbConnectorResource.BASE_PATH + DebeziumMongoDbConnectorResource.VALIDATE_FILTERS_ENDPOINT)
+                .then().log().all()
+                .statusCode(200)
+                .assertThat().body("status", equalTo("VALID"))
+                .body("validationResults.size()", is(0))
+                .body("matchingCollections.size()", is(3))
+                .body("matchingCollections",
+                        hasItems(
+                                Map.of("namespace", "inventory", "name", "customers", "identifier", "inventory.customers"),
+                                Map.of("namespace", "inventory", "name", "orders", "identifier", "inventory.orders"),
+                                Map.of("namespace", "inventory", "name", "products", "identifier", "inventory.products")));
+    }
+
+    @Test
+    public void testFiltersWithValidCollectionIncludeList() {
+        ConnectorConfiguration config = getMongoDbConnectorConfiguration(1)
+                .with(MongoDbConnectorConfig.COLLECTION_INCLUDE_LIST.name(), "inventory\\.product.*");
+
+        given()
+                .port(RestExtensionTestInfrastructure.getDebeziumContainer().getFirstMappedPort())
+                .when().contentType(ContentType.JSON).accept(ContentType.JSON).body(config.toJson())
+                .put(DebeziumMongoDbConnectorResource.BASE_PATH + DebeziumMongoDbConnectorResource.VALIDATE_FILTERS_ENDPOINT)
+                .then().log().all()
+                .statusCode(200)
+                .assertThat().body("status", equalTo("VALID"))
+                .body("validationResults.size()", is(0))
+                .body("matchingCollections.size()", is(1))
+                .body("matchingCollections",
+                        hasItems(Map.of("namespace", "inventory", "name", "products", "identifier", "inventory.products")));
+    }
+
+    @Test
+    public void testFiltersWithValidDatabaseIncludeList() {
+        ConnectorConfiguration config = getMongoDbConnectorConfiguration(1)
+                .with(MongoDbConnectorConfig.DATABASE_INCLUDE_LIST.name(), "inventory");
+
+        given()
+                .port(RestExtensionTestInfrastructure.getDebeziumContainer().getFirstMappedPort())
+                .when().contentType(ContentType.JSON).accept(ContentType.JSON).body(config.toJson())
+                .put(DebeziumMongoDbConnectorResource.BASE_PATH + DebeziumMongoDbConnectorResource.VALIDATE_FILTERS_ENDPOINT)
+                .then().log().all()
+                .statusCode(200)
+                .assertThat().body("status", equalTo("VALID"))
+                .body("validationResults.size()", is(0))
+                .body("matchingCollections.size()", is(3))
+                .body("matchingCollections",
+                        hasItems(
+                                Map.of("namespace", "inventory", "name", "customers", "identifier", "inventory.customers"),
+                                Map.of("namespace", "inventory", "name", "orders", "identifier", "inventory.orders"),
+                                Map.of("namespace", "inventory", "name", "products", "identifier", "inventory.products")));
+    }
+
+    @Test
+    public void testFiltersWithInvalidDatabaseIncludeListPattern() {
+        ConnectorConfiguration config = getMongoDbConnectorConfiguration(1)
+                .with(MongoDbConnectorConfig.DATABASE_INCLUDE_LIST.name(), "+");
+
+        given()
+                .port(RestExtensionTestInfrastructure.getDebeziumContainer().getFirstMappedPort())
+                .when().contentType(ContentType.JSON).accept(ContentType.JSON).body(config.toJson())
+                .put(DebeziumMongoDbConnectorResource.BASE_PATH + DebeziumMongoDbConnectorResource.VALIDATE_FILTERS_ENDPOINT)
+                .then().log().all()
+                .statusCode(200)
+                .assertThat().body("status", equalTo("INVALID"))
+                .body("matchingCollections.size()", is(0))
+                .body("validationResults.size()", is(1))
+                .rootPath("validationResults[0]")
+                .body("property", equalTo(MongoDbConnectorConfig.DATABASE_INCLUDE_LIST.name()))
+                .body("message", equalTo(
+                        "The 'database.include.list' value is invalid: A comma-separated list of valid regular expressions is expected, but Dangling meta character '+' near index 0\n+\n^"));
+    }
+
+    @Test
+    public void testFiltersWithInvalidDatabaseExcludeListPattern() {
+        ConnectorConfiguration config = getMongoDbConnectorConfiguration(1)
+                .with(MongoDbConnectorConfig.DATABASE_EXCLUDE_LIST.name(), "+");
+
+        given()
+                .port(RestExtensionTestInfrastructure.getDebeziumContainer().getFirstMappedPort())
+                .when().contentType(ContentType.JSON).accept(ContentType.JSON).body(config.toJson())
+                .put(DebeziumMongoDbConnectorResource.BASE_PATH + DebeziumMongoDbConnectorResource.VALIDATE_FILTERS_ENDPOINT)
+                .then().log().all()
+                .statusCode(200)
+                .assertThat().body("status", equalTo("INVALID"))
+                .body("matchingCollections.size()", is(0))
+                .body("validationResults.size()", is(1))
+                .rootPath("validationResults[0]")
+                .body("property", equalTo(MongoDbConnectorConfig.DATABASE_EXCLUDE_LIST.name()))
+                .body("message", equalTo(
+                        "The 'database.exclude.list' value is invalid: A comma-separated list of valid regular expressions is expected, but Dangling meta character '+' near index 0\n+\n^"));
+    }
+
+    @Test
+    public void testMetricsEndpoint() throws InterruptedException {
+        ConnectorConfiguration config = getMongoDbConnectorConfiguration(1);
+
+        var connectorName = "my-mongodb-connector";
+        RestExtensionTestInfrastructure.getDebeziumContainer().registerConnector(
+                connectorName,
+                config);
+
+        RestExtensionTestInfrastructure.getDebeziumContainer().ensureConnectorState(connectorName, Connector.State.RUNNING);
+        RestExtensionTestInfrastructure.waitForConnectorTaskStatus(connectorName, 0, Connector.State.RUNNING);
+        RestExtensionTestInfrastructure.getDebeziumContainer().waitForStreamingRunning("mongodb", config.asProperties().getProperty("topic.prefix"), "streaming",
+                String.valueOf(0));
+
+        given()
+                .port(RestExtensionTestInfrastructure.getDebeziumContainer().getFirstMappedPort())
+                .when().contentType(ContentType.JSON).accept(ContentType.JSON).body(config.toJson())
+                .get(DebeziumMongoDbConnectorResource.BASE_PATH + DebeziumMongoDbConnectorResource.CONNECTOR_METRICS_ENDPOINT, connectorName)
+                .then().log().all()
+                .statusCode(200)
+                .body("name", equalTo(connectorName))
+                .body("connector.metrics.Connected", equalTo("true"))
+                .body("tasks[0].id", equalTo(0))
+                .body("tasks[0].namespaces[0].metrics.MilliSecondsSinceLastEvent", equalTo("-1"))
+                .body("tasks[0].namespaces[0].metrics.TotalNumberOfEventsSeen", equalTo("0"));
+
     }
 
     public static ConnectorConfiguration getMongoDbConnectorConfiguration(int id, String... options) {

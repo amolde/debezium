@@ -297,6 +297,10 @@ There are also other options available
 |
 |The maximum delay in case of a connection retry to Redis if using `RedisSchemaHistory`. Default: 10000 (ms)
 
+|[[debezium-source-database-history-redis-retry-max-attempts]]<<debezium-source-database-history-redis-retry-max-attempts, `debezium.source.schema.history.internal.redis.retry.max.attempts`>>
+|
+|The maximum number of attempts to connect to Redis. Default: 10
+
 |[[debezium-source-database-history-redis-connection-timeout-ms]]<<debezium-source-database-history-redis-connection-timeout-ms, `debezium.source.schema.history.internal.redis.connection.timeout.ms`>>
 |
 |Connection timeout of Redis client if using `RedisSchemaHistory`. Default: 2000 (ms)
@@ -375,7 +379,7 @@ By default the output is in JSON format but an arbitrary implementation of Kafka
 
 |[[debezium-format-key]]<<debezium-format-key, `debezium.format.key`>>
 |`json`
-|The name of the output format for key, one of `json`/`jsonbytearray`/`avro`/`protobuf`.
+|The name of the output format for key, one of `json`/`jsonbytearray`/`avro`/`protobuf`/`simplestring`/`binary`.
 
 |[[debezium-format-key-props]]<<debezium-format-key-props, `debezium.format.key.*`>>
 |
@@ -383,7 +387,7 @@ By default the output is in JSON format but an arbitrary implementation of Kafka
 
 |[[debezium-format-value]]<<debezium-format-value, `debezium.format.value`>>
 |`json`
-|The name of the output format for value, one of `json`/`jsonbytearray`/`avro`/`protobuf`/`cloudevents`.
+|The name of the output format for value, one of `json`/`jsonbytearray`/`avro`/`protobuf`/`cloudevents`/`simplestring`/`binary`.
 
 |[[debezium-format-value-props]]<<debezium-format-value-props, `debezium.format.value.*`>>
 |
@@ -616,15 +620,15 @@ This is not supported by Pub/Sub so a surrogate key must be used.
 |`10000000L`
 |Once the number of bytes in the batched request reaches this threshold, send all of the messages in a single call, even if neither the delay or message count thresholds have been exceeded yet.
 
-|[[flowControl-enabled]]<<flowControl-enabled, `debezium.sink.pubsub.flowControl.enabled`>>
+|[[flowcontrol-enabled]]<<flowcontrol-enabled, `debezium.sink.pubsub.flowcontrol.enabled`>>
 |`false`
 |When enabled, configures your publisher client with flow control to limit the rate of publish requests.
 
-|[[flowControl-max-outstanding-messages]]<<flowControl-max-outstanding-messages, `debezium.sink.pubsub.flowControl.max.outstanding.messages`>>
+|[[flowcontrol-max-outstanding-messages]]<<flowcontrol-max-outstanding-messages, `debezium.sink.pubsub.flowcontrol.max.outstanding.messages`>>
 |`Long.MAX_VALUE`
 |(Optional) If flow control enabled, the maxmium number of messages before messages are blocked from being published
 
-|[[flowControl-max-outstanding-bytes]]<<flowControl-max-outstanding-bytes, `debezium.sink.pubsub.flowControl.max.outstanding.bytes`>>
+|[[flowcontrol-max-outstanding-bytes]]<<flowcontrol-max-outstanding-bytes, `debezium.sink.pubsub.flowcontrol.max.outstanding.bytes`>>
 |`Long.MAX_VALUE`
 |(Optional) If flow control enabled, the maxmium number of bytes before messages are blocked from being published
 
@@ -921,6 +925,23 @@ https://docs.microsoft.com/azure/event-hubs/event-hubs-about[Azure Event Hubs] i
 
 |===
 
+===== Using partitions in EventHubs
+
+By default, when neither of the optional <<partition-id, `debezium.sink.eventhubs.partitionid`>> or <<partition-key, `debezium.sink.eventhubs.partitionkey`>> properties are defined, the EventHubs sink will send events round-robin to all available partitions.
+
+You can enforce all messages to be sent to a single, fixed, partition by setting the <<partition-id, `debezium.sink.eventhubs.partitionid`>> property. Alternatively, you can use the <<partition-key, `debezium.sink.eventhubs.partitionkey`>> property to specify a fixed partition key that EventHubs will use to route all events to a specific partition.
+
+If you have more specific routing requirements you can use the xref:transformations/partition-routing.adoc[Partition Routing] transformer. Ensure that the number of partitions specified in the transformer's `partition.topic.num` setting is equal or less to the number of partitions available in your EventHubs namespace, so that events cannot be routed to non-existing partition IDs. As an example, to route all events to 5 partitions based on their source schema name, you can set the following in your application.properties:
+
+[source]
+----
+# Uses a hash of `source.db` to calculate which partition to send the event to. Ensures all events from the same source schema are sent to the same partition.
+debezium.transforms=PartitionRouter
+debezium.transforms.PartitionRouter.type=io.debezium.transforms.partitions.PartitionRouting
+debezium.transforms.PartitionRouter.partition.payload.fields=source.db
+debezium.transforms.PartitionRouter.partition.topic.num=5
+----
+
 ===== Injection points
 
 The default sink behaviour can be modified by a custom logic providing alternative implementations for specific functionalities.
@@ -1210,6 +1231,22 @@ At least `bootstrap.servers`, `key.serializer` and `value.serializer` properties
 
 |===
 
+===== Injection points
+
+The Kafka sink behaviour can be modified by a custom logic providing alternative implementations for specific functionalities.
+When the alternative implementations are not available then the default ones are used.
+
+[cols="35%a,10%a,55%a",options="header"]
+|===
+|Interface
+|CDI classifier
+|Description
+
+|[[kafka-producer-ext-stream-name-mapper]]<<kafka-producer-ext-stream-name-mapper, `io.debezium.server.StreamNameMapper`>>
+|
+|Custom implementation maps the original destination (topic) name into another Kafka topic. By default, the same name is used.
+|===
+
 ==== Pravega
 
 https://pravega.io/[Pravega] is a cloud-native storage system for event streams and data streams. This sink offers two modes: non-transactional and transactional. The non-transactional mode individually writes each event in a {prodname} batch to Pravega. The transactional mode writes the {prodname} batch to a Pravega transaction that commits when the batch is completed.
@@ -1466,7 +1503,44 @@ When the alternative implementations are not available then the default ones are
 |Custom implementation maps the planned destination (stream) name into a RabbitMQ exchange name and (if enabled) into the routing key name.
 By default the same name is used.
 |===
+==== RabbitMQ Native Stream
 
+Since https://www.rabbitmq.com/[RabbitMQ 3.9], https://www.rabbitmq.com/streams.html[Streams] were introduced to RabbitMQ, utilizing a new blazingly-fast protocol that can be used alongside AMQP 0.9.1.
+Streams are great for large fan-outs, replay & time travel, and large logs, all with very high throughput (million messages per second).
+
+Debezium Server is enhanced to support publishing captured change events to native RabbitMQ Streams leveraging https://rabbitmq.github.io/rabbitmq-stream-java-client/stable/htmlsingle/[RabbitMQ Stream Java Client].
+[cols="35%a,10%a,55%a",options="header"]
+|===
+|Property
+|Default
+|Description
+
+|[[rabbitmqstream-type]]<<rabbitmqstream-type, `debezium.sink.type`>>
+|
+|Must be set to `rabbitmqstream`.
+
+|[[rabbitmqstream-host]]<<rabbitmqstream-host, `debezium.sink.rabbitmqstream.connection.host`>>
+| localhost
+|Host of RabbitMQ server.
+
+|[[rabbitmqstream-port]]<<rabbitmqstream-port, `debezium.sink.rabbitmqstream.connection.port`>>
+| 5552
+|Port of RabbitMQ Stream Protocol.
+
+|[[rabbitmqstream-connection]]<<rabbitmqstream-connection, `debezium.sink.rabbitmqstream.connection.*`>>
+|
+|The RabbitMQ module supports pass-through configuration.
+The connection https://github.com/rabbitmq/rabbitmqstream-java-client/blob/main/src/main/java/com/rabbitmq/client/ConnectionFactoryConfigurator.java[configuration properties] are passed to the RabbitMQ client with the prefix removed.
+
+|[[rabbitmqstream-ack-timeout]]<<rabbitmqstream-ack-timeout, `debezium.sink.rabbitmqstream.ackTimeout`>>
+| 30000
+| Defines the maximum time in milliseconds to wait a confirm from the broker after publishing a message.
+|[[rabbitmqstream-null-value]]<<rabbitmqstream-null-value, `debezium.sink.rabbitmqstream.null.value`>>
+|`default`
+|RabbitMQ does not support the notion of null payloads, as is the case with tombstone events.
+So this string will be used as value for records without a payload.
+
+|===
 == Extensions
 
 {prodname} Server uses the https://quarkus.io/[Quarkus framework] and relies on dependency injection to enable developer to extend its behaviour.

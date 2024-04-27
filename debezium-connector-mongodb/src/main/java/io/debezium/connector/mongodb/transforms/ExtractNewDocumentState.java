@@ -9,7 +9,6 @@ import static io.debezium.transforms.ExtractNewRecordStateConfigDefinition.CONFI
 import static io.debezium.transforms.ExtractNewRecordStateConfigDefinition.DELETED_FIELD;
 import static org.apache.kafka.connect.transforms.util.Requirements.requireStruct;
 
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -39,6 +38,7 @@ import io.debezium.data.Envelope;
 import io.debezium.schema.FieldNameSelector;
 import io.debezium.schema.SchemaNameAdjuster;
 import io.debezium.transforms.AbstractExtractNewRecordState;
+import io.debezium.transforms.ConnectRecordUtil;
 
 /**
  * Debezium Mongo Connector generates the CDC records in String format. Sink connectors usually are not able to parse
@@ -130,12 +130,21 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> extends Abstrac
             .withDescription("Delimiter to concat between field names from the input record when generating field names for the"
                     + "output record.");
 
-    private final ExtractField<R> keyExtractor = new ExtractField.Key<>();
-    private final Flatten<R> recordFlattener = new Flatten.Value<>();
+    public static final Field REWRITE_TOMBSTONE_DELETES_WITH_ID = Field.create("delete.tombstone.handling.mode.rewrite-with-id")
+            .withDisplayName("Rewrite delete records with id field")
+            .withType(ConfigDef.Type.BOOLEAN)
+            .withWidth(ConfigDef.Width.SHORT)
+            .withImportance(ConfigDef.Importance.LOW)
+            .withDefault(false)
+            .withDescription(
+                    "When set to true and \"delete.tombstone.handling.mode\" is rewrite, extracts the \"id\" from the deleted record's key and includes it as \"_id\" in the event payload.");
+
+    private ExtractField<R> keyExtractor;
+    private Flatten<R> recordFlattener;
     private MongoDataConverter converter;
     private boolean flattenStruct;
     private String delimiter;
-
+    private boolean rewriteTombstoneDeletesWithId;
     private final Field.Set configFields = CONFIG_FIELDS.with(ARRAY_ENCODING, FLATTEN_STRUCT, DELIMITER);
 
     @Override
@@ -152,14 +161,10 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> extends Abstrac
 
         flattenStruct = config.getBoolean(FLATTEN_STRUCT);
         delimiter = config.getString(DELIMITER);
+        rewriteTombstoneDeletesWithId = config.getBoolean(REWRITE_TOMBSTONE_DELETES_WITH_ID);
 
-        Map<String, String> delegateConfig = new HashMap<>();
-        delegateConfig.put("field", "id");
-        keyExtractor.configure(delegateConfig);
-
-        delegateConfig = new HashMap<>();
-        delegateConfig.put("delimiter", delimiter);
-        recordFlattener.configure(delegateConfig);
+        keyExtractor = ConnectRecordUtil.extractKeyDelegate("id");
+        recordFlattener = ConnectRecordUtil.flattenValueDelegate(delimiter);
     }
 
     @Override
@@ -178,9 +183,9 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> extends Abstrac
         BsonDocument keyDocument = BsonDocument.parse("{ \"id\" : " + keyRecord.key().toString() + "}");
         BsonDocument valueDocument = new BsonDocument();
 
-        // Tombstone message
+        // Handling tombstone record
         if (record.value() == null) {
-            R newRecord = extractRecordStrategy.handleTruncateRecord(record);
+            R newRecord = extractRecordStrategy.handleTombstoneRecord(record);
             if (newRecord == null) {
                 return null;
             }
@@ -221,6 +226,9 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> extends Abstrac
         // add rewrite field
         if (extractRecordStrategy.isRewriteMode()) {
             valueDocument.append(DELETED_FIELD, new BsonBoolean(isDeletion));
+            if (rewriteTombstoneDeletesWithId && !valueDocument.containsKey("_id") && keyDocument.containsKey("id")) {
+                valueDocument.append("_id", keyDocument.get("id"));
+            }
         }
 
         return newRecord(record, keyDocument, valueDocument);

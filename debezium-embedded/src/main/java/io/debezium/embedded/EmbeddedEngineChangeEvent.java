@@ -13,7 +13,7 @@ import io.debezium.engine.ChangeEvent;
 import io.debezium.engine.Header;
 import io.debezium.engine.RecordChangeEvent;
 
-class EmbeddedEngineChangeEvent<K, V, H> implements ChangeEvent<K, V>, RecordChangeEvent<V> {
+public class EmbeddedEngineChangeEvent<K, V, H> implements ChangeEvent<K, V>, RecordChangeEvent<V> {
 
     private final K key;
     private final V value;
@@ -51,6 +51,11 @@ class EmbeddedEngineChangeEvent<K, V, H> implements ChangeEvent<K, V>, RecordCha
     @Override
     public String destination() {
         return sourceRecord.topic();
+    }
+
+    @Override
+    public Integer partition() {
+        return sourceRecord.kafkaPartition();
     }
 
     public SourceRecord sourceRecord() {

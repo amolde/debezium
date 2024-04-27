@@ -24,13 +24,13 @@ import org.apache.kafka.connect.source.SourceConnector;
 import org.apache.kafka.connect.source.SourceRecord;
 
 import io.debezium.config.Configuration;
-import io.debezium.embedded.AbstractConnectorTest;
+import io.debezium.embedded.async.AbstractAsyncEngineConnectorTest;
 import io.debezium.engine.DebeziumEngine;
 import io.debezium.jdbc.JdbcConnection;
 import io.debezium.pipeline.signal.actions.AbstractSnapshotSignal;
 import io.debezium.util.Strings;
 
-public abstract class AbstractSnapshotTest<T extends SourceConnector> extends AbstractConnectorTest {
+public abstract class AbstractSnapshotTest<T extends SourceConnector> extends AbstractAsyncEngineConnectorTest {
 
     protected static final int ROW_COUNT = 1000;
     protected static final Path SCHEMA_HISTORY_PATH = Files.createTestingPath("file-schema-history-is.txt")
@@ -189,10 +189,21 @@ public abstract class AbstractSnapshotTest<T extends SourceConnector> extends Ab
                                                                       String topicName,
                                                                       Consumer<List<SourceRecord>> recordConsumer)
             throws InterruptedException {
+        return consumeMixedWithIncrementalSnapshot(recordCount, dataCompleted, idCalculator, valueConverter, topicName, recordConsumer, true);
+    }
+
+    protected <V> Map<Integer, V> consumeMixedWithIncrementalSnapshot(int recordCount,
+                                                                      Predicate<Map.Entry<Integer, V>> dataCompleted,
+                                                                      Function<Struct, Integer> idCalculator,
+                                                                      Function<SourceRecord, V> valueConverter,
+                                                                      String topicName,
+                                                                      Consumer<List<SourceRecord>> recordConsumer,
+                                                                      boolean assertRecords)
+            throws InterruptedException {
         final Map<Integer, V> dbChanges = new HashMap<>();
         int noRecords = 0;
         for (;;) {
-            final SourceRecords records = consumeRecordsByTopic(1);
+            final SourceRecords records = consumeRecordsByTopic(1, assertRecords);
             final List<SourceRecord> dataRecords = records.recordsForTopic(topicName);
             if (records.allRecordsInOrder().isEmpty()) {
                 noRecords++;

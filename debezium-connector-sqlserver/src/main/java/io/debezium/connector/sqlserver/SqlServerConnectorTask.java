@@ -14,6 +14,7 @@ import org.apache.kafka.connect.source.SourceRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.debezium.bean.StandardBeanNames;
 import io.debezium.config.CommonConnectorConfig;
 import io.debezium.config.Configuration;
 import io.debezium.config.Field;
@@ -32,6 +33,7 @@ import io.debezium.pipeline.spi.Offsets;
 import io.debezium.relational.TableId;
 import io.debezium.schema.SchemaFactory;
 import io.debezium.schema.SchemaNameAdjuster;
+import io.debezium.snapshot.SnapshotterService;
 import io.debezium.spi.topic.TopicNamingStrategy;
 import io.debezium.util.Clock;
 
@@ -90,7 +92,21 @@ public class SqlServerConnectorTask extends BaseSourceTask<SqlServerPartition, S
                 new SqlServerPartition.Provider(connectorConfig),
                 new SqlServerOffsetContext.Loader(connectorConfig));
 
-        schema.recover(offsets);
+        // Manual Bean Registration
+        connectorConfig.getBeanRegistry().add(StandardBeanNames.CONFIGURATION, config);
+        connectorConfig.getBeanRegistry().add(StandardBeanNames.CONNECTOR_CONFIG, connectorConfig);
+        connectorConfig.getBeanRegistry().add(StandardBeanNames.DATABASE_SCHEMA, schema);
+        connectorConfig.getBeanRegistry().add(StandardBeanNames.JDBC_CONNECTION, metadataConnection);
+        connectorConfig.getBeanRegistry().add(StandardBeanNames.VALUE_CONVERTER, valueConverters);
+        connectorConfig.getBeanRegistry().add(StandardBeanNames.OFFSETS, offsets);
+
+        // Service providers
+        registerServiceProviders(connectorConfig.getServiceRegistry());
+
+        final SnapshotterService snapshotterService = connectorConfig.getServiceRegistry().tryGetService(SnapshotterService.class);
+
+        validateAndLoadSchemaHistory(connectorConfig, dataConnection::validateLogPosition, offsets, schema,
+                snapshotterService.getSnapshotter());
 
         taskContext = new SqlServerTaskContext(connectorConfig, schema);
 
@@ -132,13 +148,15 @@ public class SqlServerConnectorTask extends BaseSourceTask<SqlServerPartition, S
                 errorHandler,
                 SqlServerConnector.class,
                 connectorConfig,
-                new SqlServerChangeEventSourceFactory(connectorConfig, connectionFactory, metadataConnection, errorHandler, dispatcher, clock, schema),
+                new SqlServerChangeEventSourceFactory(connectorConfig, connectionFactory, metadataConnection, errorHandler, dispatcher, clock, schema,
+                        notificationService, snapshotterService),
                 new SqlServerMetricsFactory(offsets.getPartitions()),
                 dispatcher,
                 schema,
                 clock,
                 signalProcessor,
-                notificationService);
+                notificationService,
+                snapshotterService);
 
         coordinator.start(taskContext, this.queue, metadataProvider);
 
@@ -149,16 +167,17 @@ public class SqlServerConnectorTask extends BaseSourceTask<SqlServerPartition, S
     public List<SourceRecord> doPoll() throws InterruptedException {
         final List<DataChangeEvent> records = queue.poll();
 
-        final List<SourceRecord> sourceRecords = records.stream()
+        return records.stream()
                 .map(DataChangeEvent::getRecord)
                 .collect(Collectors.toList());
+    }
 
+    @Override
+    protected void resetErrorHandlerRetriesIfNeeded() {
         // Reset the retries if all partitions have streamed without exceptions at least once after a restart
         if (coordinator.getErrorHandler().getRetries() > 0 && ((SqlServerChangeEventSourceCoordinator) coordinator).firstStreamingIterationCompletedSuccessfully()) {
             coordinator.getErrorHandler().resetRetries();
         }
-
-        return sourceRecords;
     }
 
     @Override
@@ -190,4 +209,5 @@ public class SqlServerConnectorTask extends BaseSourceTask<SqlServerPartition, S
     protected Iterable<Field> getAllConfigurationFields() {
         return SqlServerConnectorConfig.ALL_FIELDS;
     }
+
 }

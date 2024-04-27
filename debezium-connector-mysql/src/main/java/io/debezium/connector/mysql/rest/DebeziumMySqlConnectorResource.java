@@ -5,18 +5,28 @@
  */
 package io.debezium.connector.mysql.rest;
 
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+
+import javax.management.MalformedObjectNameException;
 import javax.ws.rs.Consumes;
 import javax.ws.rs.GET;
 import javax.ws.rs.Path;
 import javax.ws.rs.Produces;
 import javax.ws.rs.core.MediaType;
 
-import org.apache.kafka.connect.connector.Connector;
+import org.apache.kafka.connect.health.ConnectClusterState;
 
+import io.debezium.config.Configuration;
 import io.debezium.connector.mysql.Module;
 import io.debezium.connector.mysql.MySqlConnector;
 import io.debezium.rest.ConnectionValidationResource;
+import io.debezium.rest.FilterValidationResource;
+import io.debezium.rest.MetricsResource;
 import io.debezium.rest.SchemaResource;
+import io.debezium.rest.model.DataCollection;
+import io.debezium.rest.model.MetricsDescriptor;
 
 /**
  * A JAX-RS Resource class defining endpoints of the Debezium MySQL Connect REST Extension
@@ -25,12 +35,15 @@ import io.debezium.rest.SchemaResource;
 @Path(DebeziumMySqlConnectorResource.BASE_PATH)
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
-public class DebeziumMySqlConnectorResource implements SchemaResource, ConnectionValidationResource {
+public class DebeziumMySqlConnectorResource implements SchemaResource, ConnectionValidationResource, FilterValidationResource, MetricsResource {
 
     public static final String BASE_PATH = "/debezium/mysql";
     public static final String VERSION_ENDPOINT = "/version";
-    public static final String VALIDATE_PROPERTIES_ENDPOINT = "/validate/properties";
-    public static final String VALIDATE_CONNECTOR_ENDPOINT = "/validate/connector";
+    private final ConnectClusterState connectClusterState;
+
+    public DebeziumMySqlConnectorResource(ConnectClusterState connectClusterState) {
+        this.connectClusterState = connectClusterState;
+    }
 
     @Override
     public String getSchemaFilePath() {
@@ -38,8 +51,14 @@ public class DebeziumMySqlConnectorResource implements SchemaResource, Connectio
     }
 
     @Override
-    public Connector getConnector() {
+    public MySqlConnector getConnector() {
         return new MySqlConnector();
+    }
+
+    @Override
+    public MetricsDescriptor getMetrics(String connectorName) throws MalformedObjectNameException {
+        Map<String, String> connectorConfig = connectClusterState.connectorConfig(connectorName);
+        return queryMetrics(connectorConfig, connectorName, Module.contextName().toLowerCase(), "streaming");
     }
 
     @GET
@@ -48,4 +67,10 @@ public class DebeziumMySqlConnectorResource implements SchemaResource, Connectio
         return Module.version();
     }
 
+    @Override
+    public List<DataCollection> getMatchingCollections(Configuration configuration) {
+        return getConnector().getMatchingCollections(configuration).stream()
+                .map(tableId -> new DataCollection(tableId.catalog(), tableId.table()))
+                .collect(Collectors.toList());
+    }
 }

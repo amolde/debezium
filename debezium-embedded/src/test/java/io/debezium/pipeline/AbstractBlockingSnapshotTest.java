@@ -34,6 +34,7 @@ import org.awaitility.Awaitility;
 import org.junit.Test;
 
 import io.debezium.config.Configuration;
+import io.debezium.doc.FixFor;
 import io.debezium.jdbc.JdbcConnection;
 import io.debezium.junit.EqualityCheck;
 import io.debezium.junit.SkipWhenConnectorUnderTest;
@@ -55,6 +56,8 @@ public abstract class AbstractBlockingSnapshotTest extends AbstractSnapshotTest 
 
     @Override
     protected abstract String tableName();
+
+    protected abstract String escapedTableDataCollectionId();
 
     @Override
     protected abstract String connector();
@@ -185,6 +188,36 @@ public abstract class AbstractBlockingSnapshotTest extends AbstractSnapshotTest 
         assertDdl(ddls);
     }
 
+    @Test
+    @FixFor("DBZ-7718")
+    public void executeBlockingSnapshotWithEscapedCollectionName() throws Exception {
+        // Testing.Print.enable();
+
+        populateTable();
+
+        startConnectorWithSnapshot(x -> mutableConfig(false, false));
+
+        waitForSnapshotToBeCompleted(connector(), server(), task(), database());
+
+        insertRecords(ROW_COUNT, ROW_COUNT);
+
+        SourceRecords consumedRecordsByTopic = consumeRecordsByTopic(ROW_COUNT * 2, 10);
+        assertRecordsFromSnapshotAndStreamingArePresent(ROW_COUNT * 2, consumedRecordsByTopic);
+
+        sendAdHocSnapshotSignalWithAdditionalConditionWithSurrogateKey("", "", BLOCKING, escapedTableDataCollectionId());
+
+        waitForLogMessage("Snapshot completed", AbstractSnapshotChangeEventSource.class);
+
+        signalingRecords = 1;
+
+        assertRecordsFromSnapshotAndStreamingArePresent((ROW_COUNT * 2), consumeRecordsByTopic((ROW_COUNT * 2) + signalingRecords, 10));
+
+        insertRecords(ROW_COUNT, ROW_COUNT * 2);
+
+        assertStreamingRecordsArePresent(ROW_COUNT, consumeRecordsByTopic(ROW_COUNT, 10));
+
+    }
+
     protected int expectedDdlsCount() {
         return 0;
     };
@@ -236,7 +269,7 @@ public abstract class AbstractBlockingSnapshotTest extends AbstractSnapshotTest 
                 .collect(Collectors.toList());
     }
 
-    private static void waitForLogMessage(String message, Class<?> logEmitterClass) {
+    protected static void waitForLogMessage(String message, Class<?> logEmitterClass) {
         LogInterceptor interceptor = new LogInterceptor(logEmitterClass);
         Awaitility.await()
                 .alias("Snapshot not completed on time")
@@ -249,13 +282,13 @@ public abstract class AbstractBlockingSnapshotTest extends AbstractSnapshotTest 
         return Executors.newSingleThreadExecutor().submit(operation);
     }
 
-    private void assertStreamingRecordsArePresent(int expectedRecords, SourceRecords recordsByTopic) throws InterruptedException {
+    protected void assertStreamingRecordsArePresent(int expectedRecords, SourceRecords recordsByTopic) {
 
         assertRecordsWithValuesPresent(expectedRecords, IntStream.range(2000, 2999).boxed().collect(Collectors.toList()), topicName(),
                 recordsByTopic);
     }
 
-    private void assertRecordsFromSnapshotAndStreamingArePresent(int expectedRecords, SourceRecords recordsByTopic) throws InterruptedException {
+    protected void assertRecordsFromSnapshotAndStreamingArePresent(int expectedRecords, SourceRecords recordsByTopic) throws InterruptedException {
 
         assertRecordsWithValuesPresent(expectedRecords, IntStream.range(0, expectedRecords - 1).boxed().collect(Collectors.toList()), topicName(),
                 recordsByTopic);
@@ -270,7 +303,7 @@ public abstract class AbstractBlockingSnapshotTest extends AbstractSnapshotTest 
         assertThat(actual).containsAll(expectedValues);
     }
 
-    private void insertRecords(int rowCount, int startingPkId) throws SQLException {
+    protected void insertRecords(int rowCount, int startingPkId) throws SQLException {
 
         try (JdbcConnection connection = databaseConnection()) {
             connection.setAutoCommit(false);
