@@ -285,7 +285,8 @@ public class MariaDbConnectorTask extends BinlogSourceTask<MariaDbPartition, Mar
                 connectorConfig.getBigIntUnsignedHandlingMode().asBigIntUnsignedMode(),
                 connectorConfig.binaryHandlingMode(),
                 connectorConfig.isTimeAdjustedEnabled() ? MariaDbValueConverters::adjustTemporal : x -> x,
-                connectorConfig.getEventConvertingFailureHandlingMode());
+                connectorConfig.getEventConvertingFailureHandlingMode(),
+                connectorConfig.getServiceRegistry());
     }
 
     private BinlogFieldReader getFieldReader(MariaDbConnectorConfig connectorConfig) {

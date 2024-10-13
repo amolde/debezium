@@ -55,6 +55,7 @@ import io.debezium.config.CommonConnectorConfig.BinaryHandlingMode;
 import io.debezium.connector.postgresql.PostgresConnectorConfig.HStoreHandlingMode;
 import io.debezium.connector.postgresql.PostgresConnectorConfig.IntervalHandlingMode;
 import io.debezium.connector.postgresql.data.Ltree;
+import io.debezium.connector.postgresql.data.vector.SparseVector;
 import io.debezium.connector.postgresql.proto.PgProto;
 import io.debezium.data.Bits;
 import io.debezium.data.Json;
@@ -64,6 +65,8 @@ import io.debezium.data.VariableScaleDecimal;
 import io.debezium.data.geometry.Geography;
 import io.debezium.data.geometry.Geometry;
 import io.debezium.data.geometry.Point;
+import io.debezium.data.vector.DoubleVector;
+import io.debezium.data.vector.FloatVector;
 import io.debezium.jdbc.JdbcValueConverters;
 import io.debezium.jdbc.TemporalPrecisionMode;
 import io.debezium.relational.Column;
@@ -321,6 +324,15 @@ public class PostgresValueConverter extends JdbcValueConverters {
                 else if (oidValue == typeRegistry.ltreeOid()) {
                     return Ltree.builder();
                 }
+                else if (oidValue == typeRegistry.vectorOid()) {
+                    return DoubleVector.builder();
+                }
+                else if (oidValue == typeRegistry.halfVectorOid()) {
+                    return FloatVector.builder();
+                }
+                else if (oidValue == typeRegistry.sparseVectorOid()) {
+                    return SparseVector.builder();
+                }
                 else if (oidValue == typeRegistry.hstoreArrayOid()) {
                     return SchemaBuilder.array(hstoreSchema().optional().build());
                 }
@@ -525,6 +537,15 @@ public class PostgresValueConverter extends JdbcValueConverters {
                 else if (oidValue == typeRegistry.ltreeOid()) {
                     return data -> convertLtree(column, fieldDefn, data);
                 }
+                else if (oidValue == typeRegistry.vectorOid()) {
+                    return data -> convertPgVector(column, fieldDefn, data);
+                }
+                else if (oidValue == typeRegistry.halfVectorOid()) {
+                    return data -> convertPgHalfVector(column, fieldDefn, data);
+                }
+                else if (oidValue == typeRegistry.sparseVectorOid()) {
+                    return data -> convertPgSparseVector(column, fieldDefn, data);
+                }
                 else if (oidValue == typeRegistry.ltreeArrayOid()) {
                     return data -> convertLtreeArray(column, fieldDefn, data);
                 }
@@ -655,6 +676,48 @@ public class PostgresValueConverter extends JdbcValueConverters {
             }
             else if (data instanceof PGobject) {
                 r.deliver(data.toString());
+            }
+        });
+    }
+
+    private Object convertPgVector(Column column, Field fieldDefn, Object data) {
+        return convertValue(column, fieldDefn, data, Collections.emptyList(), r -> {
+            if (data instanceof byte[] typedData) {
+                r.deliver(DoubleVector.fromLogical(fieldDefn.schema(), new String(typedData, databaseCharset)));
+            }
+            if (data instanceof String typedData) {
+                r.deliver(DoubleVector.fromLogical(fieldDefn.schema(), typedData));
+            }
+            else if (data instanceof PGobject typedData) {
+                r.deliver(DoubleVector.fromLogical(fieldDefn.schema(), typedData.getValue()));
+            }
+        });
+    }
+
+    private Object convertPgHalfVector(Column column, Field fieldDefn, Object data) {
+        return convertValue(column, fieldDefn, data, Collections.emptyList(), r -> {
+            if (data instanceof byte[] typedData) {
+                r.deliver(FloatVector.fromLogical(fieldDefn.schema(), new String(typedData, databaseCharset)));
+            }
+            if (data instanceof String typedData) {
+                r.deliver(FloatVector.fromLogical(fieldDefn.schema(), typedData));
+            }
+            else if (data instanceof PGobject typedData) {
+                r.deliver(FloatVector.fromLogical(fieldDefn.schema(), typedData.getValue()));
+            }
+        });
+    }
+
+    private Object convertPgSparseVector(Column column, Field fieldDefn, Object data) {
+        return convertValue(column, fieldDefn, data, Collections.emptyList(), r -> {
+            if (data instanceof byte[] typedData) {
+                r.deliver(SparseVector.fromLogical(fieldDefn.schema(), new String(typedData, databaseCharset)));
+            }
+            if (data instanceof String typedData) {
+                r.deliver(SparseVector.fromLogical(fieldDefn.schema(), typedData));
+            }
+            else if (data instanceof PGobject typedData) {
+                r.deliver(SparseVector.fromLogical(fieldDefn.schema(), typedData.getValue()));
             }
         });
     }
@@ -803,7 +866,9 @@ public class PostgresValueConverter extends JdbcValueConverters {
     }
 
     protected Object convertMoney(Column column, Field fieldDefn, Object data, DecimalMode mode) {
-        return convertValue(column, fieldDefn, data, BigDecimal.ZERO.setScale(moneyFractionDigits), (r) -> {
+        var fallback = decimalMode.equals(decimalMode.STRING) ? BigDecimal.ZERO.setScale(moneyFractionDigits).toString()
+                : decimalMode.equals(decimalMode.DOUBLE) ? BigDecimal.ZERO.setScale(moneyFractionDigits).doubleValue() : BigDecimal.ZERO.setScale(moneyFractionDigits);
+        return convertValue(column, fieldDefn, data, fallback, (r) -> {
             switch (mode) {
                 case DOUBLE:
                     if (data instanceof BigDecimal) {

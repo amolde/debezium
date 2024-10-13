@@ -16,6 +16,8 @@ import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -43,6 +45,7 @@ import io.debezium.pipeline.spi.Partition;
 import io.debezium.relational.Attribute;
 import io.debezium.relational.Column;
 import io.debezium.relational.ColumnEditor;
+import io.debezium.relational.Table;
 import io.debezium.relational.TableId;
 import io.debezium.relational.Tables;
 import io.debezium.relational.Tables.ColumnNameFilter;
@@ -312,9 +315,13 @@ public class OracleConnection extends JdbcConnection {
             // By querying for TABLE_TYPE is null, we are explicitly confirming what if an entry exists
             // that the table is in-fact a relational table and if the result set is empty, the object
             // is another type, likely an object-based table, in which case we cannot generate DDL.
-            final String tableType = "SELECT COUNT(1) FROM ALL_ALL_TABLES WHERE OWNER='" + tableId.schema()
-                    + "' AND TABLE_NAME='" + tableId.table() + "' AND TABLE_TYPE IS NULL";
-            if (queryAndMap(tableType, rs -> rs.next() ? rs.getInt(1) : 0) == 0) {
+            final String tableType = "SELECT COUNT(1) FROM ALL_ALL_TABLES WHERE OWNER=? AND TABLE_NAME=? AND TABLE_TYPE IS NULL";
+            if (prepareQueryAndMap(tableType,
+                    ps -> {
+                        ps.setString(1, tableId.schema());
+                        ps.setString(2, tableId.table());
+                    },
+                    rs -> rs.next() ? rs.getInt(1) : 0) == 0) {
                 throw new NonRelationalTableException("Table " + tableId + " is not a relational table");
             }
 
@@ -324,14 +331,20 @@ public class OracleConnection extends JdbcConnection {
             // In case DDL is returned as multiple DDL statements, this allows the parser to parse each separately.
             // This is only critical during streaming as during snapshot the table structure is built from JDBC driver queries.
             executeWithoutCommitting("begin dbms_metadata.set_transform_param(DBMS_METADATA.SESSION_TRANSFORM, 'SQLTERMINATOR', true); end;");
-            return queryAndMap("SELECT dbms_metadata.get_ddl('TABLE','" + tableId.table() + "','" + tableId.schema() + "') FROM DUAL", rs -> {
-                if (!rs.next()) {
-                    throw new DebeziumException("Could not get DDL metadata for table: " + tableId);
-                }
+            return prepareQueryAndMap(
+                    "SELECT dbms_metadata.get_ddl('TABLE',?,?) FROM DUAL",
+                    ps -> {
+                        ps.setString(1, tableId.table());
+                        ps.setString(2, tableId.schema());
+                    },
+                    rs -> {
+                        if (!rs.next()) {
+                            throw new DebeziumException("Could not get DDL metadata for table: " + tableId);
+                        }
 
-                Object res = rs.getObject(1);
-                return ((Clob) res).getSubString(1, (int) ((Clob) res).length());
-            });
+                        Object res = rs.getObject(1);
+                        return ((Clob) res).getSubString(1, (int) ((Clob) res).length());
+                    });
         }
         finally {
             executeWithoutCommitting("begin dbms_metadata.set_transform_param(DBMS_METADATA.SESSION_TRANSFORM, 'DEFAULT'); end;");
@@ -353,40 +366,44 @@ public class OracleConnection extends JdbcConnection {
     /**
      * Returns whether the given table exists or not.
      *
-     * @param tableName table name, should not be {@code null}
+     * @param tableId table id, should not be {@code null}
      * @return true if the table exists, false if it does not
      * @throws SQLException if a database exception occurred
      */
-    public boolean isTableExists(String tableName) throws SQLException {
-        return queryAndMap("SELECT COUNT(1) FROM USER_TABLES WHERE TABLE_NAME = '" + tableName + "'",
-                rs -> rs.next() && rs.getLong(1) > 0);
-    }
-
     public boolean isTableExists(TableId tableId) throws SQLException {
-        return queryAndMap("SELECT COUNT(1) FROM ALL_TABLES WHERE OWNER = '" + tableId.schema() + "' AND TABLE_NAME = '" + tableId.table() + "'",
+        if (Strings.isNullOrBlank(tableId.schema())) {
+            return prepareQueryAndMap("SELECT COUNT(1) FROM USER_TABLES WHERE TABLE_NAME=?",
+                    ps -> ps.setString(1, tableId.table()),
+                    rs -> rs.next() && rs.getLong(1) > 0);
+        }
+        return prepareQueryAndMap("SELECT COUNT(1) FROM ALL_TABLES WHERE OWNER=? AND TABLE_NAME=?",
+                ps -> {
+                    ps.setString(1, tableId.schema());
+                    ps.setString(2, tableId.table());
+                },
                 rs -> rs.next() && rs.getLong(1) > 0);
     }
 
     /**
      * Returns whether the given table is empty or not.
      *
-     * @param tableName table name, should not be {@code null}
+     * @param tableId table id, should not be {@code null}
      * @return true if the table has no records, false otherwise
      * @throws SQLException if a database exception occurred
      */
-    public boolean isTableEmpty(String tableName) throws SQLException {
-        return getRowCount(tableName) == 0L;
+    public boolean isTableEmpty(TableId tableId) throws SQLException {
+        return getRowCount(tableId) == 0L;
     }
 
     /**
      * Returns the number of rows in a given table.
      *
-     * @param tableName table name, should not be {@code null}
+     * @param tableId table id, should not be {@code null}
      * @return the number of rows
      * @throws SQLException if a database exception occurred
      */
-    public long getRowCount(String tableName) throws SQLException {
-        return queryAndMap("SELECT COUNT(1) FROM " + tableName, rs -> {
+    public long getRowCount(TableId tableId) throws SQLException {
+        return queryAndMap("SELECT COUNT(1) FROM " + tableId.toDoubleQuotedString(), rs -> {
             if (rs.next()) {
                 return rs.getLong(1);
             }
@@ -632,12 +649,16 @@ public class OracleConnection extends JdbcConnection {
     }
 
     @Override
-    public Map<String, Object> reselectColumns(TableId tableId, List<String> columns, List<String> keyColumns, List<Object> keyValues, Struct source)
+    public Map<String, Object> reselectColumns(Table table, List<String> columns, List<String> keyColumns, List<Object> keyValues, Struct source)
             throws SQLException {
-        final TableId oracleTableId = new TableId(null, tableId.schema(), tableId.table());
+        final TableId oracleTableId = new TableId(null, table.id().schema(), table.id().table());
         final String commitScn = source.getString(SourceInfo.COMMIT_SCN_KEY);
         if (Strings.isNullOrEmpty(commitScn)) {
-            return optionallyDoInContainer(() -> super.reselectColumns(oracleTableId, columns, keyColumns, keyValues, source));
+            final String query = String.format("SELECT %s FROM %s WHERE %s",
+                    columns.stream().map(this::quotedColumnIdString).collect(Collectors.joining(",")),
+                    quotedTableIdString(oracleTableId),
+                    keyColumns.stream().map(key -> key + "=?").collect(Collectors.joining(" AND ")));
+            return optionallyDoInContainer(() -> reselectColumns(query, oracleTableId, columns, keyValues));
         }
 
         final String query = String.format("SELECT %s FROM (SELECT * FROM %s AS OF SCN ?) WHERE %s",
@@ -654,8 +675,8 @@ public class OracleConnection extends JdbcConnection {
             catch (SQLException e) {
                 if (e.getErrorCode() == 1555 || e.getMessage().startsWith("ORA-01555")) {
                     LOGGER.warn("Failed to re-select row for table {} and key columns {} with values {}. " +
-                            "Trying to perform re-selection without flashback.", tableId, keyColumns, keyValues);
-                    return super.reselectColumns(oracleTableId, columns, keyColumns, keyValues, source);
+                            "Trying to perform re-selection without flashback.", table.id(), keyColumns, keyValues);
+                    return super.reselectColumns(table, columns, keyColumns, keyValues, source);
                 }
                 throw e;
             }
@@ -669,8 +690,8 @@ public class OracleConnection extends JdbcConnection {
             getDatabaseObjectDetails(tableId, tableType, (objectId, dataObjectId) -> {
                 LOGGER.info("\tRegistering '{}' attributes: object_id={}, data_object_id={}", tableId, objectId, dataObjectId);
                 final List<Attribute> attributes = new ArrayList<>();
-                attributes.add(Attribute.editor().name("OBJECT_ID").value(objectId).create());
-                attributes.add(Attribute.editor().name("DATA_OBJECT_ID").value(dataObjectId).create());
+                attributes.add(Attribute.editor().name(OracleDatabaseSchema.ATTRIBUTE_OBJECT_ID).value(objectId).create());
+                attributes.add(Attribute.editor().name(OracleDatabaseSchema.ATTRIBUTE_DATA_OBJECT_ID).value(dataObjectId).create());
                 results.put(tableId, attributes);
             });
             return results;
@@ -822,6 +843,33 @@ public class OracleConnection extends JdbcConnection {
         catch (SQLException e) {
             throw new DebeziumException("Failed to read the Oracle database redo thread state", e);
         }
+    }
+
+    public List<String> getSQLKeywords() {
+        try {
+            return Arrays.asList(connection().getMetaData().getSQLKeywords().split(","));
+        }
+        catch (SQLException e) {
+            LOGGER.debug("Failed to acquire SQL keywords from JDBC driver.", e);
+            return Collections.emptyList();
+        }
+    }
+
+    public boolean hasExtendedStringSupport() {
+        try {
+            final String value = Strings.defaultIfBlank(getDatabaseParameterValue("MAX_STRING_SIZE"), "STANDARD");
+            LOGGER.info("Oracle MAX_STRING_SIZE is {}", value);
+            return "EXTENDED".equals(value);
+        }
+        catch (Exception e) {
+            LOGGER.warn("Failed to check MAX_STRING_SIZE status, defaulting to STANDARD.", e);
+            return false;
+        }
+    }
+
+    public String getDatabaseParameterValue(String parameterName) throws SQLException {
+        final String query = "SELECT VALUE FROM V$PARAMETER WHERE UPPER(NAME) = UPPER(?)";
+        return prepareQueryAndMap(query, ps -> ps.setString(1, parameterName), rs -> rs.next() ? rs.getString(1) : null);
     }
 
     private static Scn readScnColumnAsScn(ResultSet rs, String columnName) throws SQLException {

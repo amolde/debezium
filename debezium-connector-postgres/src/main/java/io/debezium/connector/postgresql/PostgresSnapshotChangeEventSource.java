@@ -32,6 +32,7 @@ import io.debezium.relational.TableId;
 import io.debezium.relational.Tables;
 import io.debezium.schema.SchemaChangeEvent;
 import io.debezium.snapshot.SnapshotterService;
+import io.debezium.spi.schema.DataCollectionId;
 import io.debezium.util.Clock;
 
 public class PostgresSnapshotChangeEventSource extends RelationalSnapshotChangeEventSource<PostgresPartition, PostgresOffsetContext> {
@@ -63,8 +64,7 @@ public class PostgresSnapshotChangeEventSource extends RelationalSnapshotChangeE
         boolean snapshotSchema = true;
 
         List<String> dataCollectionsToBeSnapshotted = connectorConfig.getDataCollectionsToBeSnapshotted();
-        Map<String, String> snapshotSelectOverridesByTable = connectorConfig.getSnapshotSelectOverridesByTable().entrySet().stream()
-                .collect(Collectors.toMap(e -> e.getKey().identifier(), Map.Entry::getValue));
+        Map<DataCollectionId, String> snapshotSelectOverridesByTable = connectorConfig.getSnapshotSelectOverridesByTable();
 
         boolean offsetExists = previousOffset != null;
         boolean snapshotInProgress = false;
@@ -285,9 +285,18 @@ public class PostgresSnapshotChangeEventSource extends RelationalSnapshotChangeE
             return "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ; \n" + snapSet;
         }
 
-        // TODO should this customizable?
-
-        // we're using the same isolation level that pg_backup uses
+        final PostgresConnectorConfig.SnapshotIsolationMode isolationMode = connectorConfig.getSnapshotIsolationMode();
+        if (isolationMode == PostgresConnectorConfig.SnapshotIsolationMode.REPEATABLE_READ) {
+            return "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY;";
+        }
+        if (isolationMode == PostgresConnectorConfig.SnapshotIsolationMode.READ_COMMITTED) {
+            return "SET TRANSACTION ISOLATION LEVEL READ COMMITTED, READ ONLY;";
+        }
+        if (isolationMode == PostgresConnectorConfig.SnapshotIsolationMode.READ_UNCOMMITTED) {
+            return "SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED, READ ONLY;";
+        }
+        // DEFERRABLE only takes affect for READY ONLY and SERIALIZABLE
+        // https://www.postgresql.org/docs/current/sql-set-transaction.html
         return "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE, READ ONLY, DEFERRABLE;";
     }
 

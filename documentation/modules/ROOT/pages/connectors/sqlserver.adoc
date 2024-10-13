@@ -12,6 +12,8 @@
 :connector-class: SqlServer
 :connector-name: SQL Server
 :include-list-example: dbo.customers
+:collection-container: database.schema
+
 ifdef::community[]
 
 :toc:
@@ -134,8 +136,10 @@ You can find more information about snapshots in the following sections:
 * xref:debezium-sqlserver-incremental-snapshots[]
 endif::product[]
 
-[[default-workflow-for-performing-an-initial-snapshot]]
-.Default workflow that the {prodname} SQL Server connector uses to perform an initial snapshot
+// Type: concept
+// ModuleID: default-workflow-that-the-sqlserver-connector-uses-to-perform-an-initial-snapshot
+[[sqlserver-default-workflow-for-performing-an-initial-snapshot]]
+==== Default workflow that the {prodname} SQL Server connector uses to perform an initial snapshot
 
 The following workflow lists the steps that {prodname} takes to create a snapshot.
 These steps describe the process for a snapshot when the xref:{context}-property-snapshot-mode[`snapshot.mode`] configuration property is set to its default value, which is `initial`.
@@ -201,7 +205,7 @@ If the connector stops again for any reason, after it restarts, it resumes strea
 After the snapshot completes, the connector begins to stream event records for subsequent database changes.
 
 |`initial`
-|The connector performs a database snapshot as described in the xref:default-workflow-for-performing-an-initial-snapshot[default workflow for creating an initial snapshot].
+|The connector performs a database snapshot as described in the xref:sqlserver-default-workflow-for-performing-an-initial-snapshot[default workflow for creating an initial snapshot].
 After the snapshot completes, the connector begins to stream event records for subsequent database changes.
 
 |`initial_only`
@@ -211,7 +215,7 @@ After the snapshot completes, the connector begins to stream event records for s
 |Deprecated, see `no_data`.
 
 |`no_data`
-|The connector captures the structure of all relevant tables, performing all the steps described in the xref:default-workflow-for-performing-an-initial-snapshot[default snapshot workflow], except that it does not create `READ` events to represent the data set at the point of the connector's start-up (Step 7.b).
+|The connector captures the structure of all relevant tables, performing all the steps described in the xref:sqlserver-default-workflow-for-performing-an-initial-snapshot[default snapshot workflow], except that it does not create `READ` events to represent the data set at the point of the connector's start-up (Step 7.b).
 
 |`recovery`
 |Set this option to restore a database schema history topic that is lost or corrupted.
@@ -429,28 +433,31 @@ The {prodname} connector for SQL Server does not support schema changes while an
 ====
 
 // Type: procedure
-// ModuleID: debezium-sqlserver-triggering-an-incremental-snapshot
 [id="sqlserver-triggering-an-incremental-snapshot"]
 ==== Triggering an incremental snapshot
 
 include::{partialsdir}/modules/all-connectors/proc-triggering-an-incremental-snapshot-sql.adoc[leveloffset=+1]
 
 // Type: procedure
-// ModuleID: debezium-sqlserver-using-the-kafka-signaling-channel-to-trigger-an-incremental-snapshot
+[id="sqlserver-incremental-snapshots-additional-conditions"]
+==== Running an ad hoc incremental snapshots with `additional-conditions`
+
+include::{partialsdir}/modules/all-connectors/proc-running-an-ad-hoc-snapshot-with-additional-conditions.adoc[leveloffset=+1]
+
+
+// Type: procedure
 [id="sqlserver-triggering-an-incremental-snapshot-kafka"]
 ==== Using the Kafka signaling channel to trigger an incremental snapshot
 
 include::{partialsdir}/modules/all-connectors/proc-triggering-an-incremental-snapshot-kafka.adoc[leveloffset=+1]
 
 // Type: procedure
-// ModuleID: debezium-sqlserver-stopping-an-incremental-snapshot
 [id="sqlserver-stopping-an-incremental-snapshot"]
 ==== Stopping an incremental snapshot
 
 include::{partialsdir}/modules/all-connectors/proc-stopping-an-incremental-snapshot-sql.adoc[leveloffset=+1]
 
 // Type: procedure
-// ModuleID: debezium-sqlserver-using-the-kafka-signaling-channel-to-stop-an-incremental-snapshot
 [id="sqlserver-stopping-an-incremental-snapshot-kafka"]
 ==== Using the Kafka signaling channel to stop an incremental snapshot
 
@@ -2012,7 +2019,7 @@ GO
 ----
 <.> Specifies the name of the table that you want to capture.
 <.> Specifies a role `MyRole` to which you can add users to whom you want to grant `SELECT` permission on the captured columns of the source table.
-Users in the `sysadmin` or `db_owner` role also have access to the specified change tables. Set the value of `@role_name` to `NULL`, to allow only members in the `sysadmin` or `db_owner` to have full access to captured information.
+Users in the `sysadmin` or `db_owner` role also have access to the specified change tables. If the the value of `@role_name` is explicitly set to `NULL`, no role is used to restrict access to captured information.
 <.> Specifies the `filegroup` where SQL Server places the change table for the captured table.
 The named `filegroup` must already exist.
 It is best not to locate change tables in the same `filegroup` that you use for source tables.
@@ -2171,7 +2178,7 @@ This is the preferred method.
 
 .Additional resources
 
-* xref:descriptions-of-debezium-sqlserver-connector-configuration-properties[]
+* xref:descriptions-of-debezium-sqlserver-connector-configuration-properties[SQL Server connector configuration properties]
 
 // Type: concept
 [id="openshift-streams-sqlserver-connector-deployment"]
@@ -2511,8 +2518,13 @@ Information about the properties is organized as follows:
 * xref:sqlserver-required-connector-configuration-properties[Required connector configuration properties]
 * xref:sqlserver-advanced-connector-configuration-properties[Advanced connector configuration properties]
 * xref:debezium-sqlserver-connector-database-history-configuration-properties[Database schema history connector configuration properties] that control how {prodname} processes events that it reads from the database schema history topic.
-** xref:sqlserver-pass-through-database-history-properties-for-configuring-producer-and-consumer-clients[Pass-through database schema history properties]
-* xref:debezium-sqlserver-connector-pass-through-database-driver-configuration-properties[Pass-through database driver properties] that control the behavior of the database driver.
+
+* xref:debezium-sqlserver-connector-pass-through-properties[Pass-through SQL Server connector configuration properties]
+** xref:debezium-sqlserver-pass-through-database-history-properties-for-configuring-producer-and-consumer-clients[Pass-through database schema history properties for configuring producer and consumer clients]
+** xref:debezium-sqlserver-connector-pass-through-kafka-signals-configuration-properties[Pass-through Kafka signals configuration properties]
+** xref:debezium-sqlserver-connector-pass-through-signals-kafka-consumer-client-configuration-properties[Pass-through Kafka signals consumer client configuration properties]
+** xref:debezium-sqlserver-connector-pass-through-kafka-sink-notification-configuration-properties[Pass-through sink notification configuration properties]
+** xref:debezium-sqlserver-connector-pass-through-database-driver-configuration-properties[Pass-through database driver configuration properties]
 
 [id="sqlserver-required-connector-configuration-properties"]
 ==== Required {prodname} SQL Server connector configuration properties
@@ -2821,6 +2833,7 @@ For more information, see {link-prefix}:{link-avro-serialization}#avro-naming[Av
 
 |===
 
+// Title: Advanced {prodname} SQL Server connector configuration properties
 [id="sqlserver-advanced-connector-configuration-properties"]
 ==== Advanced SQL Server connector configuration properties
 
@@ -2865,14 +2878,14 @@ The following values are supported:
 `always`:: Perform snapshot on each connector start.
 After the snapshot completes, the connector begins to stream event records for subsequent database changes.
 
-`initial`:: The connector performs a database snapshot as described in the xref:default-workflow-for-performing-an-initial-snapshot[default workflow for creating an initial snapshot].
+`initial`:: The connector performs a database snapshot as described in the xref:sqlserver-default-workflow-for-performing-an-initial-snapshot[default workflow for creating an initial snapshot].
 After the snapshot completes, the connector begins to stream event records for subsequent database changes.
 
 `initial_only`:: The connector performs a database snapshot and stops before streaming any change event records, not allowing any subsequent change events to be captured.
 
 `schema_only`:: Deprecated, see `no_data`.
 
-`no_data`:: The connector captures the structure of all relevant tables, performing all the steps described in the xref:default-workflow-for-performing-an-initial-snapshot[default snapshot workflow], except that it does not create `READ` events to represent the data set at the point of the connector's start-up (Step 7.b).
+`no_data`:: The connector captures the structure of all relevant tables, performing all the steps described in the xref:sqlserver-default-workflow-for-performing-an-initial-snapshot[default snapshot workflow], except that it does not create `READ` events to represent the data set at the point of the connector's start-up (Step 7.b).
 
 `recovery`:: Set this option to restore a database schema history topic that is lost or corrupted.
 After a restart, the connector runs a snapshot that rebuilds the topic from the source tables.
@@ -3058,10 +3071,26 @@ This may result in more change events to be re-sent after a connector restart.
 Set this parameter to `0` to not send heartbeat messages at all. +
 Disabled by default.
 
+|[[sqlserver-property-heartbeat-action-query]]<<sqlserver-property-heartbeat-action-query, `+heartbeat.action.query+`>>
+|No default
+|Specifies a query that the connector executes on the source database when the connector sends a heartbeat message. +
+ +
+This is useful for keeping offsets from becoming stale when capturing changes from a low-traffic database. Create a heartbeat table in the low-traffic database, and set this property to a statement that inserts records into that table, for example:  +
+ +
+`INSERT INTO test_heartbeat_table (text) VALUES ('test_heartbeat')` +
+ +
+This allows the connector to receive changes from the low-traffic database and acknowledge their LSNs, which prevents offsets from become stale.
+
 |[[sqlserver-property-snapshot-delay-ms]]<<sqlserver-property-snapshot-delay-ms, `+snapshot.delay.ms+`>>
 |No default
 |An interval in milli-seconds that the connector should wait before taking a snapshot after starting up; +
 Can be used to avoid snapshot interruptions when starting multiple connectors in a cluster, which may cause re-balancing of connectors.
+
+|[[sqlserver-property-streaming-delay-ms]]<<sqlserver-property-streaming-delay-ms, `+streaming.delay.ms+`>>
+|0
+|Specifies the time, in milliseconds, that the connector delays the start of the streaming process after it completes a snapshot.
+Setting a delay interval helps to prevent the connector from restarting snapshots in the event that a failure occurs immediately after the snapshot completes, but before the streaming process begins.
+Set a delay value that is higher than the value of the {link-kafka-docs}/#connectconfigs_offset.flush.interval.ms[`offset.flush.interval.ms`] property that is set for the Kafka Connect worker.
 
 |[[sqlserver-property-snapshot-fetch-size]]<<sqlserver-property-snapshot-fetch-size, `+snapshot.fetch.size+`>>
 |`2000`
@@ -3103,7 +3132,7 @@ From a `customers.orders` table that includes the soft-delete column, `delete_fl
 
 ----
 "snapshot.select.statement.overrides": "customer.orders",
-"snapshot.select.statement.overrides.customer.orders": "SELECT * FROM [customers].[orders] WHERE delete_flag = 0 ORDER BY id DESC"
+"snapshot.select.statement.overrides.customer.orders": "SELECT * FROM customers.orders WHERE delete_flag = 0 ORDER BY id DESC"
 ----
 
 In the resulting snapshot, the connector includes only the records for which `delete_flag = 0`.
@@ -3288,18 +3317,38 @@ Set the value to `0` (zero) to remove the timeout limit.
 
 include::{partialsdir}/modules/all-connectors/ref-connector-configuration-database-history-properties.adoc[leveloffset=+1]
 
-[id="debezium-{context}-connector-kafka-signals-configuration-properties"]
-==== {prodname} connector Kafka signals configuration properties
+[id="debezium-sqlserver-connector-pass-through-properties"]
+==== Pass-through SQL Server connector configuration properties
+
+The connector supports _pass-through_ properties that enable {prodname} to specify custom configuration options for fine-tuning the behavior of the Apache Kafka producer and consumer.
+For information about the full range of configuration properties for Kafka producers and consumers, see the {link-kafka-docs}/#configuration[Kafka documentation].
+
+[id="debezium-sqlserver-pass-through-database-history-properties-for-configuring-producer-and-consumer-clients"]
+===== Pass-through properties for configuring how producer and consumer clients interact with schema history topics
+
+include::{partialsdir}/modules/all-connectors/ref-connector-pass-through-database-history-properties-for-configuring-producer-and-consumer-clients.adoc[leveloffset=+1]
+
+
+[id="debezium-sqlserver-connector-pass-through-kafka-signals-configuration-properties"]
+===== Pass-through properties for configuring how the SQL Server connector interacts with the Kafka signaling topic
 
 include::{partialsdir}/modules/all-connectors/ref-connector-pass-through-kafka-signals-configuration-properties.adoc[leveloffset=+1]
 
-[id="debezium-{context}-connector-kafka-notifications-configuration-properties"]
-==== {prodname} connector sink notifications configuration properties
 
-include::{partialsdir}/modules/all-connectors/ref-connector-pass-through-kafka-notification-configuration-properties.adoc[leveloffset=+1]
+[id="debezium-sqlserver-connector-pass-through-signals-kafka-consumer-client-configuration-properties"]
+===== Pass-through properties for configuring the Kafka consumer client for the signaling channel
+
+include::{partialsdir}/modules/all-connectors/ref-connector-pass-through-signals-kafka-consumer-client-configuration-properties.adoc[leveloffset=+1]
+
+
+[id="debezium-sqlserver-connector-pass-through-kafka-sink-notification-configuration-properties"]
+===== Pass-through properties for configuring the SQL Server connector sink notification channel
+
+include::{partialsdir}/modules/all-connectors/ref-connector-pass-through-kafka-sink-notification-configuration-properties.adoc[leveloffset=+1]
+
 
 [id="debezium-sqlserver-connector-pass-through-database-driver-configuration-properties"]
-==== {prodname} SQL Server connector pass-through database driver configuration properties
+===== {prodname} connector pass-through database driver configuration properties
 
 include::{partialsdir}/modules/all-connectors/ref-connector-pass-through-database-driver-configuration-properties.adoc[leveloffset=+1]
 
@@ -3498,7 +3547,7 @@ For information about how to expose the preceding metrics through JMX, see the {
 
 // Type: concept
 // ModuleID: monitoring-debezium-sqlserver-connectors-customized-mbean-names
-// Title: Customized names for Db2 connector snapshot and streaming MBean objects
+// Title: Customized names for SQL Server connector snapshot and streaming MBean objects
 [id="customized-mbean-names"]
 === Customized MBean names
 

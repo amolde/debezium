@@ -7,6 +7,7 @@ package io.debezium.connector.mariadb;
 
 import io.debezium.connector.binlog.BinlogConnectorConfig;
 import io.debezium.connector.binlog.BinlogDatabaseSchema;
+import io.debezium.connector.binlog.charset.BinlogCharsetRegistry;
 import io.debezium.connector.mariadb.antlr.MariaDbAntlrDdlParser;
 import io.debezium.connector.mariadb.jdbc.MariaDbDefaultValueConverter;
 import io.debezium.connector.mariadb.jdbc.MariaDbValueConverters;
@@ -40,7 +41,8 @@ public class MariaDbDatabaseSchema extends BinlogDatabaseSchema<MariaDbPartition
                 false,
                 connectorConfig.isSchemaChangesHistoryEnabled(),
                 valueConverter,
-                getTableFilter());
+                getTableFilter(),
+                connectorConfig.getServiceRegistry().getService(BinlogCharsetRegistry.class));
     }
 
 }

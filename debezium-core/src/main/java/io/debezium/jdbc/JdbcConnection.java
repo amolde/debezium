@@ -405,6 +405,15 @@ public class JdbcConnection implements AutoCloseable {
     }
 
     /**
+     * Ensure a connection to the database is established again.
+     *
+     * @throws SQLException if there is an error connecting to the database
+     */
+    public void reconnect() throws SQLException {
+        establishConnection();
+    }
+
+    /**
      * Execute a series of SQL statements as a single transaction.
      *
      * @param sqlStatements the SQL statements that are to be performed as a single transaction
@@ -891,10 +900,9 @@ public class JdbcConnection implements AutoCloseable {
 
     public synchronized Connection connection(boolean executeOnConnect) throws SQLException {
         if (!isConnected()) {
-            conn = factory.connect(JdbcConfiguration.adapt(config));
-            if (!isConnected()) {
-                throw new SQLException("Unable to obtain a JDBC connection");
-            }
+
+            establishConnection();
+
             // Always run the initial operations on this new connection
             if (initialOps != null) {
                 execute(initialOps);
@@ -906,6 +914,13 @@ public class JdbcConnection implements AutoCloseable {
             }
         }
         return conn;
+    }
+
+    private void establishConnection() throws SQLException {
+        conn = factory.connect(JdbcConfiguration.adapt(config));
+        if (!isConnected()) {
+            throw new SQLException("Unable to obtain a JDBC connection");
+        }
     }
 
     protected List<String> parseSqlStatementString(final String statements) {
@@ -1644,13 +1659,13 @@ public class JdbcConnection implements AutoCloseable {
         return tableId.schema() + "." + tableId.table();
     }
 
-    public Map<String, Object> reselectColumns(TableId tableId, List<String> columns, List<String> keyColumns, List<Object> keyValues, Struct source)
+    public Map<String, Object> reselectColumns(Table table, List<String> columns, List<String> keyColumns, List<Object> keyValues, Struct source)
             throws SQLException {
         final String query = String.format("SELECT %s FROM %s WHERE %s",
                 columns.stream().map(this::quotedColumnIdString).collect(Collectors.joining(",")),
-                quotedTableIdString(tableId),
+                quotedTableIdString(table.id()),
                 keyColumns.stream().map(key -> key + "=?").collect(Collectors.joining(" AND ")));
-        return reselectColumns(query, tableId, columns, keyValues);
+        return reselectColumns(query, table.id(), columns, keyValues);
     }
 
     protected Map<String, Object> reselectColumns(String query, TableId tableId, List<String> columns, List<Object> bindValues) throws SQLException {

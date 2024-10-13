@@ -5,6 +5,8 @@
  */
 package io.debezium.pipeline;
 
+import static io.debezium.config.CommonConnectorConfig.WatermarkStrategy.INSERT_DELETE;
+
 import java.time.Instant;
 import java.util.Collection;
 import java.util.EnumSet;
@@ -69,6 +71,7 @@ public class EventDispatcher<P extends Partition, T extends DataCollectionId> im
 
     private static final Logger LOGGER = LoggerFactory.getLogger(EventDispatcher.class);
 
+    protected final TransactionMonitor transactionMonitor;
     private final TopicNamingStrategy<T> topicNamingStrategy;
     private final DatabaseSchema<T> schema;
     private final HistorizedDatabaseSchema<T> historizedSchema;
@@ -79,7 +82,6 @@ public class EventDispatcher<P extends Partition, T extends DataCollectionId> im
     private DataChangeEventListener<P> eventListener = DataChangeEventListener.NO_OP();
     private final boolean emitTombstonesOnDelete;
     private final InconsistentSchemaHandler<P, T> inconsistentSchemaHandler;
-    private final TransactionMonitor transactionMonitor;
     private final CommonConnectorConfig connectorConfig;
     private final EnumSet<Operation> skippedOperations;
     private final boolean neverSkip;
@@ -304,7 +306,8 @@ public class EventDispatcher<P extends Partition, T extends DataCollectionId> im
                     }
 
                     private boolean isASignalEventToProcess(T dataCollectionId, Operation operation) {
-                        return operation == Operation.CREATE &&
+                        return (operation == Operation.CREATE ||
+                                (operation == Operation.DELETE && connectorConfig.getIncrementalSnapshotWatermarkingStrategy() == INSERT_DELETE)) &&
                                 connectorConfig.isSignalDataCollection(dataCollectionId);
                     }
                 });
@@ -424,6 +427,20 @@ public class EventDispatcher<P extends Partition, T extends DataCollectionId> im
                 partition.getSourcePartition(),
                 offset.getOffset(),
                 this::enqueueHeartbeat);
+    }
+
+    // Use this method when you want to dispatch the heartbeat also to incremental snapshot.
+    // Currently, this is used by PostgreSQL for read-only incremental snapshot but doesn't suites well for
+    // MySQL since the dispatchHeartbeatEvent is called at every received message and not when there is no message from the DB log.
+    public void dispatchHeartbeatEventAlsoToIncrementalSnapshot(P partition, OffsetContext offset) throws InterruptedException {
+        heartbeat.heartbeat(
+                partition.getSourcePartition(),
+                offset.getOffset(),
+                this::enqueueHeartbeat);
+
+        if (incrementalSnapshotChangeEventSource != null) {
+            incrementalSnapshotChangeEventSource.processHeartbeat(partition, offset);
+        }
     }
 
     public boolean heartbeatsEnabled() {

@@ -580,7 +580,8 @@ public abstract class BinlogConnectorIT<C extends SourceConnector, P extends Bin
         BinlogPosition positionAfterUpdate = new BinlogPosition();
         try (BinlogTestConnection db = getTestDatabaseConnection(DATABASE.getDatabaseName());) {
             try (JdbcConnection connection = db.connect()) {
-                connection.query("SHOW MASTER STATUS", positionBeforeInserts::readFromDatabase);
+                var statusStmt = db.binaryLogStatusStatement();
+                connection.query(statusStmt, positionBeforeInserts::readFromDatabase);
                 connection.execute("INSERT INTO products(id,name,description,weight,volume,alias) VALUES "
                         + "(3001,'ashley','super robot',34.56,0.00,'ashbot'), "
                         + "(3002,'arthur','motorcycle',87.65,0.00,'arcycle'), "
@@ -590,7 +591,7 @@ public abstract class BinlogConnectorIT<C extends SourceConnector, P extends Bin
                         connection.print(rs);
                     }
                 });
-                connection.query("SHOW MASTER STATUS", positionAfterInserts::readFromDatabase);
+                connection.query(statusStmt, positionAfterInserts::readFromDatabase);
                 // Change something else that is unrelated ...
                 connection.execute("UPDATE products_on_hand SET quantity=40 WHERE product_id=109");
                 connection.query("SELECT * FROM products_on_hand", rs -> {
@@ -598,7 +599,7 @@ public abstract class BinlogConnectorIT<C extends SourceConnector, P extends Bin
                         connection.print(rs);
                     }
                 });
-                connection.query("SHOW MASTER STATUS", positionAfterUpdate::readFromDatabase);
+                connection.query(statusStmt, positionAfterUpdate::readFromDatabase);
             }
         }
 
@@ -2696,6 +2697,17 @@ public abstract class BinlogConnectorIT<C extends SourceConnector, P extends Bin
         assertThat(truncateStruct.get("op")).isEqualTo("t");
         assertThat(changeEvents.size()).isEqualTo(2);
 
+        stopConnector();
+    }
+
+    @Test
+    @FixFor("DBZ-8134")
+    public void shouldAcceptLongAsServerId() throws InterruptedException {
+        Configuration config = DATABASE.defaultConfig()
+                .with(BinlogConnectorConfig.SERVER_ID, "202309181059")
+                .build();
+        start(getConnectorClass(), config);
+        waitForStreamingRunning(DATABASE.getServerName());
         stopConnector();
     }
 

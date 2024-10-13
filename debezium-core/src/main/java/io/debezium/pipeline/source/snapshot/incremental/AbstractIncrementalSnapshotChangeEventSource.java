@@ -227,6 +227,7 @@ public abstract class AbstractIncrementalSnapshotChangeEventSource<P extends Par
         }
         LOGGER.info("Incremental snapshot in progress, need to read new chunk on start");
         try {
+            preIncrementalSnapshotStart();
             progressListener.snapshotStarted(partition);
             readChunk(partition, offsetContext);
         }
@@ -303,31 +304,38 @@ public abstract class AbstractIncrementalSnapshotChangeEventSource<P extends Par
                     }
                 }
 
-                if (createDataEventsForTable(partition)) {
+                try {
+                    if (createDataEventsForTable(partition)) {
 
-                    if (!context.snapshotRunning()) { // A stop signal has been processed and window cleared.
-                        return;
-                    }
+                        if (!context.snapshotRunning()) { // A stop signal has been processed and window cleared.
+                            return;
+                        }
 
-                    if (window.isEmpty()) {
-                        LOGGER.info("No data returned by the query, incremental snapshotting of table '{}' finished",
-                                currentTableId);
+                        if (window.isEmpty()) {
+                            LOGGER.info("No data returned by the query, incremental snapshotting of table '{}' finished",
+                                    currentTableId);
 
-                        notificationService.incrementalSnapshotNotificationService().notifyTableScanCompleted(context, partition, offsetContext, totalRowsScanned,
-                                SUCCEEDED);
+                            notificationService.incrementalSnapshotNotificationService().notifyTableScanCompleted(context, partition, offsetContext, totalRowsScanned,
+                                    SUCCEEDED);
 
-                        tableScanCompleted(partition);
-                        nextDataCollection(partition, offsetContext);
+                            tableScanCompleted(partition);
+                            nextDataCollection(partition, offsetContext);
+                        }
+                        else {
+
+                            notificationService.incrementalSnapshotNotificationService().notifyInProgress(context, partition, offsetContext);
+                            break;
+                        }
                     }
                     else {
-
-                        notificationService.incrementalSnapshotNotificationService().notifyInProgress(context, partition, offsetContext);
+                        context.revertChunk();
                         break;
                     }
                 }
-                else {
-                    context.revertChunk();
-                    break;
+                catch (SQLException e) {
+                    notificationService.incrementalSnapshotNotificationService().notifyTableScanCompleted(context, partition, offsetContext, totalRowsScanned,
+                            SQL_EXCEPTION);
+                    nextDataCollection(partition, offsetContext);
                 }
             }
             emitWindowClose(partition, offsetContext);
@@ -544,7 +552,7 @@ public abstract class AbstractIncrementalSnapshotChangeEventSource<P extends Par
     /**
      * Dispatches the data change events for the records of a single table.
      */
-    private boolean createDataEventsForTable(P partition) {
+    private boolean createDataEventsForTable(P partition) throws SQLException {
         long exportStart = clock.currentTimeInMillis();
         LOGGER.debug("Exporting data chunk from table '{}' (total {} tables)", currentTable.id(), context.dataCollectionsToBeSnapshottedCount());
 
@@ -599,7 +607,8 @@ public abstract class AbstractIncrementalSnapshotChangeEventSource<P extends Par
             incrementTableRowsScanned(partition, rows);
         }
         catch (SQLException e) {
-            throw new DebeziumException("Snapshotting of table " + currentTable.id() + " failed", e);
+            LOGGER.error("Snapshotting of table {} failed. Skipping it", currentTable.id(), e);
+            throw e;
         }
         return true;
     }
@@ -673,6 +682,10 @@ public abstract class AbstractIncrementalSnapshotChangeEventSource<P extends Par
 
     protected void setContext(IncrementalSnapshotContext<T> context) {
         this.context = context;
+    }
+
+    protected void preIncrementalSnapshotStart() {
+        // no-op
     }
 
     protected void preReadChunk(IncrementalSnapshotContext<T> context) {

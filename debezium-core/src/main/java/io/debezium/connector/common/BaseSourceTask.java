@@ -14,6 +14,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.ServiceLoader;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -39,6 +40,7 @@ import io.debezium.function.LogPositionValidator;
 import io.debezium.pipeline.ChangeEventSourceCoordinator;
 import io.debezium.pipeline.notification.channels.NotificationChannel;
 import io.debezium.pipeline.signal.channels.SignalChannelReader;
+import io.debezium.pipeline.signal.channels.process.SignalChannelWriter;
 import io.debezium.pipeline.spi.OffsetContext;
 import io.debezium.pipeline.spi.Offsets;
 import io.debezium.pipeline.spi.Partition;
@@ -67,6 +69,7 @@ public abstract class BaseSourceTask<P extends Partition, O extends OffsetContex
     private static final Duration INITIAL_POLL_PERIOD_IN_MILLIS = Duration.ofMillis(TimeUnit.SECONDS.toMillis(5));
     private static final Duration MAX_POLL_PERIOD_IN_MILLIS = Duration.ofMillis(TimeUnit.HOURS.toMillis(1));
     private Configuration config;
+    private List<SignalChannelReader> signalChannels;
 
     protected void validateAndLoadSchemaHistory(CommonConnectorConfig config, LogPositionValidator logPositionValidator, Offsets<P, O> previousOffsets,
                                                 DatabaseSchema schema,
@@ -204,6 +207,13 @@ public abstract class BaseSourceTask<P extends Partition, O extends OffsetContex
 
     private final List<NotificationChannel> notificationChannels;
 
+    /**
+     * A flag to record whether the offsets stored in the offset store are loaded for the first time.
+     * This is typically used to reduce logging in case a connector like PostgreSQL reads offsets
+     * not only on connector startup but repeatedly during execution time too.
+     */
+    private boolean offsetLoadedInPast = false;
+
     protected BaseSourceTask() {
         // Use exponential delay to log the progress frequently at first, but the quickly tapering off to once an hour...
         pollOutputDelay = ElapsedTimeStrategy.exponential(clock, INITIAL_POLL_PERIOD_IN_MILLIS, MAX_POLL_PERIOD_IN_MILLIS);
@@ -252,8 +262,31 @@ public abstract class BaseSourceTask<P extends Partition, O extends OffsetContex
         }
     }
 
+    /**
+     * Returns the available signal channels.
+     * <p>
+     *     The signal channels are loaded using the {@link ServiceLoader} mechanism and cached for the lifetime of the task.
+     * </p>
+     *
+     * @return list of loaded signal channels
+     */
     public List<SignalChannelReader> getAvailableSignalChannels() {
-        return availableSignalChannels.stream().map(ServiceLoader.Provider::get).collect(Collectors.toList());
+        if (signalChannels == null) {
+            signalChannels = availableSignalChannels.stream().map(ServiceLoader.Provider::get).collect(Collectors.toList());
+        }
+        return signalChannels;
+    }
+
+    /**
+     * Returns the first available signal channel writer
+     *
+     * @return the first available signal channel writer empty optional if not available
+     */
+    public Optional<? extends SignalChannelWriter> getAvailableSignalChannelWriter() {
+        return getAvailableSignalChannels().stream()
+                .filter(SignalChannelWriter.class::isInstance)
+                .map(SignalChannelWriter.class::cast)
+                .findFirst();
     }
 
     protected Configuration withMaskedSensitiveOptions(Configuration config) {
@@ -282,7 +315,7 @@ public abstract class BaseSourceTask<P extends Partition, O extends OffsetContex
             final List<SourceRecord> records = doPoll();
             logStatistics(records);
 
-            resetErrorHandlerRetriesIfNeeded();
+            resetErrorHandlerRetriesIfNeeded(records);
 
             return records;
         }
@@ -333,12 +366,12 @@ public abstract class BaseSourceTask<P extends Partition, O extends OffsetContex
      * Should be called to reset the error handler's retry counter upon a successful poll or when known
      * that the connector task has recovered from a previous failure state.
      */
-    protected void resetErrorHandlerRetriesIfNeeded() {
+    protected void resetErrorHandlerRetriesIfNeeded(List<SourceRecord> records) {
         // When a connector throws a retriable error, the task is not re-created and instead the previous
         // error handler is passed into the new error handler, propagating the retry count. This method
-        // allows resetting that counter when a successful poll iteration step happens so that when a
+        // allows resetting that counter when a successful poll iteration step contains new records so that when a
         // future failure is thrown, the maximum retry count can be utilized.
-        if (coordinator.getErrorHandler().getRetries() > 0) {
+        if (!records.isEmpty() && coordinator != null && coordinator.getErrorHandler().getRetries() > 0) {
             coordinator.getErrorHandler().resetRetries();
         }
     }
@@ -487,7 +520,13 @@ public abstract class BaseSourceTask<P extends Partition, O extends OffsetContex
 
             if (offset != null) {
                 found = true;
-                LOGGER.info("Found previous partition offset {}: {}", partition, offset.getOffset());
+                if (offsetLoadedInPast) {
+                    LOGGER.debug("Found previous partition offset {}: {}", partition, offset.getOffset());
+                }
+                else {
+                    LOGGER.info("Found previous partition offset {}: {}", partition, offset.getOffset());
+                    offsetLoadedInPast = true;
+                }
             }
         }
 
@@ -529,5 +568,4 @@ public abstract class BaseSourceTask<P extends Partition, O extends OffsetContex
         serviceRegistry.registerServiceProvider(new SnapshotQueryProvider());
         serviceRegistry.registerServiceProvider(new SnapshotterServiceProvider());
     }
-
 }

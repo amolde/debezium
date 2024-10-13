@@ -16,6 +16,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -339,7 +340,7 @@ public abstract class AbstractIncrementalSnapshotTest<T extends SourceConnector>
         startAndConsumeTillEnd(connectorClass(), config);
         waitForConnectorToStart();
 
-        waitForAvailableRecords(1, TimeUnit.SECONDS);
+        waitForAvailableRecords(waitTimeForRecords(), TimeUnit.SECONDS);
         // there shouldn't be any snapshot records
         assertNoRecordsToConsume();
 
@@ -409,7 +410,7 @@ public abstract class AbstractIncrementalSnapshotTest<T extends SourceConnector>
         startAndConsumeTillEnd(connectorClass(), config);
         waitForConnectorToStart();
 
-        waitForAvailableRecords(1, TimeUnit.SECONDS);
+        waitForAvailableRecords(waitTimeForRecords(), TimeUnit.SECONDS);
         // there shouldn't be any snapshot records
         assertNoRecordsToConsume();
 
@@ -446,7 +447,7 @@ public abstract class AbstractIncrementalSnapshotTest<T extends SourceConnector>
         startAndConsumeTillEnd(connectorClass(), config);
         waitForConnectorToStart();
 
-        waitForAvailableRecords(1, TimeUnit.SECONDS);
+        waitForAvailableRecords(waitTimeForRecords(), TimeUnit.SECONDS);
         // there shouldn't be any snapshot records
         assertNoRecordsToConsume();
 
@@ -553,6 +554,21 @@ public abstract class AbstractIncrementalSnapshotTest<T extends SourceConnector>
     }
 
     @Test
+    public void snapshotWithRegexDataCollectionsNotExist() throws Exception {
+
+        LogInterceptor interceptor = new LogInterceptor(AbstractIncrementalSnapshotChangeEventSource.class);
+
+        populateTable();
+        startConnector();
+        sendAdHocSnapshotSignal(".*notExist");
+
+        // Wait until the stop has been processed, verifying it was removed from the snapshot.
+        Awaitility.await().atMost(60, TimeUnit.SECONDS)
+                .until(() -> interceptor.containsMessage("Skipping read chunk because snapshot is not running"));
+
+    }
+
+    @Test
     @FixFor("DBZ-6945")
     public void snapshotWithDuplicateDataCollections() throws Exception {
         populateTable();
@@ -582,7 +598,7 @@ public abstract class AbstractIncrementalSnapshotTest<T extends SourceConnector>
         // we are still within the incremental snapshot rather than it being performed with one
         // round trip to the database
         populateTable();
-        startConnector(x -> x.with(CommonConnectorConfig.INCREMENTAL_SNAPSHOT_CHUNK_SIZE, 1));
+        startConnector(additionalConfiguration());
 
         // Send ad-hoc start incremental snapshot signal and wait for incremental snapshots to start
         sendAdHocSnapshotSignalAndWait();
@@ -625,6 +641,10 @@ public abstract class AbstractIncrementalSnapshotTest<T extends SourceConnector>
         }
     }
 
+    protected Function<Configuration.Builder, Configuration.Builder> additionalConfiguration() {
+        return x -> x.with(CommonConnectorConfig.INCREMENTAL_SNAPSHOT_CHUNK_SIZE, 1);
+    }
+
     @Test
     @FixFor("DBZ-4271")
     public void stopCurrentIncrementalSnapshotWithAllCollectionsAndTakeNewNewIncrementalSnapshotAfterRestart() throws Exception {
@@ -637,7 +657,7 @@ public abstract class AbstractIncrementalSnapshotTest<T extends SourceConnector>
         // we are still within the incremental snapshot rather than it being performed with one
         // round trip to the database
         populateTable();
-        startConnector(x -> x.with(CommonConnectorConfig.INCREMENTAL_SNAPSHOT_CHUNK_SIZE, 1));
+        startConnector(additionalConfiguration());
 
         // Send ad-hoc start incremental snapshot signal and wait for incremental snapshots to start
         sendAdHocSnapshotSignalAndWait();
@@ -818,7 +838,7 @@ public abstract class AbstractIncrementalSnapshotTest<T extends SourceConnector>
         startConnector(x -> x.with(CommonConnectorConfig.INCREMENTAL_SNAPSHOT_CHUNK_SIZE, 50));
         waitForConnectorToStart();
 
-        waitForAvailableRecords(1, TimeUnit.SECONDS);
+        waitForAvailableRecords(waitTimeForRecords(), TimeUnit.SECONDS);
         // there shouldn't be any snapshot records
         assertNoRecordsToConsume();
 
@@ -864,11 +884,11 @@ public abstract class AbstractIncrementalSnapshotTest<T extends SourceConnector>
         startAndConsumeTillEnd(connectorClass(), config);
         waitForConnectorToStart();
 
-        waitForAvailableRecords(1, TimeUnit.SECONDS);
+        waitForAvailableRecords(waitTimeForRecords(), TimeUnit.SECONDS);
         // there shouldn't be any snapshot records
         assertNoRecordsToConsume();
 
-        sendAdHocSnapshotSignalWithAdditionalConditionWithSurrogateKey(String.format("\"aa = %s\"", expectedValue), "",
+        sendAdHocSnapshotSignalWithAdditionalConditionsWithSurrogateKey(Map.of(tableDataCollectionId(), String.format("aa = %s", expectedValue)), "",
                 tableDataCollectionId());
 
         final Map<Integer, SourceRecord> dbChanges = consumeRecordsMixedWithIncrementalSnapshot(expectedCount,
@@ -890,7 +910,7 @@ public abstract class AbstractIncrementalSnapshotTest<T extends SourceConnector>
         startAndConsumeTillEnd(connectorClass(), config);
         waitForConnectorToStart();
 
-        waitForAvailableRecords(1, TimeUnit.SECONDS);
+        waitForAvailableRecords(waitTimeForRecords(), TimeUnit.SECONDS);
         // there shouldn't be any snapshot records
         assertNoRecordsToConsume();
 
@@ -913,7 +933,7 @@ public abstract class AbstractIncrementalSnapshotTest<T extends SourceConnector>
 
         final int recordsCount = ROW_COUNT;
 
-        sendAdHocSnapshotSignalWithAdditionalConditionWithSurrogateKey("\"\"", "", tableDataCollectionId());
+        sendAdHocSnapshotSignalWithAdditionalConditionsWithSurrogateKey(Map.of(), "", tableDataCollectionId());
 
         final Map<Integer, SourceRecord> dbChanges = consumeRecordsMixedWithIncrementalSnapshot(recordsCount,
                 x -> true, null);
@@ -932,11 +952,12 @@ public abstract class AbstractIncrementalSnapshotTest<T extends SourceConnector>
         startAndConsumeTillEnd(connectorClass(), config);
         waitForConnectorToStart();
 
-        waitForAvailableRecords(1, TimeUnit.SECONDS);
+        waitForAvailableRecords(waitTimeForRecords(), TimeUnit.SECONDS);
         // there shouldn't be any snapshot records
         assertNoRecordsToConsume();
 
-        sendAdHocSnapshotSignalWithAdditionalConditionWithSurrogateKey(String.format("\"aa = %s\"", expectedValue), "", tableDataCollectionId());
+        sendAdHocSnapshotSignalWithAdditionalConditionsWithSurrogateKey(Map.of(tableDataCollectionId(), String.format("aa = %s", expectedValue)), "",
+                tableDataCollectionId());
 
         final AtomicInteger recordCounter = new AtomicInteger();
         final AtomicBoolean restarted = new AtomicBoolean();
@@ -983,11 +1004,12 @@ public abstract class AbstractIncrementalSnapshotTest<T extends SourceConnector>
         startAndConsumeTillEnd(connectorClass(), config);
         waitForConnectorToStart();
 
-        waitForAvailableRecords(1, TimeUnit.SECONDS);
+        waitForAvailableRecords(waitTimeForRecords(), TimeUnit.SECONDS);
         // there shouldn't be any snapshot records
         assertNoRecordsToConsume();
 
-        sendAdHocSnapshotSignalWithAdditionalConditionWithSurrogateKey(String.format("\"aa = %s\"", expectedValue), "\"aa\"", tableDataCollectionId());
+        sendAdHocSnapshotSignalWithAdditionalConditionsWithSurrogateKey(Map.of(tableDataCollectionId(), String.format("aa = %s", expectedValue)), "\"aa\"",
+                tableDataCollectionId());
 
         final Map<Integer, SourceRecord> dbChanges = consumeRecordsMixedWithIncrementalSnapshot(expectedCount,
                 x -> true, null);
@@ -1007,7 +1029,7 @@ public abstract class AbstractIncrementalSnapshotTest<T extends SourceConnector>
 
         waitForConnectorToStart();
 
-        waitForAvailableRecords(1, TimeUnit.SECONDS);
+        waitForAvailableRecords(waitTimeForRecords(), TimeUnit.SECONDS);
 
         waitForStreamingRunning(connector(), server(), getStreamingNamespace(), task());
 
@@ -1176,7 +1198,11 @@ public abstract class AbstractIncrementalSnapshotTest<T extends SourceConnector>
             sendAdHocSnapshotSignal(collectionIds);
         }
 
-        Awaitility.await().atMost(60, TimeUnit.SECONDS).until(() -> {
+        Awaitility.await().atMost(60, TimeUnit.SECONDS).until(executeSignalWaiter());
+    }
+
+    protected Callable<Boolean> executeSignalWaiter() {
+        return () -> {
             final AtomicBoolean result = new AtomicBoolean(false);
             consumeAvailableRecords(r -> {
                 if (r.topic().endsWith(signalTableNameSanitized())) {
@@ -1184,14 +1210,18 @@ public abstract class AbstractIncrementalSnapshotTest<T extends SourceConnector>
                 }
             });
             return result.get();
-        });
+        };
     }
 
     protected void sendAdHocSnapshotStopSignalAndWait(String... collectionIds) throws Exception {
         sendAdHocSnapshotStopSignal(collectionIds);
 
         // Wait for stop signal received and at least one incremental snapshot record
-        Awaitility.await().atMost(60, TimeUnit.SECONDS).until(() -> {
+        Awaitility.await().atMost(60, TimeUnit.SECONDS).until(stopSignalWaiter());
+    }
+
+    protected Callable<Boolean> stopSignalWaiter() {
+        return () -> {
             final AtomicBoolean stopSignal = new AtomicBoolean(false);
             consumeAvailableRecords(r -> {
                 if (r.topic().endsWith(signalTableNameSanitized())) {
@@ -1205,7 +1235,7 @@ public abstract class AbstractIncrementalSnapshotTest<T extends SourceConnector>
                 }
             });
             return stopSignal.get();
-        });
+        };
     }
 
     protected boolean consumeAnyRemainingIncrementalSnapshotEventsAndCheckForStopMessage(LogInterceptor interceptor, String stopMessage) throws Exception {

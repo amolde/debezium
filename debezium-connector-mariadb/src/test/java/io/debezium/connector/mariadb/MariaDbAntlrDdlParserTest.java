@@ -9,11 +9,14 @@ import java.util.List;
 
 import io.debezium.config.CommonConnectorConfig;
 import io.debezium.connector.binlog.BinlogAntlrDdlParserTest;
+import io.debezium.connector.binlog.BinlogConnectorConfig;
 import io.debezium.connector.mariadb.antlr.MariaDbAntlrDdlParser;
+import io.debezium.connector.mariadb.charset.MariaDbCharsetRegistry;
 import io.debezium.connector.mariadb.jdbc.MariaDbDefaultValueConverter;
 import io.debezium.connector.mariadb.jdbc.MariaDbValueConverters;
-import io.debezium.jdbc.JdbcValueConverters;
+import io.debezium.connector.mariadb.util.MariaDbValueConvertersFactory;
 import io.debezium.jdbc.TemporalPrecisionMode;
+import io.debezium.relational.RelationalDatabaseConnectorConfig;
 import io.debezium.relational.Tables;
 import io.debezium.relational.ddl.DdlChanges;
 import io.debezium.relational.ddl.SimpleDdlParserListener;
@@ -44,12 +47,11 @@ public class MariaDbAntlrDdlParserTest extends BinlogAntlrDdlParserTest<MariaDbV
 
     @Override
     protected MariaDbValueConverters getValueConverters() {
-        return new MariaDbValueConverters(
-                JdbcValueConverters.DecimalMode.DOUBLE,
+        return new MariaDbValueConvertersFactory().create(
+                RelationalDatabaseConnectorConfig.DecimalHandlingMode.DOUBLE,
                 TemporalPrecisionMode.ADAPTIVE_TIME_MICROSECONDS,
-                JdbcValueConverters.BigIntUnsignedMode.PRECISE,
+                BinlogConnectorConfig.BigIntUnsignedHandlingMode.PRECISE,
                 CommonConnectorConfig.BinaryHandlingMode.BYTES,
-                x -> x,
                 CommonConnectorConfig.EventConvertingFailureHandlingMode.WARN);
     }
 
@@ -82,7 +84,7 @@ public class MariaDbAntlrDdlParserTest extends BinlogAntlrDdlParserTest<MariaDbV
 
         public MariaDbDdlParserWithSimpleTestListener(DdlChanges listener, boolean includeViews, boolean includeComments, Tables.TableFilter tableFilter,
                                                       MariaDbValueConverters converters) {
-            super(false, includeViews, includeComments, converters, tableFilter);
+            super(false, includeViews, includeComments, converters, tableFilter, new MariaDbCharsetRegistry());
             this.ddlChanges = listener;
         }
     }
